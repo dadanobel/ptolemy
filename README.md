@@ -1,2 +1,2 @@
 # ptolemy
-Ptolemy - Running PowerPC Mac OS X Natively on Apple Silicon
+Ptolemy - Running PowerPC Mac OS X (almost) Natively on Apple Silicon
