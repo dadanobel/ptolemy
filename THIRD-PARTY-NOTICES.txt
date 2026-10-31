@@ -1,0 +1,21 @@
+Third-party notices for Ptolemy
+
+=== OpenBIOS (Ptolemy's fork: firmware/openbios) ===
+OpenBIOS, a free implementation of IEEE 1275-1994 Open Firmware.
+OpenBIOS was developed by Stefan Reinauer, Samuel Rydh and Patrick Mauritz,
+with contributions from the OpenBIOS project. License: GNU GPL version 2
+(firmware/openbios/COPYING). Source: https://github.com/openbios/openbios,
+upstream commit e5ac46dd24e6216c36aa80462af25457e7029440, plus Ptolemy's
+changes listed in firmware/README.md. The ROM is built from that source;
+Ptolemy is not affiliated with the OpenBIOS project.
+
+=== CoreMark (tests/epicycle/coremark) ===
+CoreMark is a benchmark by EEMBC, used here only by the CPU engine's tests.
+License: tests/epicycle/coremark/LICENSE.md.
+
+=== Test tools (not included) ===
+The instruction tests (tests/epicycle/lab.py, tests/altivec-compare.py) use
+Unicorn and Capstone as external Python packages; they are not distributed
+or linked. G4 opcode metadata in the tests was cross-checked against
+Motorola/Freescale/NXP ALTIVECPEM Rev. 3 and MPC7450UM Rev. 5 instruction
+tables; it contains instruction names and encodings, not the manuals' text.

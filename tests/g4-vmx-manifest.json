@@ -1,0 +1,654 @@
+{
+  "source": "https://www.nxp.com/docs/en/reference-manual/ALTIVECPEM.pdf#page=291",
+  "table": "A-1, Rev.3, 2006",
+  "instructions": {
+    "dss": {
+      "major": 31,
+      "xo": 822
+    },
+    "dssall": {
+      "major": 31,
+      "xo": 822
+    },
+    "dst": {
+      "major": 31,
+      "xo": 342
+    },
+    "dstst": {
+      "major": 31,
+      "xo": 374
+    },
+    "dststt": {
+      "major": 31,
+      "xo": 374
+    },
+    "dstt": {
+      "major": 31,
+      "xo": 342
+    },
+    "lvebx": {
+      "major": 31,
+      "xo": 7
+    },
+    "lvehx": {
+      "major": 31,
+      "xo": 39
+    },
+    "lvewx": {
+      "major": 31,
+      "xo": 71
+    },
+    "lvsl": {
+      "major": 31,
+      "xo": 6
+    },
+    "lvsr": {
+      "major": 31,
+      "xo": 38
+    },
+    "lvx": {
+      "major": 31,
+      "xo": 103
+    },
+    "lvxl": {
+      "major": 31,
+      "xo": 359
+    },
+    "mfvscr": {
+      "major": 4,
+      "xo": 1540
+    },
+    "mtvscr": {
+      "major": 4,
+      "xo": 1604
+    },
+    "stvebx": {
+      "major": 31,
+      "xo": 135
+    },
+    "stvehx": {
+      "major": 31,
+      "xo": 167
+    },
+    "stvewx": {
+      "major": 31,
+      "xo": 199
+    },
+    "stvx": {
+      "major": 31,
+      "xo": 231
+    },
+    "stvxl": {
+      "major": 31,
+      "xo": 487
+    },
+    "vaddcuw": {
+      "major": 4,
+      "xo": 384
+    },
+    "vaddfp": {
+      "major": 4,
+      "xo": 10
+    },
+    "vaddsbs": {
+      "major": 4,
+      "xo": 768
+    },
+    "vaddshs": {
+      "major": 4,
+      "xo": 832
+    },
+    "vaddsws": {
+      "major": 4,
+      "xo": 896
+    },
+    "vaddubm": {
+      "major": 4,
+      "xo": 0
+    },
+    "vaddubs": {
+      "major": 4,
+      "xo": 512
+    },
+    "vadduhm": {
+      "major": 4,
+      "xo": 64
+    },
+    "vadduhs": {
+      "major": 4,
+      "xo": 576
+    },
+    "vadduwm": {
+      "major": 4,
+      "xo": 128
+    },
+    "vadduws": {
+      "major": 4,
+      "xo": 640
+    },
+    "vand": {
+      "major": 4,
+      "xo": 1028
+    },
+    "vandc": {
+      "major": 4,
+      "xo": 1092
+    },
+    "vavgsb": {
+      "major": 4,
+      "xo": 1282
+    },
+    "vavgsh": {
+      "major": 4,
+      "xo": 1346
+    },
+    "vavgsw": {
+      "major": 4,
+      "xo": 1410
+    },
+    "vavgub": {
+      "major": 4,
+      "xo": 1026
+    },
+    "vavguh": {
+      "major": 4,
+      "xo": 1090
+    },
+    "vavguw": {
+      "major": 4,
+      "xo": 1154
+    },
+    "vcfsx": {
+      "major": 4,
+      "xo": 842
+    },
+    "vcfux": {
+      "major": 4,
+      "xo": 778
+    },
+    "vcmpbfp": {
+      "major": 4,
+      "xo": 966
+    },
+    "vcmpeqfp": {
+      "major": 4,
+      "xo": 198
+    },
+    "vcmpequb": {
+      "major": 4,
+      "xo": 6
+    },
+    "vcmpequh": {
+      "major": 4,
+      "xo": 70
+    },
+    "vcmpequw": {
+      "major": 4,
+      "xo": 134
+    },
+    "vcmpgefp": {
+      "major": 4,
+      "xo": 454
+    },
+    "vcmpgtfp": {
+      "major": 4,
+      "xo": 710
+    },
+    "vcmpgtsb": {
+      "major": 4,
+      "xo": 774
+    },
+    "vcmpgtsh": {
+      "major": 4,
+      "xo": 838
+    },
+    "vcmpgtsw": {
+      "major": 4,
+      "xo": 902
+    },
+    "vcmpgtub": {
+      "major": 4,
+      "xo": 518
+    },
+    "vcmpgtuh": {
+      "major": 4,
+      "xo": 582
+    },
+    "vcmpgtuw": {
+      "major": 4,
+      "xo": 646
+    },
+    "vctsxs": {
+      "major": 4,
+      "xo": 970
+    },
+    "vctuxs": {
+      "major": 4,
+      "xo": 906
+    },
+    "vexptefp": {
+      "major": 4,
+      "xo": 394
+    },
+    "vlogefp": {
+      "major": 4,
+      "xo": 458
+    },
+    "vmaddfp": {
+      "major": 4,
+      "xo": 46
+    },
+    "vmaxfp": {
+      "major": 4,
+      "xo": 1034
+    },
+    "vmaxsb": {
+      "major": 4,
+      "xo": 258
+    },
+    "vmaxsh": {
+      "major": 4,
+      "xo": 322
+    },
+    "vmaxsw": {
+      "major": 4,
+      "xo": 386
+    },
+    "vmaxub": {
+      "major": 4,
+      "xo": 2
+    },
+    "vmaxuh": {
+      "major": 4,
+      "xo": 66
+    },
+    "vmaxuw": {
+      "major": 4,
+      "xo": 130
+    },
+    "vmhaddshs": {
+      "major": 4,
+      "xo": 32
+    },
+    "vmhraddshs": {
+      "major": 4,
+      "xo": 33
+    },
+    "vminfp": {
+      "major": 4,
+      "xo": 1098
+    },
+    "vminsb": {
+      "major": 4,
+      "xo": 770
+    },
+    "vminsh": {
+      "major": 4,
+      "xo": 834
+    },
+    "vminsw": {
+      "major": 4,
+      "xo": 898
+    },
+    "vminub": {
+      "major": 4,
+      "xo": 514
+    },
+    "vminuh": {
+      "major": 4,
+      "xo": 578
+    },
+    "vminuw": {
+      "major": 4,
+      "xo": 642
+    },
+    "vmladduhm": {
+      "major": 4,
+      "xo": 34
+    },
+    "vmrghb": {
+      "major": 4,
+      "xo": 12
+    },
+    "vmrghh": {
+      "major": 4,
+      "xo": 76
+    },
+    "vmrghw": {
+      "major": 4,
+      "xo": 140
+    },
+    "vmrglb": {
+      "major": 4,
+      "xo": 268
+    },
+    "vmrglh": {
+      "major": 4,
+      "xo": 332
+    },
+    "vmrglw": {
+      "major": 4,
+      "xo": 396
+    },
+    "vmsummbm": {
+      "major": 4,
+      "xo": 37
+    },
+    "vmsumshm": {
+      "major": 4,
+      "xo": 40
+    },
+    "vmsumshs": {
+      "major": 4,
+      "xo": 41
+    },
+    "vmsumubm": {
+      "major": 4,
+      "xo": 36
+    },
+    "vmsumuhm": {
+      "major": 4,
+      "xo": 38
+    },
+    "vmsumuhs": {
+      "major": 4,
+      "xo": 39
+    },
+    "vmulesb": {
+      "major": 4,
+      "xo": 776
+    },
+    "vmulesh": {
+      "major": 4,
+      "xo": 840
+    },
+    "vmuleub": {
+      "major": 4,
+      "xo": 520
+    },
+    "vmuleuh": {
+      "major": 4,
+      "xo": 584
+    },
+    "vmulosb": {
+      "major": 4,
+      "xo": 264
+    },
+    "vmulosh": {
+      "major": 4,
+      "xo": 328
+    },
+    "vmuloub": {
+      "major": 4,
+      "xo": 8
+    },
+    "vmulouh": {
+      "major": 4,
+      "xo": 72
+    },
+    "vnmsubfp": {
+      "major": 4,
+      "xo": 47
+    },
+    "vnor": {
+      "major": 4,
+      "xo": 1284
+    },
+    "vor": {
+      "major": 4,
+      "xo": 1156
+    },
+    "vperm": {
+      "major": 4,
+      "xo": 43
+    },
+    "vpkpx": {
+      "major": 4,
+      "xo": 782
+    },
+    "vpkshss": {
+      "major": 4,
+      "xo": 398
+    },
+    "vpkshus": {
+      "major": 4,
+      "xo": 270
+    },
+    "vpkswss": {
+      "major": 4,
+      "xo": 462
+    },
+    "vpkswus": {
+      "major": 4,
+      "xo": 334
+    },
+    "vpkuhum": {
+      "major": 4,
+      "xo": 14
+    },
+    "vpkuhus": {
+      "major": 4,
+      "xo": 142
+    },
+    "vpkuwum": {
+      "major": 4,
+      "xo": 78
+    },
+    "vpkuwus": {
+      "major": 4,
+      "xo": 206
+    },
+    "vrefp": {
+      "major": 4,
+      "xo": 266
+    },
+    "vrfim": {
+      "major": 4,
+      "xo": 714
+    },
+    "vrfin": {
+      "major": 4,
+      "xo": 522
+    },
+    "vrfip": {
+      "major": 4,
+      "xo": 650
+    },
+    "vrfiz": {
+      "major": 4,
+      "xo": 586
+    },
+    "vrlb": {
+      "major": 4,
+      "xo": 4
+    },
+    "vrlh": {
+      "major": 4,
+      "xo": 68
+    },
+    "vrlw": {
+      "major": 4,
+      "xo": 132
+    },
+    "vrsqrtefp": {
+      "major": 4,
+      "xo": 330
+    },
+    "vsel": {
+      "major": 4,
+      "xo": 42
+    },
+    "vsl": {
+      "major": 4,
+      "xo": 452
+    },
+    "vslb": {
+      "major": 4,
+      "xo": 260
+    },
+    "vsldoi": {
+      "major": 4,
+      "xo": 44
+    },
+    "vslh": {
+      "major": 4,
+      "xo": 324
+    },
+    "vslo": {
+      "major": 4,
+      "xo": 1036
+    },
+    "vslw": {
+      "major": 4,
+      "xo": 388
+    },
+    "vspltb": {
+      "major": 4,
+      "xo": 524
+    },
+    "vsplth": {
+      "major": 4,
+      "xo": 588
+    },
+    "vspltisb": {
+      "major": 4,
+      "xo": 780
+    },
+    "vspltish": {
+      "major": 4,
+      "xo": 844
+    },
+    "vspltisw": {
+      "major": 4,
+      "xo": 908
+    },
+    "vspltw": {
+      "major": 4,
+      "xo": 652
+    },
+    "vsr": {
+      "major": 4,
+      "xo": 708
+    },
+    "vsrab": {
+      "major": 4,
+      "xo": 772
+    },
+    "vsrah": {
+      "major": 4,
+      "xo": 836
+    },
+    "vsraw": {
+      "major": 4,
+      "xo": 900
+    },
+    "vsrb": {
+      "major": 4,
+      "xo": 516
+    },
+    "vsrh": {
+      "major": 4,
+      "xo": 580
+    },
+    "vsro": {
+      "major": 4,
+      "xo": 1100
+    },
+    "vsrw": {
+      "major": 4,
+      "xo": 644
+    },
+    "vsubcuw": {
+      "major": 4,
+      "xo": 1408
+    },
+    "vsubfp": {
+      "major": 4,
+      "xo": 74
+    },
+    "vsubsbs": {
+      "major": 4,
+      "xo": 1792
+    },
+    "vsubshs": {
+      "major": 4,
+      "xo": 1856
+    },
+    "vsubsws": {
+      "major": 4,
+      "xo": 1920
+    },
+    "vsububm": {
+      "major": 4,
+      "xo": 1024
+    },
+    "vsububs": {
+      "major": 4,
+      "xo": 1536
+    },
+    "vsubuhm": {
+      "major": 4,
+      "xo": 1088
+    },
+    "vsubuhs": {
+      "major": 4,
+      "xo": 1600
+    },
+    "vsubuwm": {
+      "major": 4,
+      "xo": 1152
+    },
+    "vsubuws": {
+      "major": 4,
+      "xo": 1664
+    },
+    "vsumsws": {
+      "major": 4,
+      "xo": 1928
+    },
+    "vsum2sws": {
+      "major": 4,
+      "xo": 1672
+    },
+    "vsum4sbs": {
+      "major": 4,
+      "xo": 1800
+    },
+    "vsum4shs": {
+      "major": 4,
+      "xo": 1608
+    },
+    "vsum4ubs": {
+      "major": 4,
+      "xo": 1544
+    },
+    "vupkhpx": {
+      "major": 4,
+      "xo": 846
+    },
+    "vupkhsb": {
+      "major": 4,
+      "xo": 526
+    },
+    "vupkhsh": {
+      "major": 4,
+      "xo": 590
+    },
+    "vupklpx": {
+      "major": 4,
+      "xo": 974
+    },
+    "vupklsb": {
+      "major": 4,
+      "xo": 654
+    },
+    "vupklsh": {
+      "major": 4,
+      "xo": 718
+    },
+    "vxor": {
+      "major": 4,
+      "xo": 1220
+    }
+  }
+}

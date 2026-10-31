@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Apple GCC runs inside Tiger; this wrapper does not install anything.
+set -eu
+case "$(uname -s):$(uname -m)" in
+    Darwin:ppc|Darwin:Power*) ;;
+    *) echo 'Use this compiler INSIDE Tiger PPC, not on the Apple Silicon host.' >&2; exit 2;;
+esac
+root=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+sdk="$root/Developer/SDKs/MacOSX10.4.0.sdk"
+lib="$root/usr/lib/gcc/powerpc-apple-darwin8/4.0.0"
+execs="$root/usr/libexec/gcc/powerpc-apple-darwin8/4.0.0"
+# collect2 also searches PATH for ld; never fall through to another Xcode.
+PATH="$root/bin:/usr/bin:/bin"; export PATH
+GCC_EXEC_PREFIX="$root/usr/libexec/gcc/"; export GCC_EXEC_PREFIX
+# GCC 4.0.0 (Apple build 4061, Xcode 2.0) has no -mmacosx-version-min; set the 10.4 target via the environment.
+MACOSX_DEPLOYMENT_TARGET=10.4; export MACOSX_DEPLOYMENT_TARGET
+# GCC's Darwin specs encode a comma-separated linker option here.
+case "$sdk" in *,*) echo 'Toolchain path must not contain a comma.' >&2;exit 2;; esac
+exec "$root/usr/bin/powerpc-apple-darwin8-gcc-4.0.0" \
+    -B"$execs/" -B"$root/bin/" -B"$lib/" \
+    -mcpu=750 -isysroot "$sdk" \
+    -isystem "$lib/include" \
+    -isystem "$root/usr/include/gcc/darwin/4.0" \
+    -L"$lib" -L"$sdk/usr/lib" -F"$sdk/System/Library/Frameworks" \
+    -Wl,-syslibroot,"$sdk" "$@"

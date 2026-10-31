@@ -1,0 +1,2148 @@
+{
+  "source": "https://www.nxp.com/docs/en/reference-manual/MPC7450UM.pdf#page=721",
+  "table": "A-1; illegal optional instructions retained as negative cases",
+  "cases": [
+    {
+      "name": "addx",
+      "instruction": "7c642a14",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addx",
+      "instruction": "7c642e14",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addx",
+      "instruction": "7c642a15",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addx",
+      "instruction": "7c642e15",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addcx",
+      "instruction": "7c642814",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addcx",
+      "instruction": "7c642c14",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addcx",
+      "instruction": "7c642815",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addcx",
+      "instruction": "7c642c15",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addex",
+      "instruction": "7c642914",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addex",
+      "instruction": "7c642d14",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addex",
+      "instruction": "7c642915",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addex",
+      "instruction": "7c642d15",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addi",
+      "instruction": "38640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "addic",
+      "instruction": "30640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "addic.",
+      "instruction": "34640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "addis",
+      "instruction": "3c640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "addmex",
+      "instruction": "7c6401d4",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addmex",
+      "instruction": "7c6405d4",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addmex",
+      "instruction": "7c6401d5",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addmex",
+      "instruction": "7c6405d5",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addzex",
+      "instruction": "7c640194",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addzex",
+      "instruction": "7c640594",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "addzex",
+      "instruction": "7c640195",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "addzex",
+      "instruction": "7c640595",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "andx",
+      "instruction": "7c642838",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "andx",
+      "instruction": "7c642839",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "andcx",
+      "instruction": "7c642878",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "andcx",
+      "instruction": "7c642879",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "andi.",
+      "instruction": "70640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "andis.",
+      "instruction": "74640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "bx",
+      "instruction": "48000000",
+      "controls": {
+        "AA": 0,
+        "LK": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "bx",
+      "instruction": "48000001",
+      "controls": {
+        "AA": 0,
+        "LK": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "bx",
+      "instruction": "48000002",
+      "controls": {
+        "AA": 1,
+        "LK": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "bx",
+      "instruction": "48000003",
+      "controls": {
+        "AA": 1,
+        "LK": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "bcx",
+      "instruction": "42800000",
+      "controls": {
+        "AA": 0,
+        "LK": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "bcx",
+      "instruction": "42800001",
+      "controls": {
+        "AA": 0,
+        "LK": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "bcx",
+      "instruction": "42800002",
+      "controls": {
+        "AA": 1,
+        "LK": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "bcx",
+      "instruction": "42800003",
+      "controls": {
+        "AA": 1,
+        "LK": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "bcctrx",
+      "instruction": "4e800420",
+      "controls": {
+        "LK": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "bcctrx",
+      "instruction": "4e800421",
+      "controls": {
+        "LK": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "bclrx",
+      "instruction": "4e800020",
+      "controls": {
+        "LK": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "bclrx",
+      "instruction": "4e800021",
+      "controls": {
+        "LK": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "cmp",
+      "instruction": "7c842800",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "cmpi",
+      "instruction": "2c840000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "cmpl",
+      "instruction": "7c842840",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "cmpli",
+      "instruction": "28840000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "cntlzwx",
+      "instruction": "7c640034",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "cntlzwx",
+      "instruction": "7c640035",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "crand",
+      "instruction": "4c853202",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "crandc",
+      "instruction": "4c853102",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "creqv",
+      "instruction": "4c853242",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "crnand",
+      "instruction": "4c8531c2",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "crnor",
+      "instruction": "4c853042",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "cror",
+      "instruction": "4c853382",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "crorc",
+      "instruction": "4c853342",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "crxor",
+      "instruction": "4c853182",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcba",
+      "instruction": "7c042dec",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcbf",
+      "instruction": "7c0428ac",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcbi",
+      "instruction": "7c042bac",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcbst",
+      "instruction": "7c04286c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcbt",
+      "instruction": "7c042a2c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcbtst",
+      "instruction": "7c0429ec",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "dcbz",
+      "instruction": "7c042fec",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "divwx",
+      "instruction": "7c642bd6",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwx",
+      "instruction": "7c642fd6",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwx",
+      "instruction": "7c642bd7",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwx",
+      "instruction": "7c642fd7",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwux",
+      "instruction": "7c642b96",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwux",
+      "instruction": "7c642f96",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwux",
+      "instruction": "7c642b97",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "divwux",
+      "instruction": "7c642f97",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "eciwx",
+      "instruction": "7c642a6c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "ecowx",
+      "instruction": "7c642b6c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "eieio",
+      "instruction": "7c0006ac",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "eqvx",
+      "instruction": "7c642a38",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "eqvx",
+      "instruction": "7c642a39",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "extsbx",
+      "instruction": "7c640774",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "extsbx",
+      "instruction": "7c640775",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "extshx",
+      "instruction": "7c640734",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "extshx",
+      "instruction": "7c640735",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fabsx",
+      "instruction": "fc602a10",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fabsx",
+      "instruction": "fc602a11",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "faddx",
+      "instruction": "fc64282a",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "faddx",
+      "instruction": "fc64282b",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "faddsx",
+      "instruction": "ec64282a",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "faddsx",
+      "instruction": "ec64282b",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fcmpo",
+      "instruction": "fc842840",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "fcmpu",
+      "instruction": "fc842800",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "fctiwx",
+      "instruction": "fc60281c",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fctiwx",
+      "instruction": "fc60281d",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fctiwzx",
+      "instruction": "fc60281e",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fctiwzx",
+      "instruction": "fc60281f",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fdivx",
+      "instruction": "fc642824",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fdivx",
+      "instruction": "fc642825",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fdivsx",
+      "instruction": "ec642824",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fdivsx",
+      "instruction": "ec642825",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmaddx",
+      "instruction": "fc6429ba",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmaddx",
+      "instruction": "fc6429bb",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmaddsx",
+      "instruction": "ec6429ba",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmaddsx",
+      "instruction": "ec6429bb",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmrx",
+      "instruction": "fc602890",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmrx",
+      "instruction": "fc602891",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmsubx",
+      "instruction": "fc6429b8",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmsubx",
+      "instruction": "fc6429b9",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmsubsx",
+      "instruction": "ec6429b8",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmsubsx",
+      "instruction": "ec6429b9",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmulx",
+      "instruction": "fc6401b2",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmulx",
+      "instruction": "fc6401b3",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmulsx",
+      "instruction": "ec6401b2",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fmulsx",
+      "instruction": "ec6401b3",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnabsx",
+      "instruction": "fc602910",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnabsx",
+      "instruction": "fc602911",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnegx",
+      "instruction": "fc602850",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnegx",
+      "instruction": "fc602851",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmaddx",
+      "instruction": "fc6429be",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmaddx",
+      "instruction": "fc6429bf",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmaddsx",
+      "instruction": "ec6429be",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmaddsx",
+      "instruction": "ec6429bf",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmsubx",
+      "instruction": "fc6429bc",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmsubx",
+      "instruction": "fc6429bd",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmsubsx",
+      "instruction": "ec6429bc",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fnmsubsx",
+      "instruction": "ec6429bd",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fresx",
+      "instruction": "ec602830",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fresx",
+      "instruction": "ec602831",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "frspx",
+      "instruction": "fc602818",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "frspx",
+      "instruction": "fc602819",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "frsqrtex",
+      "instruction": "fc602834",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "frsqrtex",
+      "instruction": "fc602835",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fselx",
+      "instruction": "fc6429ae",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fselx",
+      "instruction": "fc6429af",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fsqrtx",
+      "instruction": "fc60282c",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": true
+    },
+    {
+      "name": "fsqrtx",
+      "instruction": "fc60282d",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": true
+    },
+    {
+      "name": "fsqrtsx",
+      "instruction": "ec60282c",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": true
+    },
+    {
+      "name": "fsqrtsx",
+      "instruction": "ec60282d",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": true
+    },
+    {
+      "name": "fsubx",
+      "instruction": "fc642828",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fsubx",
+      "instruction": "fc642829",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "fsubsx",
+      "instruction": "ec642828",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "fsubsx",
+      "instruction": "ec642829",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "icbi",
+      "instruction": "7c042fac",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "isync",
+      "instruction": "4c00012c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lbz",
+      "instruction": "88640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lbzu",
+      "instruction": "8c640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lbzux",
+      "instruction": "7c6428ee",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lbzx",
+      "instruction": "7c6428ae",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfd",
+      "instruction": "c8640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfdu",
+      "instruction": "cc640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfdux",
+      "instruction": "7c642cee",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfdx",
+      "instruction": "7c642cae",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfs",
+      "instruction": "c0640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfsu",
+      "instruction": "c4640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfsux",
+      "instruction": "7c642c6e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lfsx",
+      "instruction": "7c642c2e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lha",
+      "instruction": "a8640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhau",
+      "instruction": "ac640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhaux",
+      "instruction": "7c642aee",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhax",
+      "instruction": "7c642aae",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhbrx",
+      "instruction": "7c642e2c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhz",
+      "instruction": "a0640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhzu",
+      "instruction": "a4640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhzux",
+      "instruction": "7c642a6e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lhzx",
+      "instruction": "7c642a2e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lmw",
+      "instruction": "b8640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lswi",
+      "instruction": "7c640caa",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lswx",
+      "instruction": "7c642c2a",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lwarx",
+      "instruction": "7c642828",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lwbrx",
+      "instruction": "7c642c2c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lwz",
+      "instruction": "80640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lwzu",
+      "instruction": "84640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lwzux",
+      "instruction": "7c64286e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "lwzx",
+      "instruction": "7c64282e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mcrf",
+      "instruction": "4c880000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mcrfs",
+      "instruction": "fc880080",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mfcr",
+      "instruction": "7c600026",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mffsx",
+      "instruction": "fc60048e",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mffsx",
+      "instruction": "fc60048f",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mfmsr",
+      "instruction": "7c6000a6",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mfspr",
+      "instruction": "7c7042a6",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mfsr",
+      "instruction": "7c6004a6",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mfsrin",
+      "instruction": "7c602d26",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mftb",
+      "instruction": "7c6c42e6",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mtcrf",
+      "instruction": "7c6ff120",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mtfsb0x",
+      "instruction": "fc80008c",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsb0x",
+      "instruction": "fc80008d",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsb1x",
+      "instruction": "fc80004c",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsb1x",
+      "instruction": "fc80004d",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsfx",
+      "instruction": "fc002d8e",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsfx",
+      "instruction": "fc002d8f",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsfix",
+      "instruction": "fc80110c",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtfsfix",
+      "instruction": "fc80110d",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mtmsr",
+      "instruction": "7c600124",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mtspr",
+      "instruction": "7c7043a6",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mtsr",
+      "instruction": "7c6001a4",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mtsrin",
+      "instruction": "7c6029e4",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mulhwux",
+      "instruction": "7c642816",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mulhwux",
+      "instruction": "7c642817",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mulli",
+      "instruction": "1c640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "mullwx",
+      "instruction": "7c6429d6",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mullwx",
+      "instruction": "7c642dd6",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "mullwx",
+      "instruction": "7c6429d7",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "mullwx",
+      "instruction": "7c642dd7",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "nandx",
+      "instruction": "7c642bb8",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "nandx",
+      "instruction": "7c642bb9",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "negx",
+      "instruction": "7c6400d0",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "negx",
+      "instruction": "7c6404d0",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "negx",
+      "instruction": "7c6400d1",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "negx",
+      "instruction": "7c6404d1",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "norx",
+      "instruction": "7c6428f8",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "norx",
+      "instruction": "7c6428f9",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "orx",
+      "instruction": "7c642b78",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "orx",
+      "instruction": "7c642b79",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "orcx",
+      "instruction": "7c642b38",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "orcx",
+      "instruction": "7c642b39",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "ori",
+      "instruction": "60640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "oris",
+      "instruction": "64640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "rfi",
+      "instruction": "4c000064",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "rlwimix",
+      "instruction": "5064003e",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "rlwimix",
+      "instruction": "5064003f",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "rlwinmx",
+      "instruction": "5464003e",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "rlwinmx",
+      "instruction": "5464003f",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "rlwnmx",
+      "instruction": "5c64283e",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "rlwnmx",
+      "instruction": "5c64283f",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "sc",
+      "instruction": "44000002",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "slwx",
+      "instruction": "7c642830",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "slwx",
+      "instruction": "7c642831",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "srawx",
+      "instruction": "7c642e30",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "srawx",
+      "instruction": "7c642e31",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "srawix",
+      "instruction": "7c640670",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "srawix",
+      "instruction": "7c640671",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "srwx",
+      "instruction": "7c642c30",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "srwx",
+      "instruction": "7c642c31",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "stb",
+      "instruction": "98640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stbu",
+      "instruction": "9c640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stbux",
+      "instruction": "7c6429ee",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stbx",
+      "instruction": "7c6429ae",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfd",
+      "instruction": "d8640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfdu",
+      "instruction": "dc640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfdux",
+      "instruction": "7c642dee",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfdx",
+      "instruction": "7c642dae",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfiwx",
+      "instruction": "7c642fae",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfsu",
+      "instruction": "d4640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfsux",
+      "instruction": "7c642d6e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stfsx",
+      "instruction": "7c642d2e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "sth",
+      "instruction": "b0640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "sthbrx",
+      "instruction": "7c642f2c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "sthu",
+      "instruction": "b4640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "sthux",
+      "instruction": "7c642b6e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "sthx",
+      "instruction": "7c642b2e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stmw",
+      "instruction": "bc640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stswi",
+      "instruction": "7c640daa",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stswx",
+      "instruction": "7c642d2a",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stw",
+      "instruction": "90640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stwbrx",
+      "instruction": "7c642d2c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stwcx.",
+      "instruction": "7c64292d",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stwu",
+      "instruction": "94640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stwux",
+      "instruction": "7c64296e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "stwx",
+      "instruction": "7c64292e",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "subfx",
+      "instruction": "7c642850",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfx",
+      "instruction": "7c642c50",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfx",
+      "instruction": "7c642851",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfx",
+      "instruction": "7c642c51",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfcx",
+      "instruction": "7c642810",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfcx",
+      "instruction": "7c642c10",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfcx",
+      "instruction": "7c642811",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfcx",
+      "instruction": "7c642c11",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfex",
+      "instruction": "7c642910",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfex",
+      "instruction": "7c642d10",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfex",
+      "instruction": "7c642911",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfex",
+      "instruction": "7c642d11",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfic",
+      "instruction": "20640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "subfmex",
+      "instruction": "7c6401d0",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfmex",
+      "instruction": "7c6405d0",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfmex",
+      "instruction": "7c6401d1",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfmex",
+      "instruction": "7c6405d1",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfzex",
+      "instruction": "7c640190",
+      "controls": {
+        "Rc": 0,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfzex",
+      "instruction": "7c640590",
+      "controls": {
+        "Rc": 0,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfzex",
+      "instruction": "7c640191",
+      "controls": {
+        "Rc": 1,
+        "OE": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "subfzex",
+      "instruction": "7c640591",
+      "controls": {
+        "Rc": 1,
+        "OE": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "sync",
+      "instruction": "7c0004ac",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "tlbia",
+      "instruction": "7c0002e4",
+      "controls": {},
+      "illegal": true
+    },
+    {
+      "name": "tlbie",
+      "instruction": "7c002a64",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "tlbld",
+      "instruction": "7c002fa4",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "tlbli",
+      "instruction": "7c002fe4",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "tlbsync",
+      "instruction": "7c00046c",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "tw",
+      "instruction": "7c042808",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "twi",
+      "instruction": "0c040000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "xorx",
+      "instruction": "7c642a78",
+      "controls": {
+        "Rc": 0
+      },
+      "illegal": false
+    },
+    {
+      "name": "xorx",
+      "instruction": "7c642a79",
+      "controls": {
+        "Rc": 1
+      },
+      "illegal": false
+    },
+    {
+      "name": "xori",
+      "instruction": "68640000",
+      "controls": {},
+      "illegal": false
+    },
+    {
+      "name": "xoris",
+      "instruction": "6c640000",
+      "controls": {},
+      "illegal": false
+    }
+  ]
+}
