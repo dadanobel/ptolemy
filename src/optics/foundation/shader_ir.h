@@ -58,7 +58,9 @@ typedef enum {
     /* e^A, |A|^C (0^0 = 1, an overflow clamped as DX), sin A and cos A in radians (PVS math). */
     PT_R2_OP_EXPE, PT_R2_OP_POW, PT_R2_OP_SIN, PT_R2_OP_COS,
     /* VE_FLT2FIX_DX floor(A) and VE_FLT2FIX_DX_RND floor(A + 0.5) into A0 (e.g. Halo's word 0010010d). */
-    PT_R2_OP_ARL, PT_R2_OP_ARR
+    PT_R2_OP_ARL, PT_R2_OP_ARR,
+    /* ME_POWER_FUNC_FF_CLAMP_01: POW with the base and the result clamped to [0,1] (Tiger's fog factor). */
+    PT_R2_OP_POW01
 } PtR2ShaderOp;
 typedef struct {
     PtR2ShaderOperand rgb_source[3], alpha_source[3];

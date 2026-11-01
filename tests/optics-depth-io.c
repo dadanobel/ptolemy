@@ -1,10 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* A byte read exports one dirty version; partial CPU writes preserve neighbours. */
+/* OPTICS_DEPTH_IO=2 (linear depth imported and exported eagerly): a byte read exports one dirty version; partial CPU
+ * writes preserve neighbours. OPTICS_DEPTH_IO=1: demand() below. */
 #define main legacy_depth_contract
 #include "optics-depth-metal.c"
 #undef main
 #include "pixel.h"
 #include "io.h"
+/* OPTICS_DEPTH_IO=1, the product default: depth stays on the GPU, and a CPU read exports the rows it covers to VRAM, in
+ * the ZB format, before the read is served. */
+static int demand(void) {
+    for(unsigned format=1;format<=2;format++) {
+        static uint8_t ram[1<<20];PtRadeonConfig c={.ram={ram,sizeof ram,NULL}};PtRadeon *d;assert(!pt_radeon_create(&d,&c));
+        void *x=m->create(d);assert(x);uint8_t pitch[4]={N,0,0,0};assert(!pt_radeon_mmio(d,0x4f24,pitch,4,1));
+        unsigned bpp=format==1?2:4;dr.depth_clear_format=format;
+        draw(x,d,C0,Z0,0.5f,1,0,0);assert(pixel(x,d,C0)==0xffff0000u);
+        assert(!m->materialize(x,d,Z0+(8*N+8)*bpp,Z0+(8*N+8)*bpp+1,0));
+        uint8_t q[4],want[4]={0};assert(optics_frontend_gpu_read(d,Z0+(8*N+8)*bpp,q,bpp));
+        assert(optics_depth_pack(format,0.5f,0,want));assert(!memcmp(q,want,bpp));
+        m->destroy(x,d);pt_radeon_close(d);
+    }
+    puts("PASS: on-demand export of the depth rows a CPU read covers (D16, D24S8)");return 0;
+}
 int main(void) {
     uint32_t fs[]={0,0,0,0,0,0,0x400000,0,(7u<<26)|32u,(1u<<24)|32u,(21u<<7)|(20u<<14),9u|(17u<<7)|(16u<<14)};   /* colour = constant 0 */
     PtR2ShaderError e; assert(optics_draw_passthrough(2,&pvs) && pt_r2_shader_decode(PT_R2_SHADER_US,PT_R2_SHADER_FP32_FTZ0,fs,12,0,&us,&e)==PT_R2_SHADER_OK);
@@ -20,6 +36,7 @@ int main(void) {
     dr.color_mask=15; dr.depth_enable=1; dr.depth_write=1; dr.depth_compare=LESS;
     dr.depth_clear_word=0xffffff00u; dr.depth_clear_format=2;   /* D24S8: depth 1.0, stencil 0 */
     m=optics_metal_executor(); optics_frontend_set_executor(NULL);   /* the device gets no instance; this test owns one */
+    const char *mode=getenv("OPTICS_DEPTH_IO");if(mode&&!strcmp(mode,"1"))return demand();
 
     void *saved=dr.vertex;
     for(unsigned format=1;format<=2;format++) {

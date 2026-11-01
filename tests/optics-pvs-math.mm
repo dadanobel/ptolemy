@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* PVS math-engine forms of Tiger's Radeon driver: RCP_DX/RSQ_DX, a dual-math step into the alternate temporaries, ATRM
  * sources and an ATRM destination (seen in Doom 3's interaction programs); RCP_FF/RSQ_FF, LIGHT_COEFF_DX and the
- * two-clock macro MAD (Cinebench's fixed-function lighting); EXP/LOG DX, EXP_BASEE_FF, POWER_FUNC_FF (base in the first
- * source, exponent in the third), SIN and COS; FLT2FIX into A0 (floor and rounded) and constants addressed relative to
+ * two-clock macro MAD (Cinebench's fixed-function lighting); EXP/LOG DX, EXP_BASEE_FF (operand in the third source, as in
+ * Tiger's fog programs), POWER_FUNC_FF and POWER_FUNC_FF_CLAMP_01 (base in the first source, exponent in the third), SIN and COS; FLT2FIX into A0 (floor and rounded) and constants addressed relative to
  * A0.x and A0.y, also in a math op, an index past 255 reading 0 (Halo's skinning form). A synthetic program (no guest
  * words): the CPU interpreter against expected values, then the emitted MSL on Metal against the interpreter. Operands
  * an op does not read (i30, i31 here) must not count against the one-input interface. */
@@ -29,14 +29,14 @@ static uint32_t M(unsigned bank, unsigned off, unsigned sx, unsigned sy, unsigne
 static uint32_t REL(uint32_t source, unsigned lane) { return source | 1u << 4 | lane << 29; }
 enum { R_T = 0, R_IN = 1, R_K = 2, R_A = 3, D_T = 0, D_A0 = 1, D_OUT = 2, D_ATRM = 4, VE_ARL = 13, VE_ARR = 14, VE_MUL = 2, VE_ADD = 3, VE_MAD = 4, VE_MAX = 7, ME_LIT = 4,
        ME_RCP_DX = 6, ME_RCP_FF = 7, ME_RSQ_DX = 8, ME_RSQ_FF = 9, ME_MUL = 10, MACRO_MAD = 0,
-       ME_EXP_DX = 1, ME_LOG_DX = 2, ME_EXPE_FF = 3, ME_POW_FF = 5, ME_SIN = 16, ME_COS = 17, OUTS = 21 };
+       ME_EXP_DX = 1, ME_LOG_DX = 2, ME_EXPE_FF = 3, ME_POW_FF = 5, ME_POW01_FF = 15, ME_SIN = 16, ME_COS = 17, OUTS = 22 };
 static bool near(float a, float b)
 {
     uint32_t x, y; memcpy(&x, &a, 4); memcpy(&y, &b, 4);
     return x == y || (isfinite(a) && isfinite(b) && (x ^ y) < 0x80000000u && (x > y ? x - y : y - x) <= 3);
 }
 int main(void) { @autoreleasepool {
-    const uint32_t w[2 + 4 * 28] = { 27u << 20, 0,
+    const uint32_t w[2 + 4 * 29] = { 28u << 20, 0,
         /* t0 = i0 || at0.y = RSQ_DX(-i0.x) */  D(VE_ADD, 0, D_T, 0, 1), S(R_IN, 0, XYZW, 0), S(R_K, 1, XYZW, 0), M(R_IN, 0, 0, 0, 0, ME_RSQ_DX, 1, 1),
         /* t0 = 2 t0 || at1.z = RCP_DX(t0.x as before the step) */ D(VE_MUL, 0, D_T, 0, 1), S(R_T, 0, XYZW, 0), S(R_K, 2, XYZW, 0), M(R_T, 0, 0, 0, 1, ME_RCP_DX, 0, 2),
         /* o0 = at1.zzzz */                     D(VE_MAX, 0, D_OUT, 0, 0), S(R_A, 1, ALL(2), 0), S(R_A, 1, ALL(2), 0), S(R_K, 1, XYZW, 0),
@@ -55,7 +55,7 @@ int main(void) { @autoreleasepool {
         /* o10 = LIT(A i0.y, B i0.x, C 2) */    D(ME_LIT, 1, D_OUT, 10, 0), S(R_IN, 0, ALL(1), 0), S(R_IN, 0, ALL(0), 0), S(R_K, 2, ALL(3), 0),
         /* o11 = EXP_DX(i0.y) */                D(ME_EXP_DX, 1, D_OUT, 11, 0), S(R_IN, 0, ALL(1), 0), S(R_IN, 29, ALL(1), 0), S(R_IN, 29, ALL(1), 0),
         /* o12 = LOG_DX(i0.w) */                D(ME_LOG_DX, 1, D_OUT, 12, 0), S(R_IN, 0, ALL(3), 0), S(R_IN, 29, ALL(3), 0), S(R_IN, 29, ALL(3), 0),
-        /* o13 = EXPE_FF(i0.z) */               D(ME_EXPE_FF, 1, D_OUT, 13, 0), S(R_IN, 0, ALL(2), 0), S(R_IN, 29, ALL(2), 0), S(R_IN, 29, ALL(2), 0),
+        /* o13 = EXPE_FF(i0.z) */               D(ME_EXPE_FF, 1, D_OUT, 13, 0), S(R_IN, 29, ALL(2), 0), S(R_IN, 29, ALL(2), 0), S(R_IN, 0, ALL(2), 0),
         /* o14 = POW_FF(i0.y, 2) */             D(ME_POW_FF, 1, D_OUT, 14, 0), S(R_IN, 0, ALL(1), 0), S(R_K, 0, ALL(0), 0), S(R_K, 2, ALL(3), 0),
         /* o15 = SIN(i0.z) */                   D(ME_SIN, 1, D_OUT, 15, 0), S(R_IN, 0, ALL(2), 0), S(R_IN, 29, ALL(2), 0), S(R_IN, 29, ALL(2), 0),
         /* o16 = COS(i0.z) */                   D(ME_COS, 1, D_OUT, 16, 0), S(R_IN, 0, ALL(2), 0), S(R_IN, 29, ALL(2), 0), S(R_IN, 29, ALL(2), 0),
@@ -64,7 +64,8 @@ int main(void) { @autoreleasepool {
         /* o17 = c[1 + A0.x] */                 D(VE_ADD, 0, D_OUT, 17, 0), REL(S(R_K, 1, XYZW, 0), 0), S(R_K, 1, XYZW, 0), S(R_K, 1, XYZW, 0),
         /* o18 = c[3 + A0.y] */                 D(VE_ADD, 0, D_OUT, 18, 0), REL(S(R_K, 3, XYZW, 0), 1), S(R_K, 1, XYZW, 0), S(R_K, 1, XYZW, 0),
         /* o19 = c[250 + A0.x], 0 past 255 */   D(VE_ADD, 0, D_OUT, 19, 0), REL(S(R_K, 250, XYZW, 0), 0), S(R_K, 1, XYZW, 0), S(R_K, 1, XYZW, 0),
-        /* o20 = RCP_DX(c[1 + A0.x].w) */       D(ME_RCP_DX, 1, D_OUT, 20, 0), REL(S(R_K, 1, ALL(3), 0), 0), S(R_IN, 29, ALL(3), 0), S(R_IN, 29, ALL(3), 0) };
+        /* o20 = RCP_DX(c[1 + A0.x].w) */       D(ME_RCP_DX, 1, D_OUT, 20, 0), REL(S(R_K, 1, ALL(3), 0), 0), S(R_IN, 29, ALL(3), 0), S(R_IN, 29, ALL(3), 0),
+        /* o21 = POW01_FF(i0.w, 2) */           D(ME_POW01_FF, 1, D_OUT, 21, 0), S(R_IN, 0, ALL(3), 0), S(R_K, 0, ALL(0), 0), S(R_K, 2, ALL(3), 0) };
     {   /* refused: relative addressing of a temporary, the loop-index mode, FLT2FIX into a temporary */
         static PtR2ShaderIR bad; PtR2ShaderError be; const uint32_t one = REL(S(R_T, 0, XYZW, 0), 0), loop = S(R_K, 0, XYZW, 0) | 1u << 31;
         const uint32_t t1[6] = { 0, 0, D(VE_ADD, 0, D_OUT, 0, 0), one, S(R_K, 1, XYZW, 0), 0 },
@@ -102,6 +103,8 @@ int main(void) { @autoreleasepool {
         for (unsigned c = 0; c < 4; ++c) {
             assert(o[11][c] == exp2f(in[1]) && o[12][c] == log2f(fabsf(ws[v])) && o[13][c] == exp2f(in[2] * 1.44269504f));
             assert(o[14][c] == exp2f(2.0f * log2f(in[1])) && o[15][c] == sinf(in[2]) && o[16][c] == cosf(in[2]));
+            const float b = ws[v] < 0.0f ? 0.0f : ws[v] > 1.0f ? 1.0f : ws[v];   /* base and result clamped to [0,1] */
+            assert(o[21][c] == fminf(exp2f(2.0f * log2f(b)), 1.0f));
         }
         {   const int ax = (int)floorf(in[1]), ay = (int)floorf(in[2] + 0.5f);
             for (unsigned c = 0; c < 4; ++c) {

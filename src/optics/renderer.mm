@@ -20,8 +20,8 @@
 
 namespace {
 static NSString *const unpackSource=@"#include <metal_stdlib>\nusing namespace metal;\n"
-"kernel void optics_unpack(device const uchar *src [[buffer(0)]],constant uint *p [[buffer(1)]],texture2d<float,access::write> dst [[texture(0)]],uint2 g [[thread_position_in_grid]]){\n"
-"if(g.x>=p[0]||g.y>=p[1])return;ulong a=ulong(g.y)*p[2]+ulong(g.x)*p[3];uint f=p[4];float4 c=float4(0,0,0,1);\n"
+"float4 optics_texel(device const uchar *src,constant uint *p,uint2 g){\n"
+"ulong a=ulong(g.y)*p[2]+ulong(g.x)*p[3];uint f=p[4];float4 c=float4(0,0,0,1);\n"
 /* DXT1/3/5 (13-15): p[2] a row of 4x4 blocks, p[3] the block; pixel.c's reference decodes the same way. */
 "if(f>=13u){ulong b=ulong(g.y>>2)*p[2]+ulong(g.x>>2)*p[3],q=f==13u?b:b+8u;uint i=(g.y&3u)*4u+(g.x&3u);\n"
 "uint c0=uint(src[q])|(uint(src[q+1])<<8),c1=uint(src[q+2])|(uint(src[q+3])<<8),s=(uint(src[q+4u+i/4u])>>(2u*(i&3u)))&3u;\n"
@@ -39,7 +39,11 @@ static NSString *const unpackSource=@"#include <metal_stdlib>\nusing namespace m
 "if(f<=2)c=float4(float(v>>11)/31.0f,float((v>>5)&63u)/63.0f,float(v&31u)/31.0f,1);\n"
 "else if(f<=4)c=float4(float((v>>10)&31u)/31.0f,float((v>>5)&31u)/31.0f,float(v&31u)/31.0f,float(v>>15));\n"
 "else c=float4(float((v>>8)&15u),float((v>>4)&15u),float(v&15u),float(v>>12))/15.0f;}\n"
-"float4 out;for(uint k=0;k<4;k++){uint s=(p[5]>>(k*3))&7u;out[k]=s<4?c[s]:s==4?0.0f:1.0f;}dst.write(out,g);}\n";
+"float4 out;for(uint k=0;k<4;k++){uint s=(p[5]>>(k*3))&7u;out[k]=s<4?c[s]:s==4?0.0f:1.0f;}return out;}\n"
+"kernel void optics_unpack(device const uchar *src [[buffer(0)]],constant uint *p [[buffer(1)]],texture2d<float,access::write> dst [[texture(0)]],uint2 g [[thread_position_in_grid]]){\n"
+"if(g.x<p[0]&&g.y<p[1])dst.write(optics_texel(src,p,g),g);}\n"
+"kernel void optics_unpack3d(device const uchar *src [[buffer(0)]],constant uint *p [[buffer(1)]],texture3d<float,access::write> dst [[texture(0)]],uint3 g [[thread_position_in_grid]]){\n"
+"if(g.x<p[0]&&g.y<p[1])dst.write(optics_texel(src+ulong(g.z)*p[6],p,g.xy),g);}\n";
 struct Runtime {
     std::mutex mutex;
     std::condition_variable changed;
@@ -74,7 +78,7 @@ static bool blendValid(const PtR2Route &r) {
 }
 static bool epilogueValid(const PtR2Route &r) {
     if(r.vte>2||r.selectVaryings>1||r.pad[0]||r.pad[1])return false;
-    for(unsigned j=0;j<8;j++)for(unsigned c=0;c<4;c++)if(r.select[j][c]>5||(!r.selectVaryings&&r.select[j][c]))return false;
+    for(unsigned j=0;j<8;j++)for(unsigned c=0;c<4;c++)if(r.select[j][c]>5||(!r.selectVaryings&&!(r.generated>>j&1)&&r.select[j][c]))return false;
     return true;
 }
 static uint64_t nowNS() {timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return uint64_t(t.tv_sec)*1000000000+t.tv_nsec;}
@@ -99,11 +103,15 @@ static uint32_t constantBytes(const PtR2ShaderIR *ir) {
     }
     return bytes;
 }
-static NSString *varyings() {
+static NSString *varyings(PtR2Route r,bool vertex) {
     NSMutableString *s=[NSMutableString stringWithString:@"struct PtVary {float4 position [[position]];\n"];
-    for(unsigned i=0;i<8;i++)[s appendFormat:@"float4 v%u [[user(v%u), center_perspective]];\n",i,i];
+    for(unsigned i=0;i<8;i++)[s appendFormat:@"float4 v%u [[user(v%u), %@]];\n",i,i,r.flat>>i&1?@"flat":@"center_perspective"];
+    if(r.fog)[s appendString:@"float pt_fog [[user(fog)]];\n"];
+    if(vertex&&r.clipPlanes)[s appendString:@"float pt_clip [[clip_distance]] [6];\n"];
     [s appendString:@"};\n"];return s;
 }
+/* The fragment stage's fixed-function values (PtR2Raster), bound at fragment buffer 2. */
+static NSString *fixedSource(){return @"struct PtFixed {float4 fog;float4 fogTerm;float4 border[16];float lod[16];uint mode[16];float4 key[16];};\n";}
 /* Emit the existing VAP integer contract as native vertex arithmetic. All
  * selectors/formats are pipeline constants; guest bytes remain immutable. */
 static void rawInput(NSMutableString *s,unsigned j,PtR2Attribute a,PtR2Route r) {
@@ -137,10 +145,12 @@ static void rawInput(NSMutableString *s,unsigned j,PtR2Attribute a,PtR2Route r) 
 static NSString *rawLoadSource(){return @"uint pt_load_word(device const uchar *v,ulong a,uint mode){uint x=uint(v[a])|uint(v[a+1])<<8|uint(v[a+2])<<16|uint(v[a+3])<<24;if(mode==1u)return ((x>>8)&0x00ff00ffu)|((x<<8)&0xff00ff00u);if(mode==2u)return x>>24|((x>>8)&0xff00u)|((x<<8)&0xff0000u)|x<<24;if(mode==3u)return x>>16|x<<16;return x;}\n";}
 static NSString *vertexSource(NSString *source,const PtR2ShaderInterface *vi,PtR2Route r) {
     NSMutableString *s=[NSMutableString stringWithString:@"#define PT_BODY_ARGS uint pt_unused\n"];
-    [s appendString:source];[s appendString:varyings()];
+    [s appendString:source];[s appendString:varyings(r,true)];
     bool raw=false;for(unsigned j=0;j<vi->input_count;j++)raw|=r.attribute[j].format>=OPTICS_RAW_INT;
     if(raw)[s appendString:rawLoadSource()];
-    [s appendString:@"float pt_load_f32(device const uchar *v,ulong a,uint be){uint b=be?(uint(v[a])<<24|uint(v[a+1])<<16|uint(v[a+2])<<8|uint(v[a+3])):(uint(v[a])|uint(v[a+1])<<8|uint(v[a+2])<<16|uint(v[a+3])<<24);return as_type<float>(b);}\nvertex PtVary pt_vertex(uint id [[vertex_id]],device const uchar *v [[buffer(0)]],constant float4 *k [[buffer(1)]],constant float4 *optics_vte [[buffer(2)]]){PtIO io;\n"];
+    [s appendString:@"float pt_load_f32(device const uchar *v,ulong a,uint be){uint b=be?(uint(v[a])<<24|uint(v[a+1])<<16|uint(v[a+2])<<8|uint(v[a+3])):(uint(v[a])|uint(v[a+1])<<8|uint(v[a+2])<<16|uint(v[a+3])<<24);return as_type<float>(b);}\nvertex PtVary pt_vertex(uint id [[vertex_id]],device const uchar *v [[buffer(0)]],constant float4 *k [[buffer(1)]],constant float4 *optics_vte [[buffer(2)]]"];
+    if(r.clipPlanes)[s appendString:@",constant float4 *pt_ucp [[buffer(3)]]"];
+    [s appendString:@"){PtIO io;\n"];
     for(unsigned j=0;j<vi->input_count;j++) {
         PtR2Attribute a=r.attribute[j];if(a.format>=OPTICS_RAW_INT){rawInput(s,j,a,r);continue;}[s appendFormat:@"io.input[%u]=float4(",j];
         for(unsigned c=0;c<4;c++) {
@@ -168,22 +178,61 @@ static NSString *vertexSource(NSString *source,const PtR2ShaderInterface *vi,PtR
         else if(j<r.varyingCount)[s appendFormat:@"o.v%u=io.output[%u];\n",j,r.pvsOutput[j]];
         else [s appendFormat:@"o.v%u=float4(0.0f);\n",j];
     }
+    /* User clip planes against the R300 clip-space position; the FG fog input (draw.h). */
+    for(unsigned j=0;j<6;j++)if(r.clipPlanes)[s appendFormat:@"o.pt_clip[%u]=%@;\n",j,r.clipPlanes>>j&1?[NSString stringWithFormat:@"dot(io.output[%u],pt_ucp[%u])",r.positionOutput,j]:@"1.0f"];
+    if(r.fog)[s appendFormat:@"o.pt_fog=%@;\n",r.fogSelect<4?[NSString stringWithFormat:@"io.output[%u].w",r.fogOutput]:r.fogSelect==4?[NSString stringWithFormat:@"io.output[%u].w",r.positionOutput]:[NSString stringWithFormat:@"pt_div(io.output[%u].z,io.output[%u].w)",r.positionOutput,r.positionOutput]];
     [s appendString:@"return o;}\n"];return s;
 }
 static NSString *fragmentSource(NSString *source,const PtR2ShaderIR *us,const PtR2ShaderInterface *fi,PtR2Route r) {
-    NSMutableString *s=[NSMutableString stringWithString:@"#define PT_BODY_ARGS uint pt_unused\n#define PT_TEX(unit,tx,sp,c,op) pt_sample(tx,sp,c,op)\n#include <metal_stdlib>\nusing namespace metal;\nfloat4 pt_sample(texture2d<float>,sampler,float4,uint);\nfloat4 pt_sample(texturecube<float>,sampler,float4,uint);\n"];
-    [s appendString:source];[s appendString:varyings()];
-    [s appendString:@"float4 pt_sample(texture2d<float> t,sampler s,float4 c,uint op){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));if(op==4u)return t.sample(s,c.xy,bias(c.w));return t.sample(s,c.xy);}\n"
-        "float4 pt_sample(texturecube<float> t,sampler s,float4 c,uint op){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));if(op==4u)return t.sample(s,c.xyz,bias(c.w));return t.sample(s,c.xyz);}\nstruct PtOut {float4 color [[color(0)]];"];
+    bool fixed=r.fog||r.textureFixed;
+    NSMutableString *s=[NSMutableString stringWithString:fixed?@"#define PT_BODY_ARGS constant PtFixed &pt_fx\n#define PT_TEX(unit,tx,sp,c,op) pt_sample(tx,sp,c,op,unit,pt_fx,io.killed)\n":@"#define PT_BODY_ARGS uint pt_unused\n#define PT_TEX(unit,tx,sp,c,op) pt_sample(tx,sp,c,op)\n"];
+    [s appendString:@"#include <metal_stdlib>\nusing namespace metal;\n"];[s appendString:fixedSource()];
+    [s appendString:fixed?@"float4 pt_sample(texture2d<float>,sampler,float4,uint,uint,constant PtFixed &,thread uint &);\nfloat4 pt_sample(texturecube<float>,sampler,float4,uint,uint,constant PtFixed &,thread uint &);\n"
+                           "float4 pt_sample(texture3d<float>,sampler,float4,uint,uint,constant PtFixed &,thread uint &);\n"
+                           "float4 pt_chroma(float4 x,uint u,constant PtFixed &fx,thread uint &k){uint m=(fx.mode[u]>>5)&3u;if(m&&all(abs(x-fx.key[u])<0.5f/255.0f)){if(m==1u)k=1u;else x=float4(0.0f);}return x;}\n"
+                         :@"float4 pt_sample(texture2d<float>,sampler,float4,uint);\nfloat4 pt_sample(texturecube<float>,sampler,float4,uint);\nfloat4 pt_sample(texture3d<float>,sampler,float4,uint);\n"];
+    [s appendString:source];[s appendString:varyings(r,false)];
+    if(fixed)
+        /* LOD bias (TX_FILTER1) on every sample, and border modes over the sampler's zero border: the colour gets the
+         * border's share of the filter footprint (exact for nearest and bilinear; with mip levels, as at level 0). */
+        [s appendString:@"float4 pt_sample(texture2d<float> t,sampler s,float4 c,uint op,uint u,constant PtFixed &fx,thread uint &k){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));\n"
+            "uint m=fx.mode[u];float2 p=c.xy;if((m&3u)==2u)p.x=saturate(p.x);if(((m>>2)&3u)==2u)p.y=saturate(p.y);\n"
+            "float4 x=t.sample(s,p,bias(fx.lod[u]+(op==4u?c.w:0.0f)));\n"
+            "if((m&15u)!=0u){float2 n=float2(t.get_width(),t.get_height()),cov;\n"
+            "if((m&16u)!=0u){float2 q=p*n-0.5f,i=floor(q),f=q-i;cov=(1.0f-f)*step(0.0f,i)*step(i,n-1.0f)+f*step(0.0f,i+1.0f)*step(i+1.0f,n-1.0f);}\n"
+            "else cov=step(0.0f,p)*(1.0f-step(1.0f,p));\n"
+            "if((m&3u)==0u)cov.x=1.0f;if(((m>>2)&3u)==0u)cov.y=1.0f;x+=fx.border[u]*(1.0f-cov.x*cov.y);}\nreturn pt_chroma(x,u,fx,k);}\n"
+            "float4 pt_sample(texturecube<float> t,sampler s,float4 c,uint op,uint u,constant PtFixed &fx,thread uint &k){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));return pt_chroma(t.sample(s,c.xyz,bias(fx.lod[u]+(op==4u?c.w:0.0f))),u,fx,k);}\n"
+            "float4 pt_sample(texture3d<float> t,sampler s,float4 c,uint op,uint u,constant PtFixed &fx,thread uint &k){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));return pt_chroma(t.sample(s,c.xyz,bias(fx.lod[u]+(op==4u?c.w:0.0f))),u,fx,k);}\n"];
+    else [s appendString:@"float4 pt_sample(texture2d<float> t,sampler s,float4 c,uint op){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));if(op==4u)return t.sample(s,c.xy,bias(c.w));return t.sample(s,c.xy);}\n"
+        "float4 pt_sample(texturecube<float> t,sampler s,float4 c,uint op){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));if(op==4u)return t.sample(s,c.xyz,bias(c.w));return t.sample(s,c.xyz);}\n"
+        "float4 pt_sample(texture3d<float> t,sampler s,float4 c,uint op){if(op==3u)c.xyz=pt_div(c.xyz,float3(c.w));if(op==4u)return t.sample(s,c.xyz,bias(c.w));return t.sample(s,c.xyz);}\n"];
+    [s appendString:@"struct PtOut {float4 color [[color(0)]];"];
     if(us->writes_depth)[s appendString:@"float depth [[depth(any)]];"];
     [s appendString:@"};\nstruct PtAlpha {uint enabled;uint compare;float reference;};\nbool pt_compare(uint f,float a,float b){switch(f){case 0:return false;case 1:return a<b;case 2:return a==b;case 3:return a<=b;case 4:return a>b;case 5:return a!=b;case 6:return a>=b;default:return true;}}\nfragment PtOut pt_fragment(PtVary v [[stage_in]],constant float4 *k [[buffer(0)]],constant PtAlpha &alpha [[buffer(1)]]"];
-    for(unsigned j=0;j<16;j++)if(us->textures&(1u<<j))[s appendFormat:@",texture%@<float> tx%u [[texture(%u)]],sampler sp%u [[sampler(%u)]]",fi->texture_dimension[j]==2?@"cube":@"2d",j,j,j,j];
+    if(fixed)[s appendString:@",constant PtFixed &pt_fx [[buffer(2)]]"];
+    if(r.rop)[s appendString:@",float4 pt_dst [[color(0)]]"];
+    for(unsigned j=0;j<16;j++)if(us->textures&(1u<<j))[s appendFormat:@",texture%@<float> tx%u [[texture(%u)]],sampler sp%u [[sampler(%u)]]",fi->texture_dimension[j]==2?@"cube":fi->texture_dimension[j]==1?@"3d":@"2d",j,j,j,j];
     [s appendString:@"){PtIO io;\n"];
     for(unsigned j=0;j<32;j++)[s appendFormat:@"io.input[%u]=float4(0.0f);\n",j];
     for(unsigned j=0;j<r.varyingCount;j++)[s appendFormat:@"io.input[%u]=v.v%u;\n",r.usInput[j],j];
-    [s appendString:@"pt_shader_body(io,k,0u"];
+    for(unsigned j=0;j<r.varyingCount;j++)if(r.generated>>j&1) {   /* the negated window position (pixel centre) >> shift */
+        NSString *c[4];for(unsigned q=0;q<4;q++){unsigned sel=r.select[j][q];
+            c[q]=sel<2?[NSString stringWithFormat:@"v.position.%c*float(%.9g)",sel?'y':'x',-ldexp(1.0,-(int)(sel?r.generatedShift>>4:r.generatedShift&15))]:sel==5?@"1.0f":@"0.0f";}
+        [s appendFormat:@"io.input[%u]=float4(%@,%@,%@,%@);\n",r.usInput[j],c[0],c[1],c[2],c[3]];
+    }
+    [s appendString:fixed?@"pt_shader_body(io,k,pt_fx":@"pt_shader_body(io,k,0u"];
     for(unsigned j=0;j<16;j++)if(us->textures&(1u<<j))[s appendFormat:@",tx%u,sp%u",j,j];
-    [s appendFormat:@");if(io.killed)discard_fragment();PtOut o;o.color=io.output[%u];if(alpha.enabled&&!pt_compare(alpha.compare,saturate(o.color.a),alpha.reference))discard_fragment();",r.colorOutput];
+    [s appendFormat:@");if(io.killed)discard_fragment();PtOut o;o.color=io.output[%u];",r.colorOutput];
+    if(r.fog)[s appendString:@"o.color.rgb=mix(o.color.rgb,pt_fx.fog.rgb,clamp(v.pt_fog*pt_fx.fogTerm.x+pt_fx.fogTerm.y,0.0f,1.0f));"];
+    [s appendString:@"if(alpha.enabled&&!pt_compare(alpha.compare,saturate(o.color.a),alpha.reference))discard_fragment();"];
+    if(r.discard){NSArray *test=@[@"",@"q.a==0.0f",@"all(q.rgb==0.0f)",@"all(q==0.0f)",@"q.a==255.0f",@"all(q.rgb==255.0f)",@"all(q==255.0f)"];
+        [s appendFormat:@"{float4 q=rint(saturate(o.color)*255.0f);if(%@)discard_fragment();}",test[r.discard]];}
+    if(r.rop) {   /* RB3D_ROPCNTL: code bit (src << 1 | dst) is the result for that bit pair, on 8-bit channels */
+        NSMutableArray *terms=[NSMutableArray array];unsigned code=r.rop-1u;
+        if(code&1)[terms addObject:@"(~s&~d)"];if(code&2)[terms addObject:@"(~s&d)"];if(code&4)[terms addObject:@"(s&~d)"];if(code&8)[terms addObject:@"(s&d)"];
+        [s appendFormat:@"{uint4 s=uint4(rint(saturate(o.color)*255.0f)),d=uint4(rint(saturate(pt_dst)*255.0f));o.color=float4((%@)&255u)/255.0f;}",terms.count?[terms componentsJoinedByString:@"|"]:@"uint4(0u)"];
+    }
     if(us->writes_depth)[s appendString:@"o.depth=io.depth;"];
     [s appendString:@"return o;}\n"];return s;
 }
@@ -268,7 +317,7 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     std::shared_ptr<Runtime> _runtime;
     id<MTLDevice> _device;id<MTLCommandQueue> _queue;
     PtR2MetalResolver *_resolver;
-    id<MTLComputePipelineState> _unpack;
+    id<MTLComputePipelineState> _unpack,_unpack3d;
     id<MTLSamplerState> _sampler[2];id<MTLDepthStencilState> _depth[8][2];
     NSMutableDictionary<NSNumber *,id<MTLDepthStencilState>> *_stencilStates;
     std::unordered_map<uint32_t,id<MTLSamplerState>> _samplerStates;   /* by PtR2Raster sampler code, created on first use */
@@ -279,7 +328,7 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     PtR2Program *_boundProgram;id<MTLDepthStencilState> _boundDepth;
     id<MTLTexture> _boundTexture[16];id<MTLSamplerState> _boundSampler[16];
     MTLViewport _boundViewport;MTLScissorRect _boundScissor;
-    uint8_t _boundCull,_boundWinding,_boundStencil;
+    uint8_t _boundCull,_boundWinding,_boundStencil,_boundFill;
     float _boundEpilogue[12];uint8_t _boundAlpha[12];float _boundBlendColor[4],_boundBias[2];
     uint64_t _stateCalls,_stateSkipped;
     NSMutableArray *_leases;NSMutableArray<PtR2Readback *> *_readbacks;
@@ -315,8 +364,9 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     if(!_queue||!_resolver)return nil;
     MTLCompileOptions *unpackOptions=[MTLCompileOptions new];unpackOptions.mathMode=MTLMathModeSafe;
     id<MTLLibrary> unpack=[device newLibraryWithSource:unpackSource options:unpackOptions error:error];
-    id<MTLFunction> function=[unpack newFunctionWithName:@"optics_unpack"];
+    id<MTLFunction> function=[unpack newFunctionWithName:@"optics_unpack"],function3d=[unpack newFunctionWithName:@"optics_unpack3d"];
     if(!function||!(_unpack=[device newComputePipelineStateWithFunction:function error:error]))return nil;
+    if(!function3d||!(_unpack3d=[device newComputePipelineStateWithFunction:function3d error:error]))return nil;
     _visibility=[device newBufferWithLength:8*8192 options:MTLResourceStorageModeShared];_boundVisibility=-1;if(!_visibility){fail(error,@"Visibility buffer allocation failed");return nil;}
     _programs=[NSMutableDictionary new];_libraries=[NSMutableDictionary new];_stencilStates=[NSMutableDictionary new];_log=os_log_create("org.ptolemy.optics","execution");
     for(unsigned i=0;i<2;i++) {
@@ -418,7 +468,7 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
         if(size==UINT_MAX||a.offset>r.stride||size>r.stride-a.offset||
            (a.format<OPTICS_RAW_INT&&r.vapSelect[j])||(a.format==OPTICS_RAW_DEFAULT&&(a.offset||r.vapSelect[j]))){fail(error,@"Unsupported or out-of-stride vertex attribute");return nil;}
     }
-    for(unsigned j=0;j<16;j++)if((us->textures&(1u<<j))&&fi->texture_dimension[j]==1){fail(error,@"3D textures are not supported");return nil;}
+    if(r.fogSelect>5||(r.fog&&r.fogSelect<4&&r.fogOutput>=vi->output_count)||r.fog>1||r.clipPlanes>63||r.rop>16||r.textureFixed>1||r.pad2[0]||r.pad2[1]||r.discard>6||(r.generated>>r.varyingCount)){fail(error,@"Unsupported fixed-function route");return nil;}
     NSMutableData *key=[NSMutableData new];word(key,1);
     for(unsigned stage=0;stage<2;stage++) {
         uint8_t bytes[16384];size_t n=0;PtR2ShaderError e={};
@@ -429,6 +479,7 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     word(key,r.blendState);word(key,r.vte);word(key,r.selectVaryings);for(unsigned j=0;j<8;j++)for(unsigned c=0;c<4;c++)word(key,r.select[j][c]);
     for(unsigned j=0;j<r.varyingCount;j++){word(key,r.pvsOutput[j]);word(key,r.usInput[j]);}
     word(key,r.stride);for(unsigned j=0;j<vi->input_count;j++){word(key,r.attribute[j].offset);word(key,r.attribute[j].components);word(key,r.attribute[j].format);word(key,r.vapSelect[j]);}
+    for(uint32_t v:{r.fog,r.fogSelect,r.fogOutput,r.clipPlanes,r.flat,r.rop,r.textureFixed,r.generated,r.generatedShift,r.discard})word(key,v);
     PtR2Program *cached=_programs[key];if(cached)return cached;
     /* Explicit bounded cache: it only deduplicates, a program in use stays alive in its draws' leases and the frontend's
      * table (a cache that refused new programs once full lost more and more geometry in long sessions). Dropped whole;
@@ -457,11 +508,11 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
         d.rasterSampleCount=r.sampleCount;d.depthAttachmentPixelFormat=d.stencilAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
         auto c=d.colorAttachments[0];c.pixelFormat=MTLPixelFormatRGBA8Unorm;
         c.writeMask=(MTLColorWriteMask)((r.colorMask&1?MTLColorWriteMaskRed:0)|(r.colorMask&2?MTLColorWriteMaskGreen:0)|(r.colorMask&4?MTLColorWriteMaskBlue:0)|(r.colorMask&8?MTLColorWriteMaskAlpha:0));
-        c.blendingEnabled=r.blend!=0;c.sourceRGBBlendFactor=r.blend==1?MTLBlendFactorSourceAlpha:MTLBlendFactorOne;
+        c.blendingEnabled=r.blend!=0&&!r.rop;c.sourceRGBBlendFactor=r.blend==1?MTLBlendFactorSourceAlpha:MTLBlendFactorOne;
         c.destinationRGBBlendFactor=r.blend==3?MTLBlendFactorOne:MTLBlendFactorOneMinusSourceAlpha;
         c.sourceAlphaBlendFactor=MTLBlendFactorOne;c.destinationAlphaBlendFactor=c.destinationRGBBlendFactor;
         if(r.blendState) {
-            uint32_t b=r.blendState;c.blendingEnabled=YES;
+            uint32_t b=r.blendState;c.blendingEnabled=!r.rop;   /* a logic op replaces blending (GL) */
             c.sourceRGBBlendFactor=(MTLBlendFactor)(b&15);c.destinationRGBBlendFactor=(MTLBlendFactor)(b>>4&15);c.rgbBlendOperation=(MTLBlendOperation)(b>>8&7);
             c.sourceAlphaBlendFactor=(MTLBlendFactor)(b>>12&15);c.destinationAlphaBlendFactor=(MTLBlendFactor)(b>>16&15);c.alphaBlendOperation=(MTLBlendOperation)(b>>20&7);
         }
@@ -548,6 +599,36 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     PtR2Texture *result=[PtR2Texture new];result->lease=lease;result->ticket=_ticket;result->status.store(0);
     [_leases addObject:result];[_exports addObject:result];_batchBytes+=length;_jobs++;return result;
 }
+- (PtR2Texture *)textureWidth:(uint32_t)w height:(uint32_t)h depth:(uint32_t)z bytes:(const void *)bytes length:(size_t)length
+    rowBytes:(size_t)row sliceBytes:(size_t)slice layout:(OpticsPixelLayout)layout error:(NSError **)error {
+    unsigned bpp=optics_pixel_bytes(layout);
+    if(!bytes||!w||!h||!z||w>2048||h>2048||z>2048||!bpp||layout.format>=OPTICS_PIXEL_YUYV601_SIGNED||row<(size_t)w*bpp||row>UINT32_MAX||
+       slice<(h-1)*row+(size_t)w*bpp||slice>UINT32_MAX||(z-1)*slice>length-((h-1)*row+(size_t)w*bpp)||length<(h-1)*row+(size_t)w*bpp){fail(error,@"Invalid 3D texture upload");return nil;}
+    if(![self admit:length error:error])return nil;
+    R2Slice input=[self upload:bytes bytes:length error:error];if(!input.lease)return nil;
+    MTLTextureDescriptor *d=[MTLTextureDescriptor new];d.textureType=MTLTextureType3D;d.pixelFormat=MTLPixelFormatRGBA8Unorm;d.width=w;d.height=h;d.depth=z;
+    d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;d.hazardTrackingMode=MTLHazardTrackingModeTracked;
+    id<MTLTexture> tex=[_device newTextureWithDescriptor:d];if(!tex){fail(error,@"Unpack texture allocation failed");return nil;}
+    R2Lease *lease=[self charge:tex.allocatedSize error:error];if(!lease)return nil;lease->texture=tex;
+    [self endRender:0];id<MTLComputeCommandEncoder> e=[_batch computeCommandEncoder];if(!e){fail(error,@"Unpack encoder failed");return nil;}
+    uint32_t p[7]={w,h,(uint32_t)row,bpp,layout.format,0,(uint32_t)slice};for(unsigned i=0;i<4;i++)p[5]|=(uint32_t)layout.component[i]<<(i*3);
+    NSUInteger x=_unpack3d.threadExecutionWidth,y=std::min((NSUInteger)8,_unpack3d.maxTotalThreadsPerThreadgroup/x);
+    [e setComputePipelineState:_unpack3d];[e setBytes:p length:sizeof p atIndex:1];[e setBuffer:input.lease->buffer offset:input.offset atIndex:0];[e setTexture:tex atIndex:0];
+    [e dispatchThreads:MTLSizeMake(w,h,z) threadsPerThreadgroup:MTLSizeMake(x,y,1)];[e endEncoding];
+    PtR2Texture *result=[PtR2Texture new];result->lease=lease;result->ticket=_ticket;result->status.store(0);
+    [_leases addObject:result];[_exports addObject:result];_batchBytes+=length;_jobs++;return result;
+}
+- (PtR2Texture *)floatTextureWidth:(uint32_t)w height:(uint32_t)h bytes:(const float *)rgba error:(NSError **)error {
+    if(![self owner:error])return nil;
+    if(!rgba||!w||!h||w>16384||h>16384){fail(error,@"Invalid float texture upload");return nil;}
+    uint64_t size=(uint64_t)w*h*16;if(![self admit:size error:error])return nil;
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:NO];
+    d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;d.hazardTrackingMode=MTLHazardTrackingModeTracked;
+    id<MTLTexture> tex=[_device newTextureWithDescriptor:d];if(!tex){fail(error,@"Texture allocation failed");return nil;}
+    R2Lease *lease=[self charge:tex.allocatedSize error:error];if(!lease)return nil;
+    [tex replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:rgba bytesPerRow:(NSUInteger)w*16];lease->texture=tex;
+    PtR2Texture *result=[PtR2Texture new];result->lease=lease;result->status.store(1);_jobs++;_batchBytes+=size;return result;
+}
 - (BOOL)renderTarget:(PtR2Target *)t clearMask:(uint8_t)mask color:(MTLClearColor)color depth:(double)depth stencil:(uint8_t)stencil error:(NSError **)error {
     if(!t->initialized&&mask!=7)return fail(error,@"Unselected attachment planes require initialization/import");
     if(_encoder&&_activeTarget==t&&!mask)return YES;
@@ -621,16 +702,16 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
         toTexture:z->lease->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,y,0) options:MTLBlitOptionStencilFromDepthStencil];
     [e endEncoding];[_leases addObject:b];[_leases addObject:z];_jobs++;_batchBytes+=n;return YES;
 }
-- (PtR2Readback *)readbackDepth:(PtR2Depth *)z height:(uint32_t)h error:(NSError **)error {
+- (PtR2Readback *)readbackDepth:(PtR2Depth *)z y:(uint32_t)y0 height:(uint32_t)h error:(NSError **)error {
     if(![self owner:error]||![self valid:z?z->lease:nil error:error])return nil;
-    if(!h||h>z.height||!z->initialized){fail(error,@"Invalid depth export");return nil;}
+    if(!h||y0>z.height||h>z.height-y0||!z->initialized){fail(error,@"Invalid depth export");return nil;}
     size_t row=(z.width*4u+255u)&~size_t(255),srow=(z.width+255u)&~size_t(255),n=(row+srow)*h;
     if(![self admit:n error:error])return nil;
     R2Lease *b=[self buffer:NULL bytes:n error:error];if(!b)return nil;
     [self endRender:5];id<MTLBlitCommandEncoder> e=[_batch blitCommandEncoder];if(!e){fail(error,@"Depth export encoder failed");return nil;}
-    [e copyFromTexture:z->lease->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(z.width,h,1)
+    [e copyFromTexture:z->lease->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,y0,0) sourceSize:MTLSizeMake(z.width,h,1)
         toBuffer:b->buffer destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row*h options:MTLBlitOptionDepthFromDepthStencil];
-    [e copyFromTexture:z->lease->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(z.width,h,1)
+    [e copyFromTexture:z->lease->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,y0,0) sourceSize:MTLSizeMake(z.width,h,1)
         toBuffer:b->buffer destinationOffset:row*h destinationBytesPerRow:srow destinationBytesPerImage:srow*h options:MTLBlitOptionStencilFromDepthStencil];
     [e endEncoding];PtR2Readback *r=[PtR2Readback new];r->lease=b;r->rowBytes=row;r->stencilRow=srow;r->depthPlanes=YES;
     r->width=z.width;r->height=h;r->ticket=_ticket;r->status.store(0);
@@ -742,10 +823,10 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
        !std::isfinite(r.x)||!std::isfinite(r.y)||!std::isfinite(r.width)||!std::isfinite(r.height)||r.width<=0||r.height<=0||
        !std::isfinite(r.depthBias)||!std::isfinite(r.depthSlope)||!std::isfinite(r.znear)||!std::isfinite(r.zfar)||r.znear<0||r.zfar>1||r.znear>r.zfar||!r.scissorWidth||!r.scissorHeight||
        r.scissorX>=t.width||r.scissorY>=t.height||r.scissorWidth>t.width-r.scissorX||r.scissorHeight>t.height-r.scissorY||
-       r.stencilEnable>1||r.alphaTest>1||r.alphaCompare>7||!std::isfinite(r.alphaReference)||r.alphaReference<0||r.alphaReference>1||r.samplers>1)
+       r.stencilEnable>1||r.alphaTest>1||r.alphaCompare>7||!std::isfinite(r.alphaReference)||r.alphaReference<0||r.alphaReference>1||r.samplers>1||r.fill>1)
         return fail(error,@"Unsupported or invalid normalized draw/target/raster");
     for(auto f:{r.stencilFront,r.stencilBack})if(f.compare>7||f.fail>7||f.depthFail>7||f.pass>7)return fail(error,@"Invalid stencil operation");
-    if(r.samplers)for(unsigned j=0;j<16;j++)if((r.sampler[j]&7)>5||(r.sampler[j]>>3&7)>5||(r.sampler[j]>>8&3)>2||(r.sampler[j]>>10&7)>4||r.sampler[j]>>17)return fail(error,@"Invalid sampler code");
+    if(r.samplers)for(unsigned j=0;j<16;j++)if((r.sampler[j]&7)>5||(r.sampler[j]>>3&7)>5||(r.sampler[j]>>8&3)>2||(r.sampler[j]>>10&7)>4||(r.sampler[j]>>17&7)>5||r.sampler[j]>>20)return fail(error,@"Invalid sampler code");
     id<MTLDepthStencilState> ds=[self depthState:r error:error];if(!ds)return NO;
     for(unsigned j=0;j<n;j++)if(index[j]>=count)return fail(error,@"Index outside immutable vertex snapshot");
     for(unsigned j=0;j<16;j++)if(p->textureMask&(1u<<j)) {
@@ -779,6 +860,14 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     struct {uint32_t enabled,compare;float reference;} alpha={r.alphaTest,r.alphaCompare,r.alphaReference};
     static_assert(sizeof alpha==12,"Alpha binding snapshot size");
     if(bind(fresh||memcmp(_boundAlpha,&alpha,sizeof alpha))){[_encoder setFragmentBytes:&alpha length:sizeof alpha atIndex:1];memcpy(_boundAlpha,&alpha,sizeof alpha);}
+    if(p->route.fog||p->route.textureFixed) {   /* PtFixed in fixedSource() */
+        struct {float fog[4],fogTerm[4],border[16][4],lod[16];uint32_t mode[16];float key[16][4];} fx;static_assert(sizeof fx==672,"PtFixed layout");
+        memcpy(fx.fog,r.fog,3*sizeof(float));fx.fog[3]=0;fx.fogTerm[0]=r.fog[3];fx.fogTerm[1]=r.fog[4];fx.fogTerm[2]=fx.fogTerm[3]=0;
+        memcpy(fx.border,r.border,sizeof fx.border);memcpy(fx.lod,r.lodBias,sizeof fx.lod);memcpy(fx.mode,r.textureMode,sizeof fx.mode);memcpy(fx.key,r.chromaKey,sizeof fx.key);
+        [_encoder setFragmentBytes:&fx length:sizeof fx atIndex:2];
+    }
+    if(p->route.clipPlanes)[_encoder setVertexBytes:r.clipPlane length:sizeof r.clipPlane atIndex:3];
+    if(bind(fresh||_boundFill!=r.fill)){[_encoder setTriangleFillMode:r.fill?MTLTriangleFillModeLines:MTLTriangleFillModeFill];_boundFill=r.fill;}
     for(unsigned j=0;j<16;j++)if(p->textureMask&(1u<<j)) {
         id<MTLSamplerState> sampler=_sampler[!!linear];
         if(r.samplers) {
@@ -786,7 +875,7 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
             if(!s) {
                 MTLSamplerDescriptor *d=[MTLSamplerDescriptor new];d.magFilter=c&64?MTLSamplerMinMagFilterLinear:MTLSamplerMinMagFilterNearest;
                 d.minFilter=c&128?MTLSamplerMinMagFilterLinear:MTLSamplerMinMagFilterNearest;
-                d.sAddressMode=(MTLSamplerAddressMode)(c&7);d.tAddressMode=(MTLSamplerAddressMode)(c>>3&7);
+                d.sAddressMode=(MTLSamplerAddressMode)(c&7);d.tAddressMode=(MTLSamplerAddressMode)(c>>3&7);d.rAddressMode=(MTLSamplerAddressMode)(c>>17&7);
                 d.mipFilter=(c>>8&3)==2?MTLSamplerMipFilterLinear:(c>>8&3)==1?MTLSamplerMipFilterNearest:MTLSamplerMipFilterNotMipmapped;
                 d.maxAnisotropy=1u<<(c>>10&7);d.lodMinClamp=(float)(c>>13&15);
                 if(!(c>>8&3))d.lodMaxClamp=d.lodMinClamp;   /* no filter between levels: the first level only */

@@ -70,13 +70,16 @@ static void colour_pack(unsigned f,unsigned sel,const uint8_t *p,uint8_t *o) {  
     o[0]=(uint8_t)v; o[1]=(uint8_t)(v>>8);
 }
 /* Independent depth/stencil storage by guest identity: ZB_DEPTHOFFSET, ZB_DEPTHPITCH and size (normalized D32F/S8). Two
- * colour targets on one depth buffer share it; one colour target alternating depth buffers rebinds. Depth is never
- * exported to VRAM: a CPU read of its bytes is counted as refused, a CPU write drops the GPU copy. clear: pending fast
- * clear planes (2 depth, 4 stencil) with the values in force at the next use. */
-struct Depth { uint64_t zb,start,end; uint32_t pitch,width,height; PtR2Depth *depth; uint8_t clear; PtR2IoToken watch;
+ * colour targets on one depth buffer share it; one colour target alternating depth buffers rebinds. A linear depth
+ * buffer (linear_io) is imported from VRAM and, like a colour surface, owned while the GPU has written it: a CPU access
+ * exports it (glReadPixels of depth, lens flares). Other layouts stay GPU-only: a CPU read sees VRAM (counted), a CPU
+ * write drops the GPU copy. clear: pending fast clear planes (2 depth, 4 stencil) with the values in force at the next use. */
+struct Depth { uint64_t zb,start,end; uint32_t pitch,width,height; PtR2Depth *depth; uint8_t clear; PtR2IoToken watch,own;
     uint32_t format=0,extent=0,layout=0; bool dirty=false,linear_io=false; }; /* height: private capacity; extent: largest guest-visible row used */
 static int cull_mode() {static int mode=-1;if(mode<0){const char *v=getenv("OPTICS_CULL");mode=v?atoi(v):1;}return mode;}   /* draw() below */
-static bool depth_io() {static int enabled=-1;if(enabled<0){const char *v=getenv("OPTICS_DEPTH_IO");enabled=v&&atoi(v)!=0;}return enabled;}
+/* OPTICS_DEPTH_IO: 1 (default) a CPU read of a GPU depth buffer exports it first; 0 GPU-only (reads see VRAM); 2 (development)
+ * untiled buffers also kept in VRAM: imported, owned while the GPU writes them, every CPU access trapped. */
+static int depth_io() {static int mode=-1;if(mode<0){const char *v=getenv("OPTICS_DEPTH_IO");mode=v?atoi(v):1;}return mode;}
 /* Decoded textures by exact source identity; dropped when anything writes their VRAM bytes (CPU, 2D, our write-back,
  * or a draw into an overlapping owned surface). GART-resident textures are kept by identity and content instead, since
  * guest RAM writes do not trap: every use reads and hashes their bytes, which costs far less than an upload (Halo made
@@ -88,21 +91,32 @@ struct Cached { uint64_t start,end; uint32_t key[10]; PtR2Texture *texture; PtR2
 const uint64_t CACHE_LIMIT=192ull<<20; const size_t CACHE_ENTRIES=4096;
 /* Prepared Metal programs by (US program, PVS program or pass-through, interface counts, route): the renderer's key
  * build re-validates both stages, so it runs once per distinct combination instead of per draw. */
-struct ProgramKey { uint64_t us,pvs; uint32_t outputs,inputs,cube; PtR2Route route; };   /* pvs 0: the pass-through form; cube: units sampled as cube maps */
+struct ProgramKey { uint64_t us,pvs; uint32_t outputs,inputs,cube; PtR2Route route; };   /* pvs 0: the pass-through form; cube: units sampled as cube maps, 3D in 31:16 */
 const size_t KEY_BYTES=offsetof(ProgramKey,route)+sizeof(PtR2Route);   /* no tail padding in hash/compare */
 struct KeyHash { size_t operator()(const ProgramKey &k) const {
     const uint8_t *p=(const uint8_t *)&k; uint64_t h=1469598103934665603ull; for(size_t i=0;i<KEY_BYTES;i++){h^=p[i];h*=1099511628211ull;} return (size_t)h; } };
 struct KeyEq { bool operator()(const ProgramKey &a,const ProgramKey &b) const { return !memcmp(&a,&b,KEY_BYTES); } };
 /* A texture's bytes from TX_OFFSET as Tiger's driver stores them (draw.c): levels one after another from the largest, a
- * level's cube faces together, rows of the pitch at level 0 and of exactly the width below. Returns the total. */
+ * level's cube faces (3D: slices) together, rows of the pitch at level 0 and of exactly the width below. Returns the total. */
 static size_t texture_levels(const OpticsTexture *t,PtR2Levels *lv) {
-    size_t total=0; unsigned bpp=t->bpp,faces=t->cube?6:1; lv->levels=t->levels;
+    size_t total=0; unsigned bpp=t->bpp,faces=t->cube?6:t->depth?t->depth:1; lv->levels=t->levels;
     for(unsigned k=0;k<t->levels;k++) {
         uint32_t w=std::max(1u,t->width>>k),h=std::max(1u,t->height>>k);
         lv->row[k]=(size_t)OPTICS_PIXEL_UNITS(t->layout,k?w:t->pitch)*bpp; lv->face[k]=lv->row[k]*OPTICS_PIXEL_UNITS(t->layout,h);   /* DXT: rows of blocks */
         lv->offset[k]=total; total+=lv->face[k]*faces;
     }
     return total;
+}
+/* Float formats (draw.c floating 1..6: X16, X16Y16, XYZW16, X32, X32Y32, XYZW32, little-endian once unswapped) as
+ * RGBA32F through the unit's selects, level 0. */
+static std::vector<float> float_texels(const OpticsTexture *t,const uint8_t *p,size_t row) {
+    unsigned k=t->floating-1u,comps=k%3==2?4:k%3+1; std::vector<float> out((size_t)t->width*t->height*4);
+    for(uint32_t y=0;y<t->height;y++) for(uint32_t x=0;x<t->width;x++) {
+        const uint8_t *q=p+(size_t)y*row+(size_t)x*t->bpp; float c[4]={0,0,0,1};
+        for(unsigned i=0;i<comps;i++){ if(k<3){ __fp16 h; memcpy(&h,q+2*i,2); c[i]=(float)h; } else memcpy(&c[i],q+4*i,4); }
+        float *o=&out[((size_t)y*t->width+x)*4]; for(int j=0;j<4;j++){ unsigned s=t->select[j]; o[j]=s<4?c[s]:s==4?0.0f:1.0f; }
+    }
+    return out;
 }
 struct TexKey { uint32_t k[10]; bool operator==(const TexKey &o) const { return !memcmp(k,o.k,sizeof k); } };   /* exact source identity; GART: and content hash */
 struct TexHash { size_t operator()(const TexKey &t) const { uint64_t h=1469598103934665603ull; for(uint32_t v:t.k){h^=v;h*=1099511628211ull;} return (size_t)h; } };
@@ -195,6 +209,16 @@ struct Exec {
         }
         s.dirty=true; s.version=next_version++; return true;
     }
+    /* The GPU writes a linear depth buffer: on the clean->dirty edge its pages become GPU-owned, so a CPU read exports it. */
+    bool depth_touch(Depth &z) {
+        if(z.linear_io && !z.dirty) {
+            unwatch(z.watch);
+            PtR2IoResult r=optics_frontend_cpu_sync(dev,z.start,z.end-z.start)?PT_R2_IO_COHERENCE:pt_r2_io_write_begin(io(),z.start,(size_t)(z.end-z.start),&z.own);
+            if(r!=PT_R2_IO_OK){ NSLog(@"optics-frontend: VRAM ownership of depth %#llx: %s",(unsigned long long)z.zb,pt_r2_io_result(r)); z.own=PtR2IoToken{}; broken=true; return false; }
+        }
+        z.dirty=true; return true;
+    }
+    void forget_depth(Depth &z) { unbind(z.depth); unwatch(z.watch); if(z.own.id){ pt_r2_io_write_abort(io(),z.own); z.own=PtR2IoToken{}; } }
     void poll() {   /* completions: progress and success; a failed batch breaks the executor */
         if(owner.error(NULL))broken=true;
         PtR2Completion c;
@@ -300,6 +324,31 @@ struct Exec {
             NSLog(@"optics-frontend: depth import failed: %@",e);broken=true;return false;
         }return true;
     }
+    /* A CPU read of a GPU-only depth buffer (glReadPixels of depth): its current rows are written to VRAM first, in the GPU's
+     * byte order (the aperture applies ZB_DEPTHPITCH's endian swap for the CPU), as the CPU sees a tiled buffer through a
+     * de-tiling surface (Unverified beyond gl-features' depth readback). The buffer stays GPU-only and watched. */
+    bool export_depth(Depth &z,uint64_t start,uint64_t end) {   /* the rows of [start,end) */
+        unsigned bpp=optics_depth_bytes(z.format); if(!bpp) return true;
+        size_t row=(size_t)z.width*bpp,stride=(size_t)(z.pitch?z.pitch:z.width)*bpp; if(stride<row) return true;
+        uint32_t y0=start>z.start?(uint32_t)std::min<uint64_t>((start-z.start)/stride,z.extent):0,y1=(uint32_t)std::min<uint64_t>((end-z.start+stride-1)/stride,z.extent);
+        if(y0>=y1) return true;
+        if(z.clear){
+            OpticsDraw state={};state.depth_clear_word=optics_frontend_register(dev,0x4f28);state.depth_clear_format=optics_frontend_register(dev,0x4f10);
+            const char *why=nullptr;int code=OPTICS_EXEC_FAILED;if((state.depth_clear_format&15)!=z.format||!apply_depth_clear(z,&state,&why,&code))return false;
+        }
+        NSError *e=nil;PtR2Readback *rb=retry([&]{return owner.on([&]{return [renderer readbackDepth:z.depth y:y0 height:y1-y0 error:&e];});},&e);
+        NSData *data=nil;if(rb&&commit(&e)&&drain())data=owner.on([&]{return [renderer copyDepthReadback:rb format:z.format error:&e];});
+        uint64_t a=z.start+(uint64_t)y0*stride,n=(uint64_t)(y1-y0-1)*stride+row;   /* rows at ZB_DEPTHPITCH */
+        if(!data||data.length!=row*(y1-y0)||a+n>z.end){   /* not exported: the read sees VRAM, the executor goes on */
+            if(!depth_reads_refused++) NSLog(@"optics-frontend: depth %#llx rows %u-%u not exported (readback %d, %zu bytes, row %zu, pitch %zu, VRAM %#llx-%#llx): %@",(unsigned long long)z.zb,
+                y0,y1,rb!=nil,(size_t)data.length,row,stride,(unsigned long long)z.start,(unsigned long long)z.end,e);
+            return true; }
+        unwatch(z.watch);
+        if(stride==row && pt_r2_io_cpu_write(io(),a,data.bytes,data.length,0)!=PT_R2_IO_OK){broken=true;return false;}
+        for(uint32_t y=y0;stride!=row && y<y1;y++) if(pt_r2_io_cpu_write(io(),z.start+(uint64_t)y*stride,(const uint8_t *)data.bytes+(size_t)(y-y0)*row,row,0)!=PT_R2_IO_OK){broken=true;return false;}
+        if(!watch(z.watch,z.start,z.end-z.start)){broken=true;return false;}
+        invalidate(a,a+n);stats_writebacks++;return true;
+    }
     /* One lazy export per dirty version, not per CPU read or end of pass. */
     bool write_depth(Depth &z) {
         if(!z.linear_io)return true;
@@ -309,11 +358,12 @@ struct Exec {
             const char *why=nullptr;int code=OPTICS_EXEC_FAILED;if(!apply_depth_clear(z,&state,&why,&code))return false;
         }
         if(!z.dirty)return true;
-        NSError *e=nil;PtR2Readback *rb=retry([&]{return owner.on([&]{return [renderer readbackDepth:z.depth height:z.extent error:&e];});},&e);
+        NSError *e=nil;PtR2Readback *rb=retry([&]{return owner.on([&]{return [renderer readbackDepth:z.depth y:0 height:z.extent error:&e];});},&e);
         NSData *data=nil;if(rb&&commit(&e)&&drain())data=owner.on([&]{return [renderer copyDepthReadback:rb format:z.format error:&e];});
         if(!data||data.length!=z.end-z.start){NSLog(@"optics-frontend: depth export failed: %@",e);broken=true;return false;}
-        unwatch(z.watch);
-        if(pt_r2_io_cpu_write(io(),z.start,data.bytes,data.length,0)!=PT_R2_IO_OK||!watch(z.watch,z.start,z.end-z.start)){
+        unwatch(z.watch); std::vector<uint8_t> out((const uint8_t *)data.bytes,(const uint8_t *)data.bytes+data.length);
+        PtR2IoResult r=z.own.id?pt_r2_io_write_complete(io(),z.own,out.data(),out.size()):pt_r2_io_cpu_write(io(),z.start,out.data(),out.size(),0); z.own=PtR2IoToken{};
+        if(r!=PT_R2_IO_OK||!watch(z.watch,z.start,z.end-z.start)){
             broken=true;return false;
         }
         invalidate(z.start,z.end);z.dirty=false;stats_writebacks++;return true;
@@ -321,11 +371,12 @@ struct Exec {
     int materialize(uint64_t start,uint64_t end,int write) {
         if(busy) return 0;
         if(write) invalidate(start,end);
-        for(size_t i=0;i<depths.size();) {   /* depth is not exported (DEGRADED): reads see VRAM, writes drop the GPU copy */
+        for(size_t i=0;i<depths.size();) {   /* linear depth is exported; other layouts: reads see VRAM, writes drop the GPU copy */
             if(depths[i].start<end && start<depths[i].end) {
                 if(depths[i].linear_io&&!write_depth(depths[i]))return -1;
-                if(write){ unbind(depths[i].depth); unwatch(depths[i].watch); depths.erase(depths.begin()+i); depth_drops++; continue; }
-                if(!depths[i].linear_io&&!depth_reads_refused++) NSLog(@"optics-frontend: CPU read of a GPU depth buffer at %#llx: depth export not implemented, VRAM bytes served",(unsigned long long)depths[i].zb);
+                if(write){ forget_depth(depths[i]); depths.erase(depths.begin()+i); depth_drops++; continue; }
+                if(!depths[i].linear_io&&depth_io()&&!export_depth(depths[i],start,end))return -1;
+                if(!depths[i].linear_io&&!depth_io()&&!depth_reads_refused++) NSLog(@"optics-frontend: CPU read of a GPU depth buffer at %#llx: VRAM bytes served (OPTICS_DEPTH_IO=0)",(unsigned long long)depths[i].zb);
             }
             i++;
         }
@@ -425,6 +476,41 @@ struct Exec {
     /* RB3D_AARESOLVE draw: the covered pixels are copied (1 sample) from the colour buffer into the resolve buffer, on the
      * GPU between owned targets (the destination is imported when not owned). The covered area is the draw's
      * window-space bounding box (the swap is one point sprite over the drawable), clipped to the scissor and both buffers. */
+    /* A colour target in guest RAM (GART or AGP): Tiger's driver reads frames back (glReadPixels) by drawing them into
+     * one. No CPU access to guest RAM traps, so such a target lives for one draw: its guest bytes are loaded into a
+     * temporary target, and write_ram puts the result back before the draw returns, ahead of any later fence. */
+    /* RB3D_COLORPITCH0 endian (draw.h cb_endian) on 32-bit units: 1 bytes within 16-bit halves, 2 the dword reversed,
+     * 3 the 16-bit halves exchanged. Tiger's readback targets in GART use it, so the PowerPC reads ARGB words. */
+    static void swap_target(uint8_t *p,size_t n,unsigned mode) {
+        for(size_t i=0;mode && i+4<=n;i+=4){ uint8_t a=p[i],b=p[i+1],c=p[i+2],d=p[i+3];
+            if(mode==1){p[i]=b;p[i+1]=a;p[i+2]=d;p[i+3]=c;} else if(mode==2){p[i]=d;p[i+1]=c;p[i+2]=b;p[i+3]=a;} else {p[i]=c;p[i+1]=d;p[i+2]=a;p[i+3]=b;} }
+    }
+    bool import_ram(uint64_t gpu,uint32_t W,uint32_t H,uint8_t fmt,uint8_t sel,unsigned endian,Surface &s,const char **why,int *code) {
+        NSError *e=nil; uint8_t bpp=(uint8_t)colour_bytes(fmt); OpticsPixelLayout l=colour_layout(fmt,sel);
+        std::vector<uint8_t> rows((size_t)W*H*bpp);
+        busy=true; int ok=optics_frontend_gpu_read(dev,gpu,rows.data(),rows.size()); busy=false;
+        if(!ok){*code=fail(why,"colour target outside GPU memory",nil);return false;}
+        swap_target(rows.data(),rows.size(),endian);
+        if(bpp==8)for(size_t i=0;i<(size_t)W*H*4;i++)rows[i]=rows[2*i+1];   /* 16-bit LE channels: high bytes, in place */
+        PtR2Texture *current=retry([&]{return owner.on([&]{return [renderer textureWidth:W height:H bytes:rows.data() rowBytes:(size_t)W*(bpp==8?4:bpp)
+            layout:l error:&e];});},&e);
+        PtR2Target *target=current?owner.on([&]{return [renderer targetWidth:W height:H samples:(PtR2MsaaInput){} error:&e];}):nil;
+        if(!target || !retry([&]{return owner.on([&]{return [renderer load:target from:current error:&e];});},&e)){*code=failhard(why,"target import",e);return false;}
+        s=Surface{0,0,gpu,W,H,target,false,0,nil,0,next_version++,PtR2IoToken{},PtR2IoToken{},nil,bpp,fmt,sel};   /* fast clears are VRAM's */
+        return true;
+    }
+    bool write_ram(Surface &s,unsigned endian) {
+        NSError *e=nil; NSData *rgba=nil;
+        PtR2Readback *rb=retry([&]{return owner.on([&]{return [renderer readback:s.target resolveControl:1 error:&e];});},&e);
+        if(rb && commit(&e) && drain()) rgba=owner.on([&]{return [renderer copyReadback:rb error:&e];});
+        if(!rgba){ NSLog(@"optics-frontend: write-back to guest RAM failed: %@",e?e.localizedDescription:@"GPU batch failed"); broken=true; return false; }
+        std::vector<uint8_t> rows((size_t)s.width*s.height*s.bpp); const uint8_t *p=(const uint8_t *)rgba.bytes;
+        for(size_t i=0,o=0;o<rows.size();i+=4,o+=s.bpp) colour_pack(s.fmt,s.sel,p+i,&rows[o]);
+        swap_target(rows.data(),rows.size(),endian);
+        busy=true; int ok=optics_frontend_gpu_write(dev,s.gpu,rows.data(),rows.size()); busy=false;
+        if(!ok){ NSLog(@"optics-frontend: write-back to guest RAM at %#llx: not mapped",(unsigned long long)s.gpu); broken=true; return false; }
+        stats_writebacks++; return true;
+    }
     int resolve(const OpticsDraw *d,Surface *surface,uint32_t W,const char **why) {
         NSError *e=nil;
         if(!apply_clear(*surface,d->color_clear,d->depth_clear_word,d->depth_clear_format)) return failhard(why,"fast clear",nil);
@@ -458,10 +544,10 @@ struct Exec {
         static int capacity=-1;
         if(capacity<0){const char *v=getenv("OPTICS_DEPTH_CAPACITY");capacity=v && atoi(v)!=0;}
         uint32_t layout=optics_frontend_register(dev,0x4f24);
-        bool linear_io=depth_io()&&optics_depth_bytes(d->depth_clear_format&15)&&!(layout&0x1f0000);
-        for(size_t i=0;depth_io()&&i<depths.size();)if(depths[i].zb==d->zb_offset&&(depths[i].layout!=layout||depths[i].format!=(d->depth_clear_format&15)||depths[i].linear_io!=linear_io)){
+        bool linear_io=depth_io()==2&&optics_depth_bytes(d->depth_clear_format&15)&&!(layout&0x1f0000);
+        for(size_t i=0;depth_io()==2&&i<depths.size();)if(depths[i].zb==d->zb_offset&&(depths[i].layout!=layout||depths[i].format!=(d->depth_clear_format&15)||depths[i].linear_io!=linear_io)){
             if(!write_depth(depths[i])){*code=failhard(why,"depth fallback transition export",nil);return nullptr;}
-            unbind(depths[i].depth);unwatch(depths[i].watch);depths.erase(depths.begin()+i);
+            forget_depth(depths[i]);depths.erase(depths.begin()+i);
         }else i++;
         bool use_capacity=capacity||linear_io;
         /* Unsupported layouts keep the existing GPU-only depth path. */
@@ -479,6 +565,7 @@ struct Exec {
                     unbind(z.depth);z.depth=next;z.height=height;
                 }
                 if(H>z.extent) {
+                    if(z.dirty&&!write_depth(z)){*code=failhard(why,"depth export before its extent grows",nil);return nullptr;}
                     if(linear_io&&!load_depth(z,z.extent,H)){*code=failhard(why,"depth extent import",nil);return nullptr;}
                     PtR2IoToken watch_next={};uint64_t end=z.start+(uint64_t)width*H*(linear_io?optics_depth_bytes(format):4);
                     if(!watch(watch_next,z.start,end-z.start)){*code=failhard(why,"depth extent watch",nil);return nullptr;}
@@ -499,16 +586,21 @@ struct Exec {
         }
         if(linear_io) {
             uint64_t end=start+(uint64_t)(pitch?pitch:W)*H*optics_depth_bytes(d->depth_clear_format&15);
-            for(const auto &s:owned)if(start<s.end&&s.start<end){*code=fail(why,"depth/colour storage alias needs a layout transition",nil);return nullptr;}
+            for(size_t i=0;i<owned.size();)if(start<owned[i].end&&owned[i].start<end) {   /* VRAM reused for depth: the colour surface is written back and let go */
+                if(owned[i].gpu==d->cb_offset){*code=fail(why,"depth buffer over its own colour target",nil);return nullptr;}
+                bool ok; @autoreleasepool { ok=apply_clear(owned[i])&&write_back(owned[i]); }
+                if(!ok){*code=failhard(why,"colour export before its VRAM becomes depth",nil);return nullptr;}
+                forget(owned[i]); owned.erase(owned.begin()+i);
+            }else i++;
             for(size_t i=0;i<depths.size();)if(start<depths[i].end&&depths[i].start<end) {
                 if(!write_depth(depths[i])){*code=failhard(why,"depth layout transition export",nil);return nullptr;}
-                unbind(depths[i].depth);unwatch(depths[i].watch);depths.erase(depths.begin()+i);
+                forget_depth(depths[i]);depths.erase(depths.begin()+i);
             }else i++;
         }
         if(depths.size()>=8){ if(!write_depth(depths.front())){*code=failhard(why,"depth eviction export",nil);return nullptr;}
-            unbind(depths.front().depth); unwatch(depths.front().watch); depths.erase(depths.begin()); }
+            forget_depth(depths.front()); depths.erase(depths.begin()); }
         unsigned bpp=linear_io?optics_depth_bytes(d->depth_clear_format&15):4;
-        Depth z={d->zb_offset,start,start+(uint64_t)(pitch?pitch:W)*H*bpp,pitch,W,storage_height,storage,0,PtR2IoToken{}};
+        Depth z={d->zb_offset,start,start+(uint64_t)(pitch?pitch:W)*H*bpp,pitch,W,storage_height,storage,0,PtR2IoToken{},PtR2IoToken{}};
         z.format=d->depth_clear_format&15;z.linear_io=linear_io;z.layout=layout;z.extent=H;
         if(linear_io&&!load_depth(z,0,H)){*code=failhard(why,"depth import",nil);return nullptr;}
         if(!watch(z.watch,z.start,z.end-z.start) && use_capacity){*code=failhard(why,"depth extent watch",nil);return nullptr;}
@@ -521,7 +613,7 @@ struct Exec {
         unsigned planes=optics_draw_clear_mask(2,d->depth_clear_format)&6; NSError *e=nil;
         if(!retry([&]{return owner.on([&]{return [renderer clearDepth:z.depth mask:(uint8_t)planes depth:optics_draw_depth_clear(d->depth_clear_word,d->depth_clear_format)
               stencil:(uint8_t)d->depth_clear_word error:&e];});},&e)){*code=failhard(why,"depth fast clear",e);return false;}
-        z.clear=0;z.dirty=true; return true;
+        z.clear=0; if(!depth_touch(z)){*code=failhard(why,"depth ownership",nil);return false;} return true;
     }
     void unbind(PtR2Depth *z) {
         for(auto &s:owned) if(s.bound==z){ NSError *e=nil; owner.on([&]{return [renderer target:s.target depth:nil error:&e];}); s.bound=nil; }
@@ -555,7 +647,7 @@ struct Exec {
     int reset() {   /* device reset: VRAM gets every GPU result, then the old run's resources and epoch end */
         int r=0;
         for(auto &s:owned){ if(!(apply_clear(s) && write_back(s))) r=-1; forget(s); }
-        owned.clear(); for(auto &z:depths){if(!write_depth(z))r=-1;unwatch(z.watch);} depths.clear(); drop_cache(); pending.clear(); snap=nil; programs.clear(); last_valid=false; last_program=nil; tokens.clear();
+        owned.clear(); for(auto &z:depths){if(!write_depth(z))r=-1;forget_depth(z);} depths.clear(); drop_cache(); pending.clear(); snap=nil; programs.clear(); last_valid=false; last_program=nil; tokens.clear();
         published_version=0; scan_valid=false;
         if(renderer) { NSError *e=nil; if(!owner.on([&]{return [renderer reset:&e];})){ NSLog(@"optics-frontend: renderer reset: %@",e.localizedDescription); r=-1; } }
         owner.clearError();committed=finished=0; since_commit=0; broken=false; return r;
@@ -575,7 +667,7 @@ struct Exec {
         NSLog(@"optics-frontend: batch latency: submit->GPU start mean %@ ns, GPU end->callback mean %@ ns",g[@"epochMeanSubmitToStartNS"],g[@"epochMeanEndToCallbackNS"]);
         NSLog(@"optics-frontend: GPU raw vertex draws %llu, input snapshot bytes %llu",(unsigned long long)stats_raw_draws,(unsigned long long)stats_raw_bytes);
         for(auto &s:owned) forget(s);
-        owned.clear(); for(auto &z:depths) unwatch(z.watch); depths.clear(); drop_cache(); pending.clear(); snap=nil; programs.clear(); last_valid=false; last_program=nil; tokens.clear();
+        owned.clear(); for(auto &z:depths) forget_depth(z); depths.clear(); drop_cache(); pending.clear(); snap=nil; programs.clear(); last_valid=false; last_program=nil; tokens.clear();
         owner.on([&]{return [renderer close];}); renderer=nil;
     }
 };
@@ -588,18 +680,18 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
         if(!d->indices || (d->cull==3 && cull_mode())) return OPTICS_EXEC_DONE;   /* both faces culled: nothing to draw */
         uint32_t W=d->width,H=d->height; uint64_t start; uint8_t cfmt=d->cb_format?d->cb_format:6;   /* hand-built draws leave cb_format 0 */
         if(!W || !H || W>8192 || H>8192) return fail(why,"target size",nil);
-        if(!optics_frontend_vram_offset(dev,d->cb_offset,&start)) return fail(why,"colour target outside VRAM",nil);
+        bool ram=!optics_frontend_vram_offset(dev,d->cb_offset,&start); Surface temp;   /* ram: a target in guest RAM (import_ram) */
         /* 8 varyings (the builder's limit) fit both vertex forms: 8 user varyings in PtVary, the pass-through
          * route's position + 8 raw attributes (16 slots). Doom 3's interaction draws use all 8. */
         if(d->varyings>OPTICS_DRAW_VARYINGS) return fail(why,"more than 8 varyings",nil);
         /* 1. The GPU-owned surface for this colour buffer, or a fresh import of the guest bytes. */
-        auto find=[&]()->Surface *{ for(auto &s:owned) if(s.gpu==d->cb_offset && s.width==W && s.fmt==cfmt && s.height>=H) return &s; return nullptr; };
+        auto find=[&]()->Surface *{ if(ram) return nullptr; for(auto &s:owned) if(s.gpu==d->cb_offset && s.width==W && s.fmt==cfmt && s.height>=H) return &s; return nullptr; };
         Surface *surface=find();
         /* A point sprite over the drawable (Tiger's GL draws one so, VTE scales without offsets) has the scissor's height,
          * a row past Doom 3's 640x480 buffer; its corners end the surface instead, as draw.c ends a viewport-transformed
          * draw's at the viewport (a taller surface covered the next VRAM object). Only when no surface fits the scissor, so
          * there is no CPU vertex pass per sprite draw; Half-Life's frame rate showed no effect beyond its run-to-run spread. */
-        if(!surface && d->sprite && d->vertices && d->vertices<=64) {
+        if(!surface && !ram && d->sprite && d->vertices && d->vertices<=64) {
             std::vector<OpticsVertexOut> vo(d->vertices); const char *r2=nullptr;
             if(optics_draw_vertices(d,vo.data(),&r2)) { float m=0; for(auto &v:vo) m=std::max(m,v.window[1]);
                 int32_t b=(int32_t)ceilf(m-0.5f); if(b>d->scissor[1] && (uint32_t)b<H){ H=(uint32_t)b; surface=find(); } }
@@ -611,13 +703,15 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                 d->cb_offset,W,H,d->scissor[0],d->scissor[1],d->scissor[2],d->scissor[3],d->vte,d->viewport[0],d->viewport[1],d->viewport[2],d->viewport[3],d->resolve,d->sprite,d->vertices); }
         }
         uint8_t sel=d->color_mask?d->cb_select:0;   /* a draw that writes no colour may carry another context's output selects */
-        if(!surface && !(surface=import(d->cb_offset,W,H,cfmt,sel,why,&code))) return code;
+        if(ram){ if(d->resolve) return fail(why,"AA resolve into guest RAM",nil); if(!import_ram(d->cb_offset,W,H,cfmt,sel,d->cb_endian,temp,why,&code)) return code; surface=&temp; }
+        else if(!surface && !(surface=import(d->cb_offset,W,H,cfmt,sel,why,&code))) return code;
         if(d->color_mask) surface->sel=sel;
         if(d->resolve) return resolve(d,surface,W,why);
         /* Depth/stencil storage of a draw that tests or writes them (ZB_DEPTHOFFSET with both off may be another
          * context's): bound to this target; a draw without depth keeps the binding (its depth state touches nothing). */
         if(d->depth_enable || d->stencil_enable) {
-            Depth *z=depth_for(d,W,surface->height,why,&code); if(!z) return code;
+            uint32_t SH=surface->height; Depth *z=depth_for(d,W,SH,why,&code); if(!z) return code;
+            if(!ram && !(surface=find())) return failhard(why,"colour target lost to a depth transition",nil);   /* owned may have moved */
             if(surface->bound!=z->depth) {
                 if(!owner.on([&]{return [renderer target:surface->target depth:z->depth error:&e];})) return failhard(why,"depth binding",e);
                 surface->bound=z->depth;
@@ -634,7 +728,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                  * Its top-left part (the window server samples a window's visible width of its padded backing
                  * store: 892 of 896, 60 of 64): a GPU copy of that rectangle, also without a readback. */
                 Surface *src=nullptr;
-                for(auto &s:owned) if(!t->cube && s.gpu==t->offset && ((s.fmt==6 && t->format==0xc) || (s.fmt==10 && t->format==0xe)) && t->pitch==s.width && t->width<=s.width && t->height<=s.height) {src=&s;break;}
+                for(auto &s:owned) if(!t->cube && !t->depth && s.gpu==t->offset && ((s.fmt==6 && t->format==0xc) || (s.fmt==10 && t->format==0xe)) && t->pitch==s.width && t->width<=s.width && t->height<=s.height) {src=&s;break;}
                 if(src && src->target!=surface->target) {
                     uint8_t c[4]; uint32_t k=1u<<31;   /* texel component X..W = byte 0..3 = its output select C0..C3 */
                     for(int q=0;q<4;q++){c[q]=t->select[q]<4?(uint8_t)colour_channel(src->sel,t->select[q]):t->select[q];k|=(uint32_t)c[q]<<(8*q);}
@@ -659,8 +753,8 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                         t->format,t->select[0],t->select[1],t->select[2],t->select[3],(unsigned)s.gpu,s.width,s.height,d->cb_offset,d->blend,d->color_mask);
                 }
                 if(materialize(to,to+n,0)) return failhard(why,"export of a sampled surface",nil);
-                surface=nullptr; for(auto &s:owned) if(s.gpu==d->cb_offset && s.width==W && s.fmt==cfmt) surface=&s;
-                if(!surface) return fail(why,"colour target was the sampled texture (feedback loop)",nil);
+                if(!ram) { surface=nullptr; for(auto &s:owned) if(s.gpu==d->cb_offset && s.width==W && s.fmt==cfmt) surface=&s;
+                    if(!surface) return fail(why,"colour target was the sampled texture (feedback loop)",nil); }
             }
             if(optics_trace() && (t->width*t->height>=512*384 || (d->cb_offset!=0 && W==1024 && H>=768))) {   /* development trace: large textures, and every
                                                                                          texture drawn into a full-screen non-scanout target, first per pair */
@@ -671,7 +765,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                 }
             }
             uint32_t key[10]={(uint32_t)t->offset,t->width,t->height,t->pitch,t->format,
-                (uint32_t)t->select[0]|t->select[1]<<8|t->select[2]<<16|(uint32_t)t->select[3]<<24,(uint32_t)t->linear|(uint32_t)t->levels<<8,
+                (uint32_t)t->select[0]|t->select[1]<<8|t->select[2]<<16|(uint32_t)t->select[3]<<24,(uint32_t)t->linear|(uint32_t)t->levels<<8|t->depth<<16,
                 (uint32_t)t->layout|(uint32_t)t->swap<<8|(uint32_t)t->cube<<16};
             uint64_t vram_off; int in_vram=optics_frontend_vram_offset(dev,t->offset,&vram_off);
             PtR2Texture *x=nil;
@@ -701,7 +795,11 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                     m=n/2; for(unsigned k=0;k<lv.levels;k++){lv.offset[k]/=2;lv.row[k]/=2;lv.face[k]/=2;}
                 }
                 OpticsPixelLayout l={t->layout,{t->select[0],t->select[1],t->select[2],t->select[3]}};
-                x=retry([&]{return owner.on([&]{return [renderer textureWidth:t->width height:t->height faces:t->cube?6u:1u levels:&lv bytes:texels.data() length:m layout:l error:&e];});},&e);
+                if(t->floating){ std::vector<float> f=float_texels(t,texels.data(),lv.row[0]);
+                    x=retry([&]{return owner.on([&]{return [renderer floatTextureWidth:t->width height:t->height bytes:f.data() error:&e];});},&e); }
+                else if(t->depth) x=retry([&]{return owner.on([&]{return [renderer textureWidth:t->width height:t->height depth:t->depth bytes:texels.data()
+                    length:m rowBytes:lv.row[0] sliceBytes:lv.face[0] layout:l error:&e];});},&e);
+                else x=retry([&]{return owner.on([&]{return [renderer textureWidth:t->width height:t->height faces:t->cube?6u:1u levels:&lv bytes:texels.data() length:m layout:l error:&e];});},&e);
                 if(!x) return failhard(why,"texture upload",e);
                 stats_texture_uploads++; upload_ns+=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-u0;
                 upload_last[0]=t->width; upload_last[1]=t->height; upload_last[2]=t->format; upload_last[3]=(uint32_t)n; upload_last[4]=(uint32_t)in_vram;
@@ -710,7 +808,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                     Cached c; c.start=vram_off; c.end=vram_off+n; memcpy(c.key,key,sizeof key); c.texture=x; c.watch=PtR2IoToken{};
                     if(watch(c.watch,c.start,n)){ cache.push_back(c); cache_adds++; cache_index[tk]=x; cache_bytes+=n; cache_lo=std::min(cache_lo,c.start); cache_hi=std::max(cache_hi,c.end); }
                 } else {   /* budgeted by decoded RGBA8 size */
-                    size_t rgba=0; for(unsigned k=0;k<lv.levels;k++) rgba+=(size_t)std::max(1u,t->width>>k)*std::max(1u,t->height>>k)*4*(t->cube?6:1);
+                    size_t rgba=0; for(unsigned k=0;k<lv.levels;k++) rgba+=(size_t)std::max(1u,t->width>>k)*std::max(1u,t->height>>k)*4*(t->cube?6:t->depth?t->depth:1)*(t->floating?4:1);
                     while(!gart_order.empty() && (gart_order.size()>=GART_ENTRIES || gart_bytes+rgba>GART_LIMIT)){ gart.erase(gart_order.front().first); gart_bytes-=gart_order.front().second; gart_order.pop_front(); }
                     gart[tk]=x; gart_order.push_back({tk,rgba}); gart_bytes+=rgba;
                 }
@@ -790,7 +888,11 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
          *    Metal the same window depth (z in 0..1 of the target). */
         unsigned nv=d->varyings,ni=std::max(1u,d->pvs_inputs);
         static int full_vte=-1;if(full_vte<0){const char *v=getenv("OPTICS_GPU_VTE");full_vte=v&&atoi(v)!=0;}
-        bool gpu=!d->sprite&&ni<=16&&(full_vte||((d->vte&0x33f)==0x3f&&d->pvs_id!=1));
+        /* Wide lines (GA_LINE_CNTL above one pixel): each segment becomes a quad on the CPU vertex stage, widened across
+         * its minor axis by the width (GL's non-antialiased wide lines, the R300's END_TYPE 2), drawn as triangles. */
+        bool wide=d->lines && d->line_width>1.5f;
+        std::vector<uint32_t> wide_index; const uint32_t *index=d->index; uint32_t nindex=d->indices,nvertex=d->vertices;
+        bool gpu=!d->sprite&&!wide&&d->stuff!=1&&ni<=16&&(full_vte||((d->vte&0x33f)==0x3f&&d->pvs_id!=1));
         if(optics_trace()) {   /* development statistics: draws per colour target, every 2^18 draws */
             static std::vector<std::pair<uint32_t,uint64_t>> per; static uint64_t total; bool hit=false;
             for(auto &p:per) if(p.first==d->cb_offset){p.second++;hit=true;break;}
@@ -804,8 +906,11 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                 n[0],n[1]+n[2]+n[3]+n[4],n[1],n[2],n[3],last_vte,n[4]);
         }
         PtR2Route r; memset(&r,0,sizeof r); r.colorOutput=(uint8_t)d->color_output; r.varyingCount=(uint8_t)nv; r.sampleCount=1;
-        r.colorMask=(uint8_t)d->color_mask; r.blendState=d->blend;
+        r.colorMask=(uint8_t)d->color_mask; r.blendState=d->blend; r.flat=d->flat; r.rop=d->rop; r.discard=d->discard;
+        for(unsigned u=0;u<OPTICS_DRAW_TEXTURES;u++) if(d->texture_mask>>u&1 && (d->lod_bias[u]!=0 || (d->border_mode[u]&15) || d->chroma[u])) r.textureFixed=1;
         for(unsigned k=0;k<nv;k++) r.usInput[k]=d->us_input[k];
+        if(d->stuff==2) for(unsigned k=0;k<nv;k++) if(d->stuffed[k]){ r.generated|=(uint8_t)(1u<<k); memcpy(r.select[k],d->component[k],4); }
+        r.generatedShift=(uint8_t)(d->stipple_shift[0]|d->stipple_shift[1]<<4);
         std::vector<float> vb; bool rawFetch=false; const void *vertexData=nullptr; float epilogue[12]={0}; PtR2ShaderInterface vi; const PtR2ShaderIR *pvs; PtR2Program *program=nil;
         for(;;) {   /* a PVS program that does not prepare on Metal falls back to the CPU form (remembered per key) */
         if(gpu) {
@@ -816,6 +921,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
             else { vb.resize((size_t)d->vertices*ni*4); for(uint32_t v=0;v<d->vertices;v++) memcpy(&vb[(size_t)v*ni*4],d->vertex[v],ni*16); vertexData=vb.data(); }
             vi=d->vi; vi.input_count=ni; pvs=d->pvs;
             r.positionOutput=(uint8_t)d->position_output; r.vte=1; r.selectVaryings=1; r.stride=raw?d->raw_stride:(uint16_t)(ni*16);
+            r.fog=d->fog; r.fogSelect=d->fog_select; r.fogOutput=d->fog_output; r.clipPlanes=d->clip_planes;   /* GPU vertex stage only (approximation: not on the CPU one) */
             for(unsigned k=0;k<nv;k++){r.pvsOutput[k]=d->pvs_output[k];memcpy(r.select[k],d->component[k],4);}
             for(unsigned j=0;j<ni;j++)r.attribute[j]=raw?(PtR2Attribute){d->raw_attribute[j].offset,d->raw_attribute[j].components,d->raw_attribute[j].format}:(PtR2Attribute){(uint16_t)(16*j),4,0};
             for(unsigned j=0;j<ni;j++)r.vapSelect[j]=raw&&d->raw_general?d->raw_select[j]:0;
@@ -827,8 +933,33 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
             rawFetch=false;
             std::vector<OpticsVertexOut> vo(d->vertices?d->vertices:1);
             if(!optics_draw_vertices(d,vo.data(),why)) return OPTICS_EXEC_REFUSED;
-            vb.resize((size_t)d->vertices*(nv+1)*4);
-            for(uint32_t v=0;v<d->vertices;v++) {
+            if(d->stuff==1) {   /* generated line coordinates (draw.h): each segment its own vertex pair, s from the stipple accumulator */
+                std::vector<OpticsVertexOut> q; q.reserve(d->indices); float acc=0,k=12.0f*d->stipple_scale;
+                for(uint32_t l=0;l+1<d->indices;l+=2) {
+                    OpticsVertexOut a=vo[d->index[l]],b=vo[d->index[l+1]];
+                    float len=std::max(fabsf(b.window[0]-a.window[0]),fabsf(b.window[1]-a.window[1])); if(d->stipple_reset==1) acc=0;
+                    for(unsigned j=0;j<nv;j++) if(d->stuffed[j]) for(unsigned c=0;c<4;c++) {
+                        if(d->component[j][c]==0){ a.varying[j][c]=d->line_s[0]; b.varying[j][c]=d->line_s[1]; }
+                        else if(d->component[j][c]==1){ a.varying[j][c]=acc*k; b.varying[j][c]=(acc+len)*k; } }
+                    acc+=len; q.push_back(a); q.push_back(b);
+                }
+                vo.swap(q); wide_index.resize(vo.size()); for(uint32_t i=0;i<vo.size();i++) wide_index[i]=i;
+                nvertex=(uint32_t)vo.size(); index=wide_index.data(); nindex=nvertex;
+            }
+            if(wide) {
+                std::vector<OpticsVertexOut> q; q.reserve((size_t)nindex*2); std::vector<uint32_t> quads;
+                for(uint32_t l=0;l+1<nindex;l+=2) {
+                    const OpticsVertexOut &a=vo[index[l]],&b=vo[index[l+1]];
+                    float dx=b.window[0]-a.window[0],dy=b.window[1]-a.window[1],h=d->line_width*0.5f,ox=fabsf(dx)>=fabsf(dy)?0:h,oy=ox?0:h;
+                    uint32_t base=(uint32_t)q.size();
+                    for(int c=0;c<4;c++){ OpticsVertexOut v=c==0||c==3?a:b; float sgn=c<2?-1.0f:1.0f; v.window[0]+=sgn*ox; v.window[1]+=sgn*oy; q.push_back(v); }
+                    for(uint32_t k:{0u,1u,2u,0u,2u,3u}) quads.push_back(base+k);
+                }
+                wide_index.swap(quads); vo.swap(q); nvertex=(uint32_t)vo.size(); index=wide_index.data(); nindex=(uint32_t)wide_index.size();
+                if(!nindex) return OPTICS_EXEC_DONE;
+            }
+            vb.resize((size_t)nvertex*(nv+1)*4);
+            for(uint32_t v=0;v<nvertex;v++) {
                 float *o=&vb[(size_t)v*(nv+1)*4],w=vo[v].window[3];
                 o[0]=(2.0f*vo[v].window[0]/W-1.0f)*w; o[1]=(1.0f-2.0f*vo[v].window[1]/surface->height)*w; o[3]=w;
                 o[2]=(d->depth_enable?2.0f*vo[v].window[2]-1.0f:0.0f)*w;   /* the pass-through route maps z to (z+w)/2 */
@@ -844,7 +975,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
             pvs=pass_ir[nv];
         }
         ProgramKey key; memset(&key,0,sizeof key); key.us=d->us_id; key.pvs=gpu?d->pvs_id:0; key.outputs=vi.output_count; key.inputs=vi.input_count; key.route=r;
-        for(unsigned u=0;u<OPTICS_DRAW_TEXTURES;u++) if(d->texture_mask>>u&1 && d->texture[u].cube) key.cube|=1u<<u;
+        for(unsigned u=0;u<OPTICS_DRAW_TEXTURES;u++) if(d->texture_mask>>u&1){ if(d->texture[u].cube) key.cube|=1u<<u; if(d->texture[u].depth) key.cube|=1u<<(16+u); }
         if(last_valid && KeyEq()(key,last_key)) program=last_program;
         else {
             auto found=programs.find(key);
@@ -864,7 +995,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
             }
             last_key=key; last_program=program; last_valid=true;
         }
-        if(!program && gpu){ gpu=false; memset(&r.pvsOutput,0,sizeof r.pvsOutput); r.vte=0; r.selectVaryings=0; memset(r.select,0,sizeof r.select);
+        if(!program && gpu){ gpu=false; memset(&r.pvsOutput,0,sizeof r.pvsOutput); r.vte=0; r.selectVaryings=0; memset(r.select,0,sizeof r.select); r.fog=r.fogSelect=r.fogOutput=r.clipPlanes=0;
             memset(r.attribute,0,sizeof r.attribute);memset(r.vapSelect,0,sizeof r.vapSelect); e=nil; continue; }
         if(!program) return fail(why,"program preparation",e);
         break;
@@ -887,14 +1018,18 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
         memcpy(raster.vertexEpilogue,epilogue,sizeof epilogue);
         raster.samplers=1; for(unsigned u=0;u<OPTICS_DRAW_TEXTURES;u++) raster.sampler[u]=d->texture[u].sampler;
         raster.alphaTest=d->alpha_test; raster.alphaCompare=d->alpha_func; raster.alphaReference=d->alpha_ref;
-        raster.lines=d->lines; raster.query=d->query; for(unsigned c=0;c<4;c++) raster.blendColor[c]=(d->blend_color>>(c==3?24:16-8*c)&255)/255.0f;   /* ARGB8888 -> RGBA */
+        raster.lines=d->lines&&!wide; raster.query=d->query; raster.fill=d->fill;
+        memcpy(raster.fog,d->fog_color,sizeof d->fog_color); raster.fog[3]=d->fog_scale; raster.fog[4]=d->fog_offset;
+        memcpy(raster.clipPlane,d->clip_plane,sizeof raster.clipPlane); memcpy(raster.lodBias,d->lod_bias,sizeof raster.lodBias);
+        memcpy(raster.border,d->border,sizeof raster.border); for(unsigned u=0;u<16;u++) raster.textureMode[u]=d->border_mode[u]|(uint32_t)d->chroma[u]<<5; memcpy(raster.chromaKey,d->chroma_key,sizeof raster.chromaKey); for(unsigned c=0;c<4;c++) raster.blendColor[c]=(d->blend_color>>(c==3?24:16-8*c)&255)/255.0f;   /* ARGB8888 -> RGBA */
         static const float zero[4]={0,0,0,0};
-        if(owner.enabled()&&!touch(*surface))return failhard(why,"reserved colour destination",nil);
-        if(!retry([&]{return owner.draw(renderer,program,surface->target,vertexData,d->vertices,r.stride?r.stride:sizeof(PtR2Vertex),d->index,d->indices,
+        if(!ram&&owner.enabled()&&!touch(*surface))return failhard(why,"reserved colour destination",nil);
+        if(!retry([&]{return owner.draw(renderer,program,surface->target,vertexData,nvertex,r.stride?r.stride:sizeof(PtR2Vertex),index,nindex,
               gpu?&d->pvs_constant[0][0]:zero,gpu?std::max(1u,d->pvs_constants)*16:sizeof zero,&d->us_constant[0][0],sizeof d->us_constant,
               (NSArray<PtR2Texture *> *)textures,linear,raster,&e);},&e)) return failhard(why,"draw",e);
-        if(surface->bound&&(d->depth_write||d->stencil_enable))for(auto &z:depths)if(z.depth==surface->bound&&z.linear_io)z.dirty=true;
-        if(!touch(*surface)) return failhard(why,"VRAM ownership",nil); stats_draws++;if(gpu&&r.vte==2)stats_vte2_draws++;if(rawFetch){stats_raw_draws++;stats_raw_bytes+=(uint64_t)d->vertices*d->raw_stride;}
+        if(surface->bound&&(d->depth_write||d->stencil_enable))for(auto &z:depths)if(z.depth==surface->bound&&z.linear_io&&!depth_touch(z))return failhard(why,"depth ownership",nil);
+        if(!ram && !touch(*surface)) return failhard(why,"VRAM ownership",nil); stats_draws++;if(gpu&&r.vte==2)stats_vte2_draws++;if(rawFetch){stats_raw_draws++;stats_raw_bytes+=(uint64_t)d->vertices*d->raw_stride;}
+        if(ram) return write_ram(temp,d->cb_endian)?OPTICS_EXEC_DONE:failhard(why,"write-back to guest RAM",nil);
         if(surface->cached_seen!=cache_adds){ invalidate(surface->start,surface->end); surface->cached_seen=cache_adds; }   /* nothing cached since: nothing to drop */
         if(++since_commit>=batch_draws()){ NSError *c=nil; commit(&c); poll(); }
         return OPTICS_EXEC_DONE;

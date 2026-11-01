@@ -18,6 +18,8 @@ typedef struct {
     uint8_t swap;                           /* TX_OFFSET[1:0] endian swap of the texture's memory (as VAP: 0 none, 1 16-bit, 2 32-bit, 3 halves) */
     uint8_t cube;                           /* six square faces, Face0..5 contiguous (R5xx Acceleration 4.6), level 0 */
     uint8_t levels;                         /* mip levels uploaded and sampled (1: level 0 only) */
+    uint32_t depth;                         /* 3D: slices (TX_FORMAT0 [25:22] log2), stored one after another; 0: 2D */
+    uint8_t floating;                       /* float formats 0x18..0x1d: 1 + (format - 0x18) (I16, I16A16, RGBA16, I32, I32A32, RGBA32); 0 none */
 } OpticsTexture;
 typedef struct { uint16_t offset; uint8_t components,format; } OpticsRawAttribute;
 typedef struct {
@@ -48,9 +50,24 @@ typedef struct {
      * MTLBlendFactor (Zero..OneMinusBlendAlpha) and MTLBlendOperation enum values; blend_color: RB3D_BLEND_COLOR, ARGB8888. */
     uint32_t blend,blend_color;
     /* Point sprites: each point is expanded into a window-space quad of point_size pixels around the transformed
-     * vertex; corner[v] is 0..3 (bit 0 right, bit 1 lower). Varyings with sprite[k] take the generated (s,t,0,1),
+     * vertex; corner[v] is 0..3 (bit 0 right, bit 1 lower). Varyings with stuffed[k] take the generated (s,t,0,1),
      * s/t interpolated from sprite_st (S0,T0 at corner 0, S1,T1 at corner 3). */
-    uint32_t sprite; float point_size[2],sprite_st[4]; uint8_t *corner; uint8_t sprite_varying[OPTICS_DRAW_VARYINGS];
+    uint32_t sprite; float point_size[2],sprite_st[4]; uint8_t *corner; uint8_t stuffed[OPTICS_DRAW_VARYINGS];
+    /* Generated ("stuffed", GB_ENABLE) coordinates of lines and triangles, read through stuffed[k] like the sprite's
+     * (component 0 s, 1 t). stuff 1, lines: s runs from line_s[0] to line_s[1] along each segment (GA_LINE_S0/S1), t is the
+     * stipple accumulator, the major-axis length in 1/12 pixel since its reset (stipple_reset: 1 each line, 2 each packet),
+     * times stipple_scale (GA_LINE_STIPPLE_CONFIG; Tiger's pattern texture has one row per bit); the executor's CPU vertex
+     * stage fills them. stuff 2, triangles (polygon stipple): s,t are the window position shifted right by
+     * stipple_shift (GA_TRIANGLE_STIPPLE x, y), both negated (Tiger's pattern texture holds the rows from the last and
+     * each row's bits from the right), computed in the fragment function. */
+    uint8_t stuff,stipple_reset,stipple_shift[2]; float stipple_scale,line_s[2];
+    /* RB3D_CBLEND DISCARD_SRC_PIXELS [5:3], with or without blending: the source pixel is not written when its alpha (1),
+     * colour (2) or both (3) are 0, or 1 (4, 5, 6), as 8-bit values (r300_reg.h; no Tiger draw seen using it yet). */
+    uint8_t discard;
+    /* TX_FILTER1 [1:0] CHROMA_KEY per unit: 1 FORCE kills the fragment, 2 BLEND samples transparent black, where the texel
+     * equals TX_CHROMA_KEY (bytes X..W in the texel's component order, through the unit's selects; Tiger's stipple pattern
+     * textures key their zero texels). Approximation: compared after filtering. */
+    uint8_t chroma[OPTICS_DRAW_TEXTURES]; float chroma_key[OPTICS_DRAW_TEXTURES][4];
     uint32_t color_mask;                     /* RGBA bits 0..3 */
     /* Fast-clear values in force for this draw (RB3D_COLOR_CLEAR_VALUE ARGB, ZB_DEPTHCLEARVALUE as 0..1). */
     uint32_t color_clear; float depth_clear;
@@ -67,12 +84,32 @@ typedef struct {
     uint32_t zb_offset; uint8_t depth_enable,depth_write,depth_compare,stencil_enable,stencil_ref,stencil_mask,stencil_writemask;
     uint8_t stencil_op[4],stencil_back[4];   /* compare, fail, depth-fail, pass */
     uint32_t approx;                         /* OPTICS_APPROX_*: state executed approximately (counted, not refused) */
+    /* Fixed-function units around the programs (r300_reg.h names, read from what Tiger's driver programs).
+     * cb_endian: RB3D_COLORPITCH0 [20:19], the colour buffer's memory endian swap (as TX_OFFSET's), kept by targets in
+     * guest RAM (glReadPixels) where no CPU aperture swaps. */
+    uint8_t cb_endian;
+    /* FG fog: x = clamp(input * GA_FOG_SCALE + GA_FOG_OFFSET), colour.rgb = mix(colour.rgb, FG_FOG_COLOR, x). Tiger's
+     * driver programs FG_FOG_BLEND linear and computes the exp/exp2 factor in the vertex program. The input is GB_SELECT's:
+     * 0..3 the alpha of VAP colour 0..3 (PVS output fog_output), 4 the clip w, 5 the clip z. */
+    uint8_t fog,fog_select,fog_output; float fog_color[3],fog_scale,fog_offset;
+    uint8_t clip_planes; float clip_plane[6][4];   /* VAP_CLIP_CNTL [5:0] (0 with CLIP_DISABLE); clip-space planes, PVS vectors 1024+i */
+    uint8_t flat;                                  /* varyings of colours that GA_COLOR_CONTROL shades FLAT (indices put the provoking vertex first) */
+    uint8_t rop;                                   /* RB3D_ROPCNTL: 0 off, else 1 + ROP [11:8] (the GL logic op truth table) */
+    uint8_t fill;                                  /* GA_POLY_MODE: 0 fill, 1 both faces as lines */
+    float line_width;                              /* GA_LINE_CNTL: line width in pixels */
+    uint8_t point_size_output; float point_min,point_max;   /* VAP_OUT_VTX_FMT_0 bit 16: PVS output of each point's size (.x), 0 none; GA_POINT_MINMAX */
+    float lod_bias[OPTICS_DRAW_TEXTURES];          /* TX_FILTER1 [12:3], in levels */
+    /* Border address modes per unit, emulated in the fragment program over a zero border: bits 1:0 S, 3:2 T (1
+     * CLAMP_TO_BORDER, 2 CLAMP, which also clamps the coordinate to 0..1), bit 4 linear filtering. border: TX_BORDER_COLOR
+     * as the texel's RGBA after the unit's component selects. */
+    uint8_t border_mode[OPTICS_DRAW_TEXTURES]; float border[OPTICS_DRAW_TEXTURES][4];
 } OpticsDraw;
-/* Texture state the executor approximates: MIP: levels it does not model (TXPITCH with levels, a LOD bias, more levels
- * than the size has), GL_CLAMP/border modes as edge clamp with a zero border, ANISO: an unseen anisotropy field (above
+/* Texture state the executor approximates: MIP: levels it does not model (TXPITCH with levels, more levels than the
+ * size has), BORDER: mirror-once to a border, ANISO: an unseen anisotropy field (above
  * 16:1), micro/macro-tiled texels read as linear; YUV601: YUV422 converted with BT.601 coefficients; WIDE: colour
  * targets other than ARGB8888 rendered at 8 bits per channel, 16-bit texture channels (W16Z16Y16X16, X16) held at 8. */
-enum { OPTICS_APPROX_MIP=1, OPTICS_APPROX_BORDER=2, OPTICS_APPROX_ANISO=4, OPTICS_APPROX_TILED=8, OPTICS_APPROX_YUV601=16, OPTICS_APPROX_WIDE=32 };
+enum { OPTICS_APPROX_MIP=1, OPTICS_APPROX_BORDER=2, OPTICS_APPROX_ANISO=4, OPTICS_APPROX_TILED=8, OPTICS_APPROX_YUV601=16, OPTICS_APPROX_WIDE=32,
+       OPTICS_APPROX_FIXED=64 };   /* FIXED: a fixed-function state draw.h does not model (polygon points, fog inputs) */
 /* Vertex arrays from 3D_LOAD_VBPNTR: per array dword components, dword stride and GPU address. */
 typedef struct { uint32_t count; struct { uint32_t components,stride; uint64_t offset; } array[16]; uint32_t local; } OpticsAos;   /* local: bit k, array k is in VRAM */
 /* GPU-memory read for vertex/index fetch; returns nonzero on success. */

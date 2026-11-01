@@ -44,6 +44,13 @@ typedef struct {
     /* vte 2: full VTE mask in vertexEpilogue[8], viewport [0..5], target [6..7]. */
     uint8_t vte,selectVaryings,select[8][4],pad[2];
     uint16_t vapSelect[16]; /* Raw VAP formats: component selectors and write mask. */
+    /* Fixed-function stages (draw.h): fog 1 blends the FG fog after the fragment program, its input from fogSelect 0..3
+     * (the alpha of PVS output fogOutput), 4 (clip w) or 5 (clip z); clipPlanes: user planes 0..5 (PtR2Raster.clipPlane);
+     * flat: varyings interpolated flat; rop 0 or 1 + the GL logic op truth table (blending off, the target read back in
+     * the fragment function); textureFixed 1: samples take PtR2Raster's LOD bias and border emulation; generated: varyings
+     * (bit j) that are the negated window position shifted right by generatedShift (x 3:0, y 7:4), the polygon stipple's
+     * coordinates, component c from select[j][c] (0 x, 1 y, 4 zero, 5 one); discard 0..6: draw.h's source pixel discard. */
+    uint8_t fog,fogSelect,fogOutput,clipPlanes,flat,rop,textureFixed,generated,generatedShift,discard,pad2[2];
 } PtR2Route;
 typedef struct {uint8_t compare,fail,depthFail,pass;} PtR2StencilFace;
 typedef struct {
@@ -57,7 +64,7 @@ typedef struct {
     float alphaReference;
     /* samplers 1 = per texture unit sampler[j]: bits 2:0 S and 5:3 T address mode (MTLSamplerAddressMode values
      * 0..5), bit 6 linear magnification, bit 7 linear minification, bits 9:8 between levels (0 none: level lodMin only,
-     * 1 nearest, 2 linear), 12:10 log2 of the largest anisotropy, 16:13 the first level used (lodMinClamp);
+     * 1 nearest, 2 linear), 12:10 log2 of the largest anisotropy, 16:13 the first level used (lodMinClamp), 19:17 R (3D);
      * 0 = the draw's linear flag. */
     uint8_t samplers;
     uint32_t sampler[16];
@@ -67,6 +74,14 @@ typedef struct {
     float blendColor[4];
     float depthBias,depthSlope;   /* polygon offset (Metal setDepthBias units and slope scale) */
     uint32_t query;               /* occlusion query whose samples this draw counts, 0 none */
+    /* Fixed-function values (PtR2Route): fog colour RGB, then scale and offset; clip-space planes; per texture unit the
+     * LOD bias, the border colour, the chroma key and textureMode (bits 1:0 S, 3:2 T: 1 border, 2 clamp to 0..1 then
+     * border; bit 4 linear filtering; 6:5 chroma key 1 kill, 2 transparent black). fill 1: triangles as lines. */
+    float fog[5];
+    float clipPlane[6][4];
+    float lodBias[16],border[16][4],chromaKey[16][4];
+    uint32_t textureMode[16];
+    uint8_t fill;
 } PtR2Raster;
 /* A texture upload with mip levels: level k (max(1, size >> k) texels) of face f starts at offset[k] +
  * f * face[k] in the bytes, with rows of row[k] bytes. */
@@ -135,6 +150,11 @@ typedef struct {
 /* With mip levels (PtR2Levels). */
 - (PtR2Texture *)textureWidth:(uint32_t)width height:(uint32_t)height faces:(unsigned)faces levels:(const PtR2Levels *)levels
     bytes:(const void *)bytes length:(size_t)length layout:(OpticsPixelLayout)layout error:(NSError **)error;
+/* A 3D texture, level 0: slice z's rows start at bytes + z * sliceBytes. */
+- (PtR2Texture *)textureWidth:(uint32_t)width height:(uint32_t)height depth:(uint32_t)depth bytes:(const void *)bytes length:(size_t)length
+    rowBytes:(size_t)rowBytes sliceBytes:(size_t)sliceBytes layout:(OpticsPixelLayout)layout error:(NSError **)error;
+/* Immutable RGBA32F level-zero texture (float formats, expanded by the caller). */
+- (PtR2Texture *)floatTextureWidth:(uint32_t)width height:(uint32_t)height bytes:(const float *)rgba error:(NSError **)error;
 /* Colour import of a guest surface into a single-sample target (same size); depth/stencil cleared. */
 - (BOOL)load:(PtR2Target *)target from:(PtR2Texture *)texture error:(NSError **)error;
 /* A sampleable view of a single-sample target's colour with a component swizzle (component[k] 0..3 = R,G,B,A
@@ -162,7 +182,7 @@ typedef struct {
  * Only rows [y,y+height) are imported; private capacity outside them is preserved. */
 - (BOOL)loadDepth:(PtR2Depth *)depth y:(uint32_t)y height:(uint32_t)height
     bytes:(const void *)bytes format:(unsigned)format error:(NSError **)error;
-- (PtR2Readback *)readbackDepth:(PtR2Depth *)depth height:(uint32_t)height error:(NSError **)error;
+- (PtR2Readback *)readbackDepth:(PtR2Depth *)depth y:(uint32_t)y height:(uint32_t)height error:(NSError **)error;   /* rows y..y+height-1 */
 - (NSData *)copyDepthReadback:(PtR2Readback *)readback format:(unsigned)format error:(NSError **)error;
 /* Clears and draws stay on GPU. An entire target clear, not a masked/scissored guest clear. */
 - (BOOL)clear:(PtR2Target *)target color:(MTLClearColor)color depth:(double)depth error:(NSError **)error;

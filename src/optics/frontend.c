@@ -270,11 +270,12 @@ static void view_unmap(PtRadeon *d) {
 }
 /* Fast VRAM: the guest maps the CPU view of the framebuffer's aperture (fb_ap) whenever the board offers the mapping,
  * the protection and the fault route (diagnostic switch OPTICS_DIRECT_VRAM=0: every access traps). Lanes, SURFACE regions
- * and the CP thread need no exception: the view is in the CPU's byte order and the device lock covers the fault route. Only the opt-in render-owner / depth-I/O paths keep every access trapped. Mapped all closed. */
+ * and the CP thread need no exception: the view is in the CPU's byte order and the device lock covers the fault route. Only the opt-in render-owner path
+ * and OPTICS_DEPTH_IO=2 keep every access trapped. Mapped all closed. */
 static void direct_update(PtRadeon *d) {
     static int on=-1; if(on<0){ const char *v=getenv("OPTICS_DIRECT_VRAM"); on=!v || atoi(v)!=0; }
     static int trapped=-1;if(trapped<0){const char *split=getenv("OPTICS_RENDER_OWNER"),*depth=getenv("OPTICS_DEPTH_IO");
-        trapped=(split&&atoi(split)!=0)||(depth&&atoi(depth)!=0);}
+        trapped=(split&&atoi(split)!=0)||(depth&&atoi(depth)==2);}   /* OPTICS_DEPTH_IO=2: depth I/O with every access trapped (diagnostic) */
     int want=on && !trapped && cpu_fault && d->config.direct_map && d->config.vram_protect && d->config.vram_guard;
     if(want==d->direct) return;
     d->stats.direct_switches++;
@@ -819,8 +820,8 @@ static int admit_completion(PtRadeon *d,unsigned writes) {
     /* Completion is published when the CP reaches it (as AMD's CP does for SCRATCH: "the CP got here"),
      * not when Metal finished. Sound by the contract above: the GPU work before it is already decoded with snapshot
      * inputs, ordered on one queue, and every consumer of GPU-produced bytes materializes them (commit + wait) first.
-     * That holds while the GPU writes only VRAM (targets outside VRAM are refused): a GPU result in guest RAM (GART),
-     * which no CPU read traps, would need the deferred publish again. The executor then commits per batch
+     * That holds while the GPU writes guest RAM (GART) only synchronously: a target there is written back before its draw
+     * returns (frontend_metal.mm import_ram), since no CPU read of guest RAM traps. The executor then commits per batch
      * (OPTICS_COMMIT_DRAWS), at scanout and at materialize, not per guest fence (Xbench Spinning Squares: one fence and one
      * Metal commit per draw kept four batches in flight, about 24 fps). Diagnostic switches: OPTICS_EARLY_FENCE=0 restores
      * the deferred completion; OPTICS_FENCE_BLOCK=1 holds the CP at the packet until the GPU completed. */

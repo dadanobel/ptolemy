@@ -42,9 +42,10 @@ try:
  test('optics-lines-blend')
  test('optics-pvs-math',cpp=True)
  test('optics-depth-growth',{'OPTICS_DEPTH_CAPACITY':'1'},{'OPTICS_DEPTH_CAPACITY':'0'})
- test('optics-depth-io',{'OPTICS_DEPTH_IO':'1'},{'OPTICS_DEPTH_IO':'0'})
- # The complete depth contract also runs with FIFO Metal ownership enabled.
- run([b/'optics-depth-io'],{'OPTICS_DEPTH_IO':'1','OPTICS_RENDER_OWNER':'1'})
+ test('optics-depth-io',{'OPTICS_DEPTH_IO':'2'},{'OPTICS_DEPTH_IO':'0'})
+ # The complete depth contract also runs with FIFO Metal ownership enabled; then the product's on-demand export.
+ run([b/'optics-depth-io'],{'OPTICS_DEPTH_IO':'2','OPTICS_RENDER_OWNER':'1'})
+ run([b/'optics-depth-io'],{'OPTICS_DEPTH_IO':'1'})
  exe=test('optics-render-owner',{'OPTICS_RENDER_OWNER':'1','OPTICS_PASS_REASONS':'1'},{'OPTICS_RENDER_OWNER':'0'},cpp=True)
  run([exe],{'OPTICS_RENDER_OWNER':'1','OPTICS_PASS_REASONS':'0'},True)
  exe=test('optics-raw-vertices',{'OPTICS_RAW_VERTICES':'1'},{'OPTICS_RAW_VERTICES':'0'})

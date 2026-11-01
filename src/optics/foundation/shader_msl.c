@@ -98,6 +98,7 @@ static void arithmetic(Writer *w, unsigned op, unsigned lanes,
     case PT_R2_OP_RSQ_FF: put(w, "(pt_in(%s)==0.0f?0.0f:pt_div(1.0f,pt_sqrt(abs(%s))))",a,a); break;
     case PT_R2_OP_EXPE: put(w, "pt_exp2(pt_mul(%s,%s(1.44269504f)))", a, type); break;
     case PT_R2_OP_POW: put(w, "(pt_in(%s)==0.0f&&pt_in(%s)==0.0f?%s(1.0f):pt_dx(pt_exp2(pt_mul(%s,pt_log2(abs(%s))))))", a, c, type, c, a); break;
+    case PT_R2_OP_POW01: put(w, "(saturate(pt_in(%s))==0.0f&&pt_in(%s)==0.0f?%s(1.0f):saturate(pt_dx(pt_exp2(pt_mul(%s,pt_log2(saturate(%s)))))))", a, c, type, c, a); break;
     case PT_R2_OP_SIN: put(w, "sin(pt_in(%s))", a); break;
     case PT_R2_OP_COS: put(w, "cos(pt_in(%s))", a); break;
     case PT_R2_OP_MUL: put(w, "pt_mul(%s,%s)", a, b); break;

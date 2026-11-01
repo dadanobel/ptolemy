@@ -83,6 +83,8 @@ static void arithmetic(unsigned op, unsigned lanes, const float a[4],
         case PT_R2_OP_RSQ_FF: r = x == 0.0f ? 0.0f : pt_r2_fp_div(1.0f,pt_r2_fp_sqrt(fabsf(x),p),p); break;
         case PT_R2_OP_EXPE: r = pt_r2_fp_exp2(pt_r2_fp_mul(x,1.44269504f,p),p); break;
         case PT_R2_OP_POW: r = x == 0.0f && z == 0.0f ? 1.0f : pt_r2_fp_exp2(pt_r2_fp_mul(z,pt_r2_fp_log2(fabsf(x),p),p),p); if (isinf(r)) r = FLT_MAX; break;
+        case PT_R2_OP_POW01: { float b = x < 0.0f ? 0.0f : x > 1.0f ? 1.0f : x; r = b == 0.0f && z == 0.0f ? 1.0f : pt_r2_fp_exp2(pt_r2_fp_mul(z,pt_r2_fp_log2(b,p),p),p);
+            r = r > 1.0f ? 1.0f : r < 0.0f || r != r ? 0.0f : r; break; }
         case PT_R2_OP_SIN: r = sinf(x); break;
         case PT_R2_OP_COS: r = cosf(x); break;
         case PT_R2_OP_MUL: r = pt_r2_fp_mul(x,y,p); break;

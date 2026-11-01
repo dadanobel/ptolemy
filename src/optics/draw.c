@@ -268,7 +268,38 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
             if(i==n && n<16){ memcpy(seen[n++],k,sizeof k); fprintf(stderr,"optics-draw: unmodelled raster state: cull %#x, polygon offset %#x (front %g, %g), polygon mode %#x, fog %#x\n",
                 k[0],k[1],f32(k[2]),f32(k[3]),k[4],k[5]); } }
     }
-    d->cb_bpp=cbytes[format]; d->cb_format=(uint8_t)format; d->cb_select=(uint8_t)(R(US_OUT_FMT_0)>>8);
+    {   /* Development, OPTICS_STATE_LOG=1: the registers of the fixed-function units, one line whenever they change
+         * (colour clear value first, to tell test cases apart; then fog, user clip planes with PVS vectors 1024-1029,
+         * lines, points, output format, ROP, shading, polygon mode, texture unit 0 and 7 (stipple), AA, triangle stipple, RS). */
+        static int on=-1; static unsigned lines; static uint32_t last[96];
+        if(on<0){const char *v=getenv("OPTICS_STATE_LOG"); on=v&&atoi(v)!=0;}
+        if(on && lines<2000) {
+            static const uint16_t at[]={0x4e14,0x4bc0,0x4bc4,0x4bc8,0x4bcc,0x4bd0,0x4bd8,0x401c,0x4294,0x4298,0x4008,0x221c,0x2080,
+                0x4234,0x4238,0x4260,0x4264,0x4268,0x421c,0x4230,0x2090,0x2094,0x4e18,0x4278,0x4288,0x42b8,0x4400,0x4440,0x45c0,
+                0x4480,0x44c0,0x4500,0x441c,0x449c,0x44dc,0x451c,0x455c,0x4020,0x46a4,0x4104,0x4214,0x4300,0x4304,0x4310,0x4314,0x4318,
+                0x431c,0x4330,0x4334,0x4338,0x433c,0x4320,0x4324,0x4328,0x432c,0x4f10,0x4f24,0x4bd4,0x4e04,0x4e08,0x4e0c};
+            enum { N=sizeof at/sizeof at[0] }; _Static_assert(N<=96,"state log size"); uint32_t k[N]; for(unsigned i=0;i<N;i++) k[i]=R(at[i]);
+            k[0]=R(0x4e28)^prim<<28;   /* the target and primitive instead of the clear value */
+            if(memcmp(k,last,sizeof k)) { memcpy(last,k,sizeof k); lines++;
+                char text[1600]; int n=0; for(unsigned i=0;i<N && n<(int)sizeof text-24;i++) n+=snprintf(text+n,sizeof text-n," %04x=%08x",at[i],k[i]);
+                if(k[11]&63) for(unsigned p=0;p<6 && n<(int)sizeof text-80;p++){ uint32_t v[4];
+                    if(optics_r300_pvs_vector(st,1024+p,v)==OPTICS_STATE_OK) n+=snprintf(text+n,sizeof text-n," ucp%u=(%g %g %g %g)",p,f32(v[0]),f32(v[1]),f32(v[2]),f32(v[3])); }
+                fprintf(stderr,"optics-state: prim %u%s\n",prim,text); }
+        }
+    }
+    d->cb_bpp=cbytes[format]; d->cb_format=(uint8_t)format; d->cb_select=(uint8_t)(R(US_OUT_FMT_0)>>8); d->cb_endian=(uint8_t)(pitch>>19&3);
+    /* Fixed-function units (draw.h). FG_FOG_BLEND bit 0 enable; FG_FOG_COLOR_R/G/B 10-bit; GA_FOG_SCALE/OFFSET floats;
+     * GB_SELECT [2:0] the fog input. VAP_CLIP_CNTL [5:0] user plane enables, bit 16 CLIP_DISABLE. RB3D_ROPCNTL bit 2
+     * enable, [11:8] the GL truth-table code. GA_POLY_MODE: bit 0 enables front [6:4] and back [9:7] types (0 point,
+     * 1 line, 2 triangle); Tiger's driver leaves 0x110 (disabled) in place for filled draws. Points are not modelled. */
+    if(R(0x4bc0)&1) { d->fog=1; d->fog_select=(uint8_t)(R(0x401c)&7); d->fog_scale=f32(R(0x4294)); d->fog_offset=f32(R(0x4298));
+        for(int c=0;c<3;c++) d->fog_color[c]=(float)(R(0x4bc8+4*c)&1023)/1023.0f;
+        if(d->fog_select>5){ d->fog=0; d->approx|=OPTICS_APPROX_FIXED; } }
+    { uint32_t cc=R(0x221c); if((cc&63) && !(cc>>16&1)) { d->clip_planes=(uint8_t)(cc&63);
+        for(unsigned p=0;p<6;p++) if(cc>>p&1){ uint32_t w[4]; if(optics_r300_pvs_vector(st,1024+p,w)!=OPTICS_STATE_OK) return refuse(reason,"user clip plane not loaded");
+            for(int c=0;c<4;c++) d->clip_plane[p][c]=f32(w[c]); } } }
+    { uint32_t rc=R(0x4e18); if(rc&4) d->rop=(uint8_t)(1+(rc>>8&15)); }
+    { uint32_t pm=R(0x4288); if(pm&1) { unsigned front=pm>>4&7,back=pm>>7&7; if(front==1 && back==1) d->fill=1; else if(front!=2 || back!=2) d->approx|=OPTICS_APPROX_FIXED; } }
     {   /* Log whether Tiger's driver programs the output selects, once per format and value (I8, UV88 readings unverified) */
         static uint32_t seen[16]; static unsigned n; uint32_t k=format<<16|(R(US_OUT_FMT_0)&0xffff); unsigned i=0; while(i<n && seen[i]!=k) i++;
         if(i==n && n<16){ seen[n++]=k; fprintf(stderr,"optics-draw: colour format %u, US_OUT_FMT_0 %#x (first: target %#x, pitch %u)\n",format,R(US_OUT_FMT_0),R(RB3D_COLOROFFSET0),pitch&0x3ffe); }
@@ -317,6 +348,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
      * ADD, ADD_NOCLAMP, SUB, SUB_NOCLAMP, MIN, MAX, RSUB, RSUB_NOCLAMP (an 8-bit target clamps either way). Encoded for the
      * executor in Metal's factor/operation enum order, see draw.h. */
     uint32_t blend=R(RB3D_BLENDCNTL);
+    d->discard=(uint8_t)(blend>>3&7); if(d->discard==7) return refuse(reason,"source pixel discard mode 7");
     if(blend&1) {
         static const uint8_t factor[15]={0,1,2,3,6,7,4,5,8,9,10,11,12,13,14},op[8]={0,0,1,1,3,4,2,2};
         uint32_t a=blend>>1&1?R(RB3D_ABLENDCNTL):blend,f[4]={blend>>16&63,blend>>24&63,a>>16&63,a>>24&63};
@@ -418,7 +450,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
      * GA_LINE_CNTL width and stipple are not modelled; draw quads when wide lines show up. */
     if(prim==2||prim==3||prim==12) {
         uint32_t n=prim==2?count/2:count<2?0:prim==3?count-1:count;
-        d->lines=1; d->cull=0; d->depth_bias=d->depth_slope=0; d->indices=n*2; d->index=malloc((n?n:1)*2*sizeof *d->index); if(!d->index){free(indices);return refuse(reason,"out of memory");}
+        d->lines=1; d->cull=0; d->depth_bias=d->depth_slope=0; d->indices=n*2; d->line_width=(float)(R(0x4234)&0xffff)/6.0f; d->index=malloc((n?n:1)*2*sizeof *d->index); if(!d->index){free(indices);return refuse(reason,"out of memory");}
         for(uint32_t l=0;l<n;l++){ uint32_t a=prim==2?2*l:l,b=prim==2?2*l+1:l+1==count?0:l+1;
             d->index[2*l]=indices?indices[a]:a; d->index[2*l+1]=indices?indices[b]:b; }
         free(indices); indices=NULL; prim=0;
@@ -429,6 +461,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         uint32_t ps=R(GA_POINT_SIZE); d->sprite=1; d->cull=0; d->depth_bias=d->depth_slope=0;
         d->point_size[0]=(float)(ps>>16)/6.0f; d->point_size[1]=(float)(ps&0xffff)/6.0f;   /* 1/12-pixel radius units */
         for(int i=0;i<4;i++) d->sprite_st[i]=f32(R(GA_POINT_S0+4*i));
+        { uint32_t mm=R(0x4230); d->point_min=(float)(mm&0xffff)/6.0f; d->point_max=(float)(mm>>16)/6.0f; }
         float (*quad)[OPTICS_DRAW_INPUTS][4]=calloc(count*4u?count*4u:1,sizeof *quad); d->corner=calloc(count*4u?count*4u:1,1);
         if(!quad || !d->corner){free(quad);return refuse(reason,"out of memory");}
         static const uint8_t ring[4]={0,1,3,2};   /* quad-list vertices go around: TL, TR, BR, BL */
@@ -439,13 +472,19 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         uint32_t tri=prim==4?count/3:prim==5||prim==6?(count>=3?count-2:0):prim==13?count/4*2:prim==14?(count>=4?(count-2)/2*2:0):prim==15?(count>=3?count-2:0):UINT32_MAX;
         if(tri==UINT32_MAX){free(indices);return refuse(reason,"primitive type other than triangles/fans/strips/quads/polygon");}
         d->indices=tri*3; d->index=malloc((tri?tri:1)*3*sizeof *d->index); if(!d->index){free(indices);return refuse(reason,"out of memory");}
+        /* Flat shading (GA_COLOR_CONTROL 2 bits per colour, 1 FLAT; PROVOKING_VERTEX [17:16] 0..2 first..third, 3 last):
+         * Metal takes a flat value from a triangle's first vertex, so each triangle is rotated (its winding kept) to
+         * start with GL's provoking vertex: the chosen one of a list, strip or fan triangle, the last vertex of a quad
+         * (whose two triangles then fan around it), the first of a polygon. */
+        uint32_t cc=R(0x4278); int flat=!d->sprite && ((cc&3)==1 || (cc>>4&3)==1 || (cc>>8&3)==1 || (cc>>12&3)==1); unsigned pv=cc>>16&3; if(pv==3) pv=2;
         for(uint32_t t=0;t<tri;t++) {
-            uint32_t *o=d->index+3*t;
-            if(prim==4){o[0]=3*t;o[1]=3*t+1;o[2]=3*t+2;}
-            else if(prim==5||prim==15){o[0]=0;o[1]=t+1;o[2]=t+2;}
-            else if(prim==6){o[0]=t;o[1]=t&1?t+2:t+1;o[2]=t&1?t+1:t+2;}
-            else if(prim==13){uint32_t q=t/2*4;if(t&1){o[0]=q;o[1]=q+2;o[2]=q+3;}else{o[0]=q;o[1]=q+1;o[2]=q+2;}}
-            else {uint32_t q=t/2*2;if(t&1){o[0]=q+1;o[1]=q+3;o[2]=q+2;}else{o[0]=q;o[1]=q+1;o[2]=q+3;}}
+            uint32_t *o=d->index+3*t,first=~0u;
+            if(prim==4){o[0]=3*t;o[1]=3*t+1;o[2]=3*t+2;first=3*t+pv;}
+            else if(prim==5||prim==15){o[0]=0;o[1]=t+1;o[2]=t+2;first=prim==15?0:pv?t+pv:0;}
+            else if(prim==6){o[0]=t;o[1]=t&1?t+2:t+1;o[2]=t&1?t+1:t+2;first=t+pv;}
+            else if(prim==13){uint32_t q=t/2*4;if(flat){o[0]=q+3;o[1]=t&1?q+1:q;o[2]=t&1?q+2:q+1;}else if(t&1){o[0]=q;o[1]=q+2;o[2]=q+3;}else{o[0]=q;o[1]=q+1;o[2]=q+2;}}
+            else {uint32_t q=t/2*2;if(t&1){o[0]=q;o[1]=q+3;o[2]=q+2;}else{o[0]=q;o[1]=q+1;o[2]=q+3;}first=q+3;}   /* quad q,q+1,q+3,q+2 split along q..q+3 */
+            if(flat && first!=~0u) for(int k=0;k<2 && o[0]!=first;k++){uint32_t x=o[0];o[0]=o[1];o[1]=o[2];o[2]=x;}
             if(indices) for(int k=0;k<3;k++) o[k]=indices[o[k]];
         }
         free(indices); indices=NULL;
@@ -461,8 +500,14 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
     d->diag_out_fmt[0]=f0; d->diag_out_fmt[1]=f1;
     if(!(f0&1)) return refuse(reason,"VAP output without position");
     unsigned slot=1,color_slot[4]={~0u,~0u,~0u,~0u},scal_out[64],scal_comp[64],nscal=0,ic=R(RS_COUNT)>>7&15,ncol=0,ntex=0,reach=0;
+    if(f0>>16&1) { if(d->sprite) d->point_size_output=(uint8_t)slot; slot++; }   /* PT_SIZE_PRESENT: the size follows the position */
     for(unsigned c=0;c<4;c++) if(f0>>(1+c)&1) color_slot[c]=slot++;
+    if(d->fog && d->fog_select<4) { if(color_slot[d->fog_select]==~0u){ d->fog=0; d->approx|=OPTICS_APPROX_FIXED; } else d->fog_output=(uint8_t)color_slot[d->fog_select]; }
     for(unsigned t=0;t<8;t++) ntex+=f1>>(3*t)&7;
+    { uint32_t gb=R(0x4008),sc=R(0x4238);   /* GB_ENABLE: LINE_STUFF 1, TRIANGLE_STUFF 2 for the sets whose TEXn_SOURCE (31:16) is set */
+      if(!(gb>>16)) {}
+      else if(d->lines && gb>>1&1){ d->stuff=1; d->stipple_reset=(uint8_t)(sc&3); d->stipple_scale=f32(sc&~3u); d->line_s[0]=f32(R(0x4264)); d->line_s[1]=f32(R(0x4268)); if(d->stipple_reset!=1 && d->stipple_reset!=2) d->approx|=OPTICS_APPROX_FIXED; }
+      else if(!d->lines && !d->sprite && gb>>2&1){ uint32_t ts=R(0x4214); d->stuff=2; d->stipple_shift[0]=(uint8_t)(ts&15); d->stipple_shift[1]=(uint8_t)(ts>>16&15); } }
     for(unsigned i=0,n=(R(RS_INST_COUNT)&15)+1;i<n;i++) { uint32_t in=R(RS_INST_0+4*i),ip=R(RS_IP_0+4*(in&7));
         if(in>>3&1) for(unsigned c=0;c<4;c++) if((ip>>(13+3*c)&7)<4 && (ip&63)+(ip>>(13+3*c)&7)+1>reach) reach=(ip&63)+(ip>>(13+3*c)&7)+1; }
     if(reach>ntex && !d->sprite) for(unsigned c=0;c<4;c++) if(color_slot[c]!=~0u && ncol++>=ic) for(unsigned q=0;q<4;q++){scal_out[nscal]=color_slot[c];scal_comp[nscal++]=q;}
@@ -490,10 +535,10 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
                         /* Unverified: a component past the VAP output reads as GL's default texture coordinate (0,0,0,1).
                          * Some of Halo's fragment programs read texture coordinates 5 and 6 that the vertex program
                          * does not write; Tiger's driver points their RS_IP past the VAP output, at scalar 20 of 20. */
-                        if(!d->sprite) { d->component[k][c]=(uint8_t)(c==3?5:4); continue; }
-                        unsigned g=ptr+sel-nscal; d->sprite_varying[k]=1; d->component[k][c]=(uint8_t)(g<2?g:g==3?5:4);
+                        if(!d->sprite && !d->stuff) { d->component[k][c]=(uint8_t)(c==3?5:4); continue; }
+                        unsigned g=ptr+sel-nscal; d->stuffed[k]=1; d->component[k][c]=(uint8_t)(g<2?g:g==3?5:4);
                     } else if(sel<4) {
-                        if(d->sprite_varying[k]) return refuse(reason,"RS varying mixes sprite and vertex coordinates");
+                        if(d->stuffed[k]) return refuse(reason,"RS varying mixes generated and vertex coordinates");
                         if(out==~0u) out=scal_out[ptr+sel]; else if(out!=scal_out[ptr+sel]) return refuse(reason,"RS varying spans two VAP outputs");
                         d->component[k][c]=(uint8_t)scal_comp[ptr+sel];
                     } else d->component[k][c]=sel==5?5:4;
@@ -520,6 +565,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
                     reads=false; fmt=5;   /* unobservable: a constant (0,0,0,0) */
                 }
                 d->pvs_output[k]=(uint8_t)(reads?color_slot[cp]:0); for(unsigned c=0;c<4;c++) d->component[k][c]=(uint8_t)table[fmt][c];
+                if(reads && cp<4 && (R(0x4278)>>(4*cp)&3)==1 && !d->sprite && !d->lines) d->flat|=(uint8_t)(1u<<k);
             }
             d->us_input[k]=(uint8_t)addr; d->varyings++;
         }
@@ -577,6 +623,11 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
             d->approx|=OPTICS_APPROX_YUV601; /* Unverified: BT.601 coefficients, not checked against Tiger or hardware. */
             t->layout=optics_pixel_r300_yuv(f1t);t->bpp=2;
         }
+        else if(t->format>=0x18&&t->format<=0x1d) {   /* float: X, XW, XYZW at 16 or 32 bits per component (r300_reg.h FL_*); expanded
+                                                       * to RGBA32F on the CPU by the executor, level 0 only */
+            static const uint8_t comps[6]={1,2,4,1,2,4};
+            unsigned k=t->format-0x18; t->floating=(uint8_t)(1+k); t->bpp=(uint8_t)(comps[k]*(k<3?2:4)); t->layout=OPTICS_PIXEL_RGBA8;
+        }
         else {
             static char text[32][40]; if(!text[t->format][0]) snprintf(text[t->format],sizeof text[0],"texture format 0x%02x not modelled",t->format);
             return refuse(reason,text[t->format]);
@@ -584,9 +635,13 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         /* Tiger 10.4's driver keeps texture memory byte-swapped and lets the texture unit swap it back (TX_OFFSET
          * ENDIAN_SWAP); 10.4.11 does not. */
         t->swap=(uint8_t)(off&3);
-        /* TEX_COORD_TYPE 26:25: 0 2D, 1 3D (sampled as 2D), 2 cube (Doom 3's normalization and light cube maps), 3 reserved. */
+        /* TEX_COORD_TYPE 26:25: 0 2D, 1 3D (depth: TX_FORMAT0 [25:22] log2, slices one after another; level 0 only), 2 cube
+         * (Doom 3's normalization and light cube maps), 3 reserved. */
         if((f1t>>25&3)==3) return refuse(reason,"texture coordinate type 3 (reserved)");
+        if((f1t>>25&3)==1) { t->depth=1u<<(f0t>>22&15); d->fi.texture_dimension[u]=1;
+            if(t->layout>=OPTICS_PIXEL_YUYV601_SIGNED) return refuse(reason,"3D texture in a YUV or compressed format"); }
         if((f1t>>25&3)==2) { if(t->width!=t->height) return refuse(reason,"cube map faces not square"); t->cube=1; d->fi.texture_dimension[u]=2; }
+        if(t->floating && (t->depth || t->cube)) return refuse(reason,"3D or cube float texture");
         static const unsigned shift[4]={12,15,18,9};   /* output R,G,B,A select fields */
         for(unsigned c=0;c<4;c++){unsigned s=t->format==0x14||t->format==0x15?c:f1t>>shift[c]&7;if(s>5)return refuse(reason,"texture component select CUT_Z/W");t->select[c]=(uint8_t)(map&&s<4?map[s]:s);}
         t->linear=(flt>>9&3)>=2;   /* 2 linear, 3 anisotropic */
@@ -608,13 +663,28 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         static int mips=-1; if(mips<0){ const char *v=getenv("OPTICS_MIP_LEVELS"); mips=v?atoi(v):1; }   /* diagnostic switch: 0 level 0 only, 2 no anisotropy */
         if(mips!=1) aniso=0;
         if(mip && levels && mips) {
-            if(f0t>>31 || levels+1>full || (R(TX_FILTER1_0+4*u)>>3&0x3ff)) d->approx|=OPTICS_APPROX_MIP;   /* TXPITCH, chain, LOD bias */
+            if(f0t>>31 || levels+1>full) d->approx|=OPTICS_APPROX_MIP;   /* TXPITCH, chain */
             if(!(f0t>>31)) t->levels=(uint8_t)(levels+1<full?levels+1:full);
         }
+        if(t->depth || t->floating){ if(t->levels>1) d->approx|=OPTICS_APPROX_MIP; t->levels=1; }   /* 3D and float: level 0 */
         unsigned first=t->levels>1?(flt>>17&15):0; if(first>=t->levels) first=t->levels-1u;
         if(aniso>4){ aniso=4; d->approx|=OPTICS_APPROX_ANISO; }
+        { int b=(int)(R(TX_FILTER1_0+4*u)>>3&1023); if(b&512) b-=1024; d->lod_bias[u]=(float)b/32.0f; }   /* TX_FILTER1 LOD_BIAS, 1/32 level */
+        if((d->chroma[u]=(uint8_t)(R(TX_FILTER1_0+4*u)&3))) { uint32_t k=R(0x4580+4*u); float x[4];   /* TX_CHROMA_KEY */
+            if(d->chroma[u]==3) return refuse(reason,"chroma key mode 3");
+            for(int c=0;c<4;c++) x[c]=(float)(k>>(8*c)&255)/255.0f;
+            for(int c=0;c<4;c++) d->chroma_key[u][c]=t->select[c]<4?x[t->select[c]]:t->select[c]==5?1.0f:0.0f; }
         if((flt&7)>=4 || (flt>>3&7)>=4) {
-            d->approx|=OPTICS_APPROX_BORDER;
+            /* CLAMP_TO_BORDER (6) and CLAMP (4) per axis, emulated over a zero border (draw.h); the border colour's bytes
+             * are X..W in the texel's component order (Tiger's driver writes 0x9966cc33 for RGBA 0.2, 0.8, 0.4, 0.6 in
+             * W8Z8Y8X8), read through the unit's selects. Approximation: other formats' border packing read the same way,
+             * MIRROR_ONCE_TO_BORDER as mirror-once to edge. */
+            unsigned ms=flt&7,mt=flt>>3&7; uint32_t bc=R(0x45c0+4*u); float x[4];
+            for(int c=0;c<4;c++) x[c]=(float)(bc>>(8*c)&255)/255.0f;
+            for(int c=0;c<4;c++) d->border[u][c]=t->select[c]<4?x[t->select[c]]:t->select[c]==5?1.0f:0.0f;
+            unsigned lin=(flt>>9&3)>=2||(flt>>11&3)>=2;
+            d->border_mode[u]=(uint8_t)((ms==6?1:ms==4&&lin?2:0)|(mt==6?1:mt==4&&lin?2:0)<<2|lin<<4);
+            if(ms==7 || mt==7) d->approx|=OPTICS_APPROX_BORDER;
             static int dump=-1; static unsigned shown; static uint64_t seen[32];
             if(dump<0){ const char *v=getenv("OPTICS_BORDER_DUMP"); dump=v&&atoi(v)!=0; }
             if(dump && shown<32) {   /* development: border modes and colours in use */
@@ -622,8 +692,11 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
                 if(j==shown){ seen[shown++]=h; fprintf(stderr,"optics-border: unit %u filter0 %08x (S %u T %u) border %08x format %#x %ux%u levels %u\n",u,flt,flt&7,flt>>3&7,R(0x45c0+4*u),t->format,t->width,t->height,t->levels); }
             }
         }
+        if(t->depth && (d->border_mode[u] || (flt>>6&7)>=4)){ d->border_mode[u]=0; d->approx|=OPTICS_APPROX_BORDER; }   /* 3D: the sampler's own clamp */
         if(off&0x1c) d->approx|=OPTICS_APPROX_TILED;                             /* TXO_MACRO_TILE 2, TXO_MICRO_TILE 4:3 */
-        t->sampler=address[flt&7]|address[flt>>3&7]<<3|((flt>>9&3)>=2)<<6|((flt>>11&3)>=2)<<7|(t->levels>1?mip:0)<<8|aniso<<10|first<<13;
+        /* GL_CLAMP with linear filtering samples the zero border too, for the border emulation (draw.h border_mode) */
+        unsigned as=address[flt&7],at=address[flt>>3&7]; if((d->border_mode[u]&3)==2) as=4; if((d->border_mode[u]>>2&3)==2) at=4;
+        t->sampler=as|at<<3|((flt>>9&3)>=2)<<6|((flt>>11&3)>=2)<<7|(t->levels>1?mip:0)<<8|aniso<<10|first<<13|(t->depth?address[flt>>6&7]:0)<<17;   /* CLAMP_R 8:6 */
         d->texture_mask|=1u<<u;
     }
     return 1;
@@ -672,14 +745,17 @@ int optics_draw_vertices(const OpticsDraw *d,OpticsVertexOut *out,const char **r
         if(!(d->vte&0x100)){x/=w;y/=w;} if(!(d->vte&0x200)) z/=w;
         if(d->vte&1)x*=d->viewport[0]; if(d->vte&2)x+=d->viewport[1]; if(d->vte&4)y*=d->viewport[2]; if(d->vte&8)y+=d->viewport[3];
         if(d->vte&16)z*=d->viewport[4]; if(d->vte&32)z+=d->viewport[5];
-        if(d->sprite){int c=d->corner[v];x+=(c&1?0.5f:-0.5f)*d->point_size[0];y+=(c&2?0.5f:-0.5f)*d->point_size[1];w=1;}
+        if(d->sprite){int c=d->corner[v];float sx=d->point_size[0],sy=d->point_size[1];
+            if(d->point_size_output){ sx=sy=io->output[d->point_size_output][0]; if(!(sx>=d->point_min)) sx=sy=d->point_min; if(sx>d->point_max) sx=sy=d->point_max; }   /* per-vertex size, clamped as GA_POINT_MINMAX */
+            x+=(c&1?0.5f:-0.5f)*sx;y+=(c&2?0.5f:-0.5f)*sy;w=1;}
         out[v].window[0]=x;out[v].window[1]=y;out[v].window[2]=z;out[v].window[3]=(d->vte&0x100)||d->sprite?1.0f:w;
         for(unsigned k=0;k<d->varyings;k++) for(unsigned q=0;q<4;q++) {
             unsigned sel=d->component[k][q];
-            if(d->sprite_varying[k]) {   /* S0,T0 belong to the lower-left corner, S1,T1 to the upper-right */
+            if(d->stuffed[k] && d->sprite) {   /* S0,T0 belong to the lower-left corner, S1,T1 to the upper-right */
                 int c=d->corner[v]; float st[2]={c&1?d->sprite_st[2]:d->sprite_st[0],c&2?d->sprite_st[1]:d->sprite_st[3]};
                 out[v].varying[k][q]=sel<2?st[sel]:sel==5?1.0f:0.0f;
-            } else out[v].varying[k][q]=sel<4?io->output[d->pvs_output[k]][sel]:sel==5?1.0f:0.0f;
+            } else if(d->stuffed[k]) out[v].varying[k][q]=sel==5?1.0f:0.0f;   /* lines: the executor fills s (draw.h) */
+            else out[v].varying[k][q]=sel<4?io->output[d->pvs_output[k]][sel]:sel==5?1.0f:0.0f;
         }
     }
     free(io); return 1;

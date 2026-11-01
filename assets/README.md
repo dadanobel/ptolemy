@@ -4,6 +4,7 @@
 |---|---|
 | `app-icon-macos-1024.png` | The app icon (built into `Ptolemy.icns` by `tools/build-product.sh`) |
 | `app-icon-256.png` | The icon at 256 px, for pages |
+| `github-social-1280x640.jpg` | The README header and the repository's social preview |
 | `mark-transparent-1024.png` | The mark alone, with transparency |
 | `launcher-fur.jpg`, `launcher-metal.jpg`, `mark-glass.png` | The launcher's backgrounds and glass mark, made by `launcher-art.py` |
 

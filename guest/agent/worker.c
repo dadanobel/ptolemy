@@ -145,7 +145,7 @@ int main(void){
         uint32_t id=r[0],n=r[1],timeout=r[2];unsigned status=125;
         if(n<=sizeof request&&timeout&&timeout<=600000&&!parse(request,n,argv,text)){
             pt_log_argv(id,argv);
-            if(!pt_input_builtin(token,id,argv,&status)&&!pt_export_builtin(token,id,argv,&status)&&!pmd_agent_builtin(token,id,argv,&status)&&!pt_machine_builtin(token,id,argv,&status))status=execute(token,id,timeout,argv);
+            if(!pt_input_builtin(token,id,argv,&status)&&!pt_export_builtin(token,id,argv,&status)&&!optics_agent_builtin(token,id,argv,&status)&&!pt_machine_builtin(token,id,argv,&status))status=execute(token,id,timeout,argv);
         }else puts("Invalid host command rejected.");
         printf("\n[Job %u exit %u]\n",id,status);(void)ptagent_call(PTA_FINISH,token,id,status,0,r);
     }

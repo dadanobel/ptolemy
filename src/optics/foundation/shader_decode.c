@@ -134,13 +134,15 @@ static uint8_t math_op(unsigned op)
 {
     switch (op) {
     case 0: return PT_R2_OP_NOP;
-    /* The DX partial-precision EXP/LOG (1, 2) and LOG_FULL (12) as their full-precision forms, EXP_BASEE_FF (3),
-     * POWER_FUNC_FF (5; base in the first source, exponent in the third) and its clamped forms (13-15; Approximation:
-     * unclamped), SIN and COS (16, 17). Halo's PVS programs use them. */
+    /* The DX partial-precision EXP/LOG (1, 2) and LOG_FULL (12) as their full-precision forms, EXP_BASEE_FF (3; its
+     * operand in the third source, as Tiger's fog programs place it), POWER_FUNC_FF (5; base in the first source, exponent
+     * in the third), its clamped forms CLAMP_B and CLAMP_B1 (13, 14; Approximation: unclamped) and CLAMP_01 (15), SIN and
+     * COS (16, 17). Halo's PVS programs use them. */
     case 1: return PT_R2_OP_EXP2;
     case 2: case 12: return PT_R2_OP_LOG2;
     case 3: return PT_R2_OP_EXPE;
-    case 5: case 13: case 14: case 15: return PT_R2_OP_POW;
+    case 5: case 13: case 14: return PT_R2_OP_POW;
+    case 15: return PT_R2_OP_POW01;
     case 16: return PT_R2_OP_SIN;
     case 17: return PT_R2_OP_COS;
     case 4: return PT_R2_OP_LIT;
@@ -207,10 +209,10 @@ static PtR2ShaderStatus decode_pvs(PtR2ShaderIR *p, PtR2ShaderError *e)
         if ((dst == 2 || dst == 3) && v->mask) p->outputs |= 1u << v->dst;
         /* Operands the op does not read (the driver fills them with copies of others, observed: DP4/ADD naming input 18,
          * input 68) are zero: neither decoded nor counted by the interface check or the input/constant counts. */
-        unsigned used = typed_op == PT_R2_OP_NOP ? 0 : typed_op == PT_R2_OP_MAD || typed_op == PT_R2_OP_M2ADD || typed_op == PT_R2_OP_LIT || typed_op == PT_R2_OP_POW ? 3 :
+        unsigned used = typed_op == PT_R2_OP_NOP ? 0 : typed_op == PT_R2_OP_MAD || typed_op == PT_R2_OP_M2ADD || typed_op == PT_R2_OP_LIT || typed_op == PT_R2_OP_POW || typed_op == PT_R2_OP_POW01 ? 3 :
             typed_op == PT_R2_OP_FRC || typed_op == PT_R2_OP_ARL || typed_op == PT_R2_OP_ARR || (math && typed_op != PT_R2_OP_MUL) ? 1 : 2;
         for (unsigned j = 0; j < (dual ? 2u : 3u); ++j) {
-            uint32_t x = w[at + 1 + j];
+            uint32_t x = w[at + 1 + (j == 0 && !dual && typed_op == PT_R2_OP_EXPE ? 2 : j)];
             if (j >= used) { v->arg[j] = ref(math ? PT_R2_F32 : PT_R2_F32X4, PT_R2_ZERO, 0); continue; }
             PtR2ShaderOperand *r = &v->arg[j];
             if (!pvs_source(x, math ? PT_R2_F32 : PT_R2_F32X4, r))
@@ -228,7 +230,7 @@ static PtR2ShaderStatus decode_pvs(PtR2ShaderIR *p, PtR2ShaderError *e)
              * opcode 24:21 with its MSB in bit 2, NEGATE_X 25, NEGATE_Y 26, write lane 28:27. */
             uint32_t x = w[at + 3]; unsigned sx = (x >> 13) & 7, sy = (x >> 16) & 7;
             v->dual_op = math_op(((x >> 21) & 15) | ((x >> 2) & 1) << 4);
-            if (v->dual_op == 255 || v->dual_op == PT_R2_OP_LIT || v->dual_op == PT_R2_OP_POW || !pvs_source(x, PT_R2_F32X4, &v->arg[2]) ||
+            if (v->dual_op == 255 || v->dual_op == PT_R2_OP_LIT || v->dual_op == PT_R2_OP_POW || v->dual_op == PT_R2_OP_POW01 || !pvs_source(x, PT_R2_F32X4, &v->arg[2]) ||
                 v->arg[2].relative || sx > 5 || sy > 5)
                 return fail(e, PT_R2_SHADER_UNSUPPORTED, w, n, at + 3, "PVS dual math opcode/source not implemented");
             v->arg[2].swizzle[0] = (uint8_t)sx;
