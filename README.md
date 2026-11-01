@@ -56,11 +56,21 @@ needs a Mac with Apple silicon and so far runs Tiger only.
 
 ## Graphics on Metal
 
+<p align="center"><img src="assets/metal-banner.jpg" alt="Optics: Radeon 9700 graphics on the Mac's GPU" width="640"></p>
+
 Optics, the Radeon 9700 model, works at the level of the card's registers and command ring, so Tiger's ATI driver,
-OpenGL and Quartz Extreme run as they would on the real card. Each draw the driver sends becomes one Metal draw: the
-card's vertex and fragment programs are translated to Metal shaders, textures are decoded on the GPU, render targets
-live in Metal textures that own the guest's video memory, and the driver's fences complete from Metal's completion
-handlers. [docs/graphics.md](docs/graphics.md) describes it in detail and lists what is not covered yet.
+OpenGL and Quartz Extreme run as they would on the real card. Each draw the driver sends becomes one Metal draw:
+
+- the card's vertex and fragment programs become Metal shaders, with fog, clip planes, logic ops and the other
+  fixed-function stages built in;
+- compute kernels decode textures on the GPU, DXT and YUV included;
+- render targets are Metal textures that own the guest's video memory, and Hypervisor.framework's page protection
+  tells Optics when Tiger's CPU touches them;
+- the driver's fences and occlusion queries complete from Metal's completion handlers;
+- the window presents through a `CAMetalLayer` at 60 Hz.
+
+[docs/metal.md](docs/metal.md) describes this in detail; [docs/graphics.md](docs/graphics.md) lists what the model
+covers and what it does not cover yet.
 
 ## Components
 
@@ -159,10 +169,11 @@ The firmware ROM, Ptolemy Tools and the app have their own steps: see [docs/buil
 
 - [docs/architecture.md](docs/architecture.md): how the pieces fit together
 - [docs/building.md](docs/building.md): building the engine, the ROM, Ptolemy Tools and Ptolemy.app
-- [docs/graphics.md](docs/graphics.md): what the Radeon model covers, how it uses Metal, and what it does not cover yet
+- [docs/metal.md](docs/metal.md): how Ptolemy uses Metal
+- [docs/graphics.md](docs/graphics.md): what the Radeon model covers and what it does not cover yet
 - [epicycle/README.md](epicycle/README.md): the CPU engine and its tests
 
 ## License
 
-GPL-2.0-or-later. See [LICENSE](LICENSE). Mac OS X, Halo, Doom 3 and the other titles above belong to their owners;
-Ptolemy is not affiliated with Apple or with any of them.
+GPL-2.0-or-later. See [LICENSE](LICENSE). Mac OS X, Metal, Halo, Doom 3 and the other names above are trademarks of
+their owners; Ptolemy is not affiliated with Apple or with any of them.

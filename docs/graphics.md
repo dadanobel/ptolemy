@@ -1,7 +1,8 @@
 # Graphics
 
-Optics models an ATI Radeon 9700 (R300) for Tiger's own ATI driver and renders with Metal. This page lists what it
-covers, how it uses Metal, what it does not cover yet, and how it is checked.
+Optics models an ATI Radeon 9700 (R300) for Tiger's own ATI driver and renders with Metal
+([metal.md](metal.md) describes how). This page lists what it covers, what it does not cover yet, and how it is
+checked.
 
 ## Covered
 
@@ -24,26 +25,6 @@ covers, how it uses Metal, what it does not cover yet, and how it is checked.
   exports the rows it reads first.
 - Blending with constant colours, face culling, polygon offset, scissor.
 - Occlusion queries (Halo), fences and the command processor's scratch registers.
-
-## How Optics uses Metal
-
-- **One Metal draw per R300 draw.** Optics decodes each draw packet against the register state into a description
-  (`draw.c`): vertex fetch, programs, rasterizer, textures, target. The Metal executor encodes it into the current
-  render pass; up to 512 draws share a command buffer.
-- **Shaders from the guest's programs.** The PVS vertex program and the US fragment program are decoded and written
-  out as Metal Shading Language, compiled once per program and fixed-function state and cached. The fixed-function
-  units around them become a few lines of the same shaders: the SE viewport transform, the FG fog blend, user clip
-  planes as `clip_distance`, logic ops by reading the target in the fragment function, texture border colours, colour
-  key and the stipple coordinates the rasterizer generates.
-- **Textures decoded on the GPU.** Guest texture bytes are uploaded once and converted to RGBA8 by a compute kernel
-  (every R300 format, DXT and YUV included, 2D, cube and 3D); float textures are converted on the CPU.
-- **Targets own their VRAM.** A colour buffer the GPU draws into lives in a Metal texture that owns the guest's VRAM
-  range. Hypervisor.framework's page protection on the guest's view of VRAM tells Optics when Tiger's CPU touches it:
-  the texture is written back first, and a CPU write hands the memory back. Depth and stencil live in
-  `Depth32Float_Stencil8` textures; the CPU gets depth rows on demand.
-- **Completion.** Guest fences and occlusion queries complete from Metal's command buffer completion handlers and
-  visibility result buffers, so Tiger's driver waits for the GPU as it would on the real card.
-- **Presentation.** The scanout surface is presented through a `CAMetalLayer` at 60 Hz and scaled to the window.
 
 ## Not covered yet
 
