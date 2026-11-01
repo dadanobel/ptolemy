@@ -270,14 +270,16 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
     }
     {   /* Development, OPTICS_STATE_LOG=1: the registers of the fixed-function units, one line whenever they change
          * (colour clear value first, to tell test cases apart; then fog, user clip planes with PVS vectors 1024-1029,
-         * lines, points, output format, ROP, shading, polygon mode, texture unit 0 and 7 (stipple), AA, triangle stipple, RS). */
+         * lines, points, output format, ROP, shading, polygon mode, texture unit 0 and 7 (stipple), AA, triangle stipple, RS,
+         * sample positions, tile config, AA resolve). */
         static int on=-1; static unsigned lines; static uint32_t last[96];
         if(on<0){const char *v=getenv("OPTICS_STATE_LOG"); on=v&&atoi(v)!=0;}
         if(on && lines<2000) {
             static const uint16_t at[]={0x4e14,0x4bc0,0x4bc4,0x4bc8,0x4bcc,0x4bd0,0x4bd8,0x401c,0x4294,0x4298,0x4008,0x221c,0x2080,
                 0x4234,0x4238,0x4260,0x4264,0x4268,0x421c,0x4230,0x2090,0x2094,0x4e18,0x4278,0x4288,0x42b8,0x4400,0x4440,0x45c0,
                 0x4480,0x44c0,0x4500,0x441c,0x449c,0x44dc,0x451c,0x455c,0x4020,0x46a4,0x4104,0x4214,0x4300,0x4304,0x4310,0x4314,0x4318,
-                0x431c,0x4330,0x4334,0x4338,0x433c,0x4320,0x4324,0x4328,0x432c,0x4f10,0x4f24,0x4bd4,0x4e04,0x4e08,0x4e0c};
+                0x431c,0x4330,0x4334,0x4338,0x433c,0x4320,0x4324,0x4328,0x432c,0x4f10,0x4f24,0x4bd4,0x4e04,0x4e08,0x4e0c,
+                0x4010,0x4014,0x4018,0x4e80,0x4e84,0x4e88};
             enum { N=sizeof at/sizeof at[0] }; _Static_assert(N<=96,"state log size"); uint32_t k[N]; for(unsigned i=0;i<N;i++) k[i]=R(at[i]);
             k[0]=R(0x4e28)^prim<<28;   /* the target and primitive instead of the clear value */
             if(memcmp(k,last,sizeof k)) { memcpy(last,k,sizeof k); lines++;
@@ -299,7 +301,13 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         for(unsigned p=0;p<6;p++) if(cc>>p&1){ uint32_t w[4]; if(optics_r300_pvs_vector(st,1024+p,w)!=OPTICS_STATE_OK) return refuse(reason,"user clip plane not loaded");
             for(int c=0;c<4;c++) d->clip_plane[p][c]=f32(w[c]); } } }
     { uint32_t rc=R(0x4e18); if(rc&4) d->rop=(uint8_t)(1+(rc>>8&15)); }
-    { uint32_t pm=R(0x4288); if(pm&1) { unsigned front=pm>>4&7,back=pm>>7&7; if(front==1 && back==1) d->fill=1; else if(front!=2 || back!=2) d->approx|=OPTICS_APPROX_FIXED; } }
+    /* GA_POLY_MODE (glPolygonMode): both faces as lines draw triangle edges (Metal's line fill mode), both as points draw
+     * the vertices as points (below), faces in different modes go to the frontend as two passes (poly_front/back).
+     * Approximation: edge flags are not modelled (every edge is drawn). */
+    d->poly_front=d->poly_back=2;
+    { uint32_t pm=R(0x4288); if(pm&1) { unsigned front=pm>>4&7,back=pm>>7&7;
+        if(front>2 || back>2) d->approx|=OPTICS_APPROX_FIXED; else { d->poly_front=(uint8_t)front; d->poly_back=(uint8_t)back; }
+        if(d->poly_front==1 && d->poly_back==1) d->fill=1; } }
     {   /* Log whether Tiger's driver programs the output selects, once per format and value (I8, UV88 readings unverified) */
         static uint32_t seen[16]; static unsigned n; uint32_t k=format<<16|(R(US_OUT_FMT_0)&0xffff); unsigned i=0; while(i<n && seen[i]!=k) i++;
         if(i==n && n<16){ seen[n++]=k; fprintf(stderr,"optics-draw: colour format %u, US_OUT_FMT_0 %#x (first: target %#x, pitch %u)\n",format,R(US_OUT_FMT_0),R(RB3D_COLOROFFSET0),pitch&0x3ffe); }
@@ -340,7 +348,10 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
     d->depth_clear=optics_draw_depth_clear(d->depth_clear_word,d->depth_clear_format);
     uint32_t af=R(0x4bd4);   /* FG_ALPHA_FUNC: reference 7:0, function 10:8, enable 11 */
     d->alpha_test=af>>11&1; d->alpha_func=af>>8&7; d->alpha_ref=(float)(af&255)/255.0f;
-    d->resolve=R(0x4e88)&1; d->resolve_offset=R(0x4e80)&~31u; d->resolve_pitch=R(0x4e84)&0x3ffe;   /* AARESOLVE_CTL/OFFSET/PITCH */
+    d->resolve=R(0x4e88)&1; d->resolve_ctl=R(0x4e88)&7; d->resolve_offset=R(0x4e80)&~31u; d->resolve_pitch=R(0x4e84)&0x3ffe;   /* AARESOLVE_CTL/OFFSET/PITCH */
+    { static const uint8_t samples[4]={2,3,4,6}; d->aa_config=R(0x4020); d->aa_tile=R(0x4018); d->aa_mspos[0]=R(0x4010); d->aa_mspos[1]=R(0x4014);
+      static int on=-1; if(on<0){ const char *v=getenv("OPTICS_MSAA"); on=!v||atoi(v)!=0; }   /* diagnostic: OPTICS_MSAA=0 draws one sample */
+      d->aa_samples=on&&d->aa_config&1?samples[d->aa_config>>1&3]:1; }   /* GB_AA_CONFIG, GB_TILE_CONFIG, GB_MSPOS0/1 */
     /* Blend: RB3D_CBLEND bit 0 enable, bit 1 separate alpha (else alpha uses the colour factors, as glBlendFunc),
      * function 14:12, src 21:16, dst 29:24; RB3D_ABLEND has the same fields for alpha. Factor codes 32+n, n = ZERO ONE
      * SRC_COLOR 1-SRC_COLOR DST_COLOR 1-DST_COLOR SRC_ALPHA 1-SRC_ALPHA DST_ALPHA 1-DST_ALPHA SRC_ALPHA_SATURATE, then
@@ -446,6 +457,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
     }
     for(unsigned s=0;s<ns;s++) free(array[s]);
     }
+    if(!d->poly_front && !d->poly_back && (prim==4||prim==5||prim==6||prim==13||prim==14||prim==15)) prim=1;   /* polygons as points */
     /* Lines (2), line strip (3) and line loop (12) as Metal one-pixel lines (Cinebench draws GL_LINES). Approximation:
      * GA_LINE_CNTL width and stipple are not modelled; draw quads when wide lines show up. */
     if(prim==2||prim==3||prim==12) {
@@ -456,8 +468,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         free(indices); indices=NULL; prim=0;
     }
     /* Triangles */
-    if(prim==1 && opcode==0x36){free(indices);return refuse(reason,"indexed point sprites");}
-    if(prim==1) {   /* points: expand into sprite quads */
+    if(prim==1) {   /* points: expand into sprite quads (an indexed draw's points in index order) */
         uint32_t ps=R(GA_POINT_SIZE); d->sprite=1; d->cull=0; d->depth_bias=d->depth_slope=0;
         d->point_size[0]=(float)(ps>>16)/6.0f; d->point_size[1]=(float)(ps&0xffff)/6.0f;   /* 1/12-pixel radius units */
         for(int i=0;i<4;i++) d->sprite_st[i]=f32(R(GA_POINT_S0+4*i));
@@ -465,8 +476,8 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
         float (*quad)[OPTICS_DRAW_INPUTS][4]=calloc(count*4u?count*4u:1,sizeof *quad); d->corner=calloc(count*4u?count*4u:1,1);
         if(!quad || !d->corner){free(quad);return refuse(reason,"out of memory");}
         static const uint8_t ring[4]={0,1,3,2};   /* quad-list vertices go around: TL, TR, BR, BL */
-        for(uint32_t v=0;v<count;v++) for(int c=0;c<4;c++){memcpy(quad[4*v+c],d->vertex[v],sizeof quad[0]);d->corner[4*v+c]=ring[c];}
-        free(d->vertex); d->vertex=quad; d->vertices=count*4; count*=4; prim=13;
+        for(uint32_t v=0;v<count;v++) for(int c=0;c<4;c++){memcpy(quad[4*v+c],d->vertex[indices?indices[v]:v],sizeof quad[0]);d->corner[4*v+c]=ring[c];}
+        free(d->vertex); d->vertex=quad; d->vertices=count*4; count*=4; prim=13; free(indices); indices=NULL;
     }
     if(!d->lines) {
         uint32_t tri=prim==4?count/3:prim==5||prim==6?(count>=3?count-2:0):prim==13?count/4*2:prim==14?(count>=4?(count-2)/2*2:0):prim==15?(count>=3?count-2:0):UINT32_MAX;
@@ -624,7 +635,7 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
             t->layout=optics_pixel_r300_yuv(f1t);t->bpp=2;
         }
         else if(t->format>=0x18&&t->format<=0x1d) {   /* float: X, XW, XYZW at 16 or 32 bits per component (r300_reg.h FL_*); expanded
-                                                       * to RGBA32F on the CPU by the executor, level 0 only */
+                                                       * to RGBA32F on the CPU by the executor */
             static const uint8_t comps[6]={1,2,4,1,2,4};
             unsigned k=t->format-0x18; t->floating=(uint8_t)(1+k); t->bpp=(uint8_t)(comps[k]*(k<3?2:4)); t->layout=OPTICS_PIXEL_RGBA8;
         }
@@ -632,10 +643,14 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
             static char text[32][40]; if(!text[t->format][0]) snprintf(text[t->format],sizeof text[0],"texture format 0x%02x not modelled",t->format);
             return refuse(reason,text[t->format]);
         }
+        /* TX_FORMAT1 SIGNED_W/Z/Y/X 8:5 (r300_reg.h): read as unsigned. Tiger's OpenGL on this card offers no signed
+         * texture format (no ATI_envmap_bumpmap, NV_texture_shader or snorm extension in its list), so only the driver
+         * itself could set them; the draws are counted to show it if it does. */
+        if(f1t>>5&15) d->approx|=OPTICS_APPROX_SIGNED;
         /* Tiger 10.4's driver keeps texture memory byte-swapped and lets the texture unit swap it back (TX_OFFSET
          * ENDIAN_SWAP); 10.4.11 does not. */
         t->swap=(uint8_t)(off&3);
-        /* TEX_COORD_TYPE 26:25: 0 2D, 1 3D (depth: TX_FORMAT0 [25:22] log2, slices one after another; level 0 only), 2 cube
+        /* TEX_COORD_TYPE 26:25: 0 2D, 1 3D (depth: TX_FORMAT0 [25:22] log2, slices one after another), 2 cube
          * (Doom 3's normalization and light cube maps), 3 reserved. */
         if((f1t>>25&3)==3) return refuse(reason,"texture coordinate type 3 (reserved)");
         if((f1t>>25&3)==1) { t->depth=1u<<(f0t>>22&15); d->fi.texture_dimension[u]=1;
@@ -650,14 +665,15 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
          * (0 none, 1 point, 2 linear), MAX_MIP_LEVEL 20:17 (the first level used). Approximation: CLAMP (GL_CLAMP) as edge
          * clamp, border modes with a zero border (TX_BORDER_COLOR not modelled).
          * Mip levels: NUM_LEVELS = TX_FORMAT0 29:26, levels - 1. Tiger's driver stores them one after another from the
-         * largest, rows of exactly width * bytes per texel, a cube's six faces of a level together: in 461 of 517
-         * mipmapped textures of HL and Doom 3 (a cube map among them) each level matched a 2x2 box filter of the level
+         * largest, rows of exactly width * bytes per texel, a cube's six faces (a 3D texture's slices) of a level
+         * together: in 461 of 517 mipmapped textures of HL and Doom 3 (a cube map among them) each level matched a 2x2
+         * box filter of the level
          * above better in this layout than with rows padded to 32 bytes as R5xx Acceleration 4.1 describes for its parts,
          * in none worse. Anisotropy: MAG/MIN 3; bits 23:21 were 3 in every such texture there. Unverified: read as log2 of
          * the largest ratio (8:1). */
         static const uint8_t address[8]={2,3,0,1,0,1,4,1};
         unsigned mip=flt>>13&3,levels=f0t>>26&15,full=1,aniso=(flt>>9&3)==3 || (flt>>11&3)==3 ? flt>>21&7 : 0;
-        for(unsigned m=t->width>t->height?t->width:t->height;m>1;m>>=1) full++;
+        for(unsigned m=t->width>t->height?t->width:t->height,z=t->depth;(z>m?z:m)>1;m>>=1,z>>=1) full++;   /* 3D: the depth too */
         if(mip==3) return refuse(reason,"texture MIP_FILTER 3 (reserved)");
         t->levels=1;
         static int mips=-1; if(mips<0){ const char *v=getenv("OPTICS_MIP_LEVELS"); mips=v?atoi(v):1; }   /* diagnostic switch: 0 level 0 only, 2 no anisotropy */
@@ -666,7 +682,6 @@ static int draw_build(OpticsDraw *d,const uint32_t *reg,const struct OpticsR300S
             if(f0t>>31 || levels+1>full) d->approx|=OPTICS_APPROX_MIP;   /* TXPITCH, chain */
             if(!(f0t>>31)) t->levels=(uint8_t)(levels+1<full?levels+1:full);
         }
-        if(t->depth || t->floating){ if(t->levels>1) d->approx|=OPTICS_APPROX_MIP; t->levels=1; }   /* 3D and float: level 0 */
         unsigned first=t->levels>1?(flt>>17&15):0; if(first>=t->levels) first=t->levels-1u;
         if(aniso>4){ aniso=4; d->approx|=OPTICS_APPROX_ANISO; }
         { int b=(int)(R(TX_FILTER1_0+4*u)>>3&1023); if(b&512) b-=1024; d->lod_bias[u]=(float)b/32.0f; }   /* TX_FILTER1 LOD_BIAS, 1/32 level */

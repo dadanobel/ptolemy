@@ -102,6 +102,7 @@ typedef struct {
 @interface PtR2Target : NSObject
 @property(nonatomic,readonly) uint32_t width;
 @property(nonatomic,readonly) uint32_t height;
+@property(nonatomic,readonly) uint32_t samples;   /* Metal samples per pixel */
 @end
 /* Depth/stencil storage independent of any colour target (normalized D32Float/Stencil8, not the R300
  * D24S8 bytes). Storage no pass has initialized yet is cleared to depth 1, stencil 0 by the first pass that uses it. */
@@ -150,12 +151,16 @@ typedef struct {
 /* With mip levels (PtR2Levels). */
 - (PtR2Texture *)textureWidth:(uint32_t)width height:(uint32_t)height faces:(unsigned)faces levels:(const PtR2Levels *)levels
     bytes:(const void *)bytes length:(size_t)length layout:(OpticsPixelLayout)layout error:(NSError **)error;
-/* A 3D texture, level 0: slice z's rows start at bytes + z * sliceBytes. */
-- (PtR2Texture *)textureWidth:(uint32_t)width height:(uint32_t)height depth:(uint32_t)depth bytes:(const void *)bytes length:(size_t)length
-    rowBytes:(size_t)rowBytes sliceBytes:(size_t)sliceBytes layout:(OpticsPixelLayout)layout error:(NSError **)error;
-/* Immutable RGBA32F level-zero texture (float formats, expanded by the caller). */
-- (PtR2Texture *)floatTextureWidth:(uint32_t)width height:(uint32_t)height bytes:(const float *)rgba error:(NSError **)error;
+/* A 3D texture with mip levels: level k has max(1, depth >> k) slices, slice z's rows at bytes + offset[k] + z * face[k]. */
+- (PtR2Texture *)textureWidth:(uint32_t)width height:(uint32_t)height depth:(uint32_t)depth levels:(const PtR2Levels *)levels
+    bytes:(const void *)bytes length:(size_t)length layout:(OpticsPixelLayout)layout error:(NSError **)error;
+/* Immutable RGBA32F texture (float formats, expanded by the caller): `levels` levels one after another, tightly packed. */
+- (PtR2Texture *)floatTextureWidth:(uint32_t)width height:(uint32_t)height levels:(unsigned)levels bytes:(const float *)rgba error:(NSError **)error;
 /* Colour import of a guest surface into a single-sample target (same size); depth/stencil cleared. */
+/* RB3D_AARESOLVE: the multisampled source resolved (control: RB3D_AARESOLVE_CTL), then a rectangle of it copied into a
+ * single-sample target. */
+- (BOOL)resolve:(PtR2Target *)source control:(uint32_t)control x:(uint32_t)x y:(uint32_t)y width:(uint32_t)width height:(uint32_t)height
+    to:(PtR2Target *)target x:(uint32_t)tx y:(uint32_t)ty error:(NSError **)error;
 - (BOOL)load:(PtR2Target *)target from:(PtR2Texture *)texture error:(NSError **)error;
 /* A sampleable view of a single-sample target's colour with a component swizzle (component[k] 0..3 = R,G,B,A
  * of the target, 4 zero, 5 one), to sample a GPU-owned guest surface without a readback. Shares the target's storage;

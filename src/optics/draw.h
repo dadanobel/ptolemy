@@ -77,8 +77,12 @@ typedef struct {
      * (units of the 24-bit depth step, factor of the depth slope); 0 for lines and point sprites. */
     uint8_t cull,front_cw; float depth_bias,depth_slope;
     /* RB3D_AARESOLVE_CTL bit 0: the draw does not render; the pixels it covers are resolved from the colour buffer into
-     * RB3D_AARESOLVE_OFFSET (pitch in pixels). Without multisampling the resolve is a copy. */
-    uint32_t resolve,resolve_offset,resolve_pitch;
+     * RB3D_AARESOLVE_OFFSET (pitch in pixels), bit 1 averaging with gamma 2.2, bit 2 averaging alpha too (else sample 0).
+     * Without multisampling the resolve is a copy. resolve_ctl: the three bits. */
+    uint32_t resolve,resolve_offset,resolve_pitch,resolve_ctl;
+    /* Multisampling: GB_AA_CONFIG bit 0 on, 2:1 2, 3, 4 or 6 samples (aa_samples, 1 when off), at GB_MSPOS0/1 in
+     * GB_TILE_CONFIG's subpixel units (Tiger's FSAA: a separate buffer drawn with samples, resolved into the drawable). */
+    uint8_t aa_samples; uint32_t aa_config,aa_tile,aa_mspos[2];
     /* Depth/stencil, GPU-only (normalized D32Float/S8, not the R300 D24S8 bytes). Compare/ops use Metal's enum order. */
     uint32_t diag_vap_cntl_status,diag_array0,diag_out_fmt[2];   /* development probe only: VAP_CNTL_STATUS, GPU address of the first array, VAP_OUT_VTX_FMT_0/1 */
     uint32_t zb_offset; uint8_t depth_enable,depth_write,depth_compare,stencil_enable,stencil_ref,stencil_mask,stencil_writemask;
@@ -96,6 +100,8 @@ typedef struct {
     uint8_t flat;                                  /* varyings of colours that GA_COLOR_CONTROL shades FLAT (indices put the provoking vertex first) */
     uint8_t rop;                                   /* RB3D_ROPCNTL: 0 off, else 1 + ROP [11:8] (the GL logic op truth table) */
     uint8_t fill;                                  /* GA_POLY_MODE: 0 fill, 1 both faces as lines */
+    uint8_t poly_front,poly_back;                  /* GA_POLY_MODE per face: 0 points, 1 lines, 2 filled (also when off); faces in
+                                                    * different modes are drawn by the frontend in two passes, one per face */
     float line_width;                              /* GA_LINE_CNTL: line width in pixels */
     uint8_t point_size_output; float point_min,point_max;   /* VAP_OUT_VTX_FMT_0 bit 16: PVS output of each point's size (.x), 0 none; GA_POINT_MINMAX */
     float lod_bias[OPTICS_DRAW_TEXTURES];          /* TX_FILTER1 [12:3], in levels */
@@ -109,7 +115,8 @@ typedef struct {
  * 16:1), micro/macro-tiled texels read as linear; YUV601: YUV422 converted with BT.601 coefficients; WIDE: colour
  * targets other than ARGB8888 rendered at 8 bits per channel, 16-bit texture channels (W16Z16Y16X16, X16) held at 8. */
 enum { OPTICS_APPROX_MIP=1, OPTICS_APPROX_BORDER=2, OPTICS_APPROX_ANISO=4, OPTICS_APPROX_TILED=8, OPTICS_APPROX_YUV601=16, OPTICS_APPROX_WIDE=32,
-       OPTICS_APPROX_FIXED=64 };   /* FIXED: a fixed-function state draw.h does not model (polygon points, fog inputs) */
+       OPTICS_APPROX_FIXED=64, OPTICS_APPROX_SIGNED=128 };   /* FIXED: a fixed-function state draw.h does not model (polygon points, fog
+                                                              * inputs); SIGNED: texture components flagged signed, read as unsigned */
 /* Vertex arrays from 3D_LOAD_VBPNTR: per array dword components, dword stride and GPU address. */
 typedef struct { uint32_t count; struct { uint32_t components,stride; uint64_t offset; } array[16]; uint32_t local; } OpticsAos;   /* local: bit k, array k is in VRAM */
 /* GPU-memory read for vertex/index fetch; returns nonzero on success. */

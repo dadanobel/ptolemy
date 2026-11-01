@@ -40,6 +40,7 @@ struct Surface { uint64_t start,end,gpu; uint32_t width,height; PtR2Target *targ
     PtR2IoToken own,watch; PtR2Depth *bound; uint8_t bpp,fmt,sel;   /* clear: pending colour fast clear; bound: the depth storage its passes use; bpp: guest bytes
                                                                      * per pixel of R300 colour format fmt; sel: its US_OUT_FMT_0 selects (colour_layout) */
     uint64_t cached_seen=~0ull;                                          /* cache_adds when draws into it last dropped overlapping cached textures */
+    uint8_t aa=1;                                                        /* the R300 samples it is drawn with (GB_AA_CONFIG), 1: single-sample */
     PtR2Texture *region=nil; uint64_t region_key=0,region_version=0; };   /* its last copyView, valid while its version is */
 /* A colour format's guest bytes <-> the executor's RGBA8 target (draw.c lists the formats). sel: US_OUT_FMT_0
  * C0..C3 (2 bits each: A, R, G, B), byte k of a pixel holding C_k; zero (not programmed) reads as B, G, R, A. Tiger's driver
@@ -97,24 +98,28 @@ struct KeyHash { size_t operator()(const ProgramKey &k) const {
     const uint8_t *p=(const uint8_t *)&k; uint64_t h=1469598103934665603ull; for(size_t i=0;i<KEY_BYTES;i++){h^=p[i];h*=1099511628211ull;} return (size_t)h; } };
 struct KeyEq { bool operator()(const ProgramKey &a,const ProgramKey &b) const { return !memcmp(&a,&b,KEY_BYTES); } };
 /* A texture's bytes from TX_OFFSET as Tiger's driver stores them (draw.c): levels one after another from the largest, a
- * level's cube faces (3D: slices) together, rows of the pitch at level 0 and of exactly the width below. Returns the total. */
+ * level's cube faces (3D: its slices, depth >> level) together, rows of the pitch at level 0 and of exactly the width
+ * below. Returns the total. */
 static size_t texture_levels(const OpticsTexture *t,PtR2Levels *lv) {
-    size_t total=0; unsigned bpp=t->bpp,faces=t->cube?6:t->depth?t->depth:1; lv->levels=t->levels;
+    size_t total=0; unsigned bpp=t->bpp; lv->levels=t->levels;
     for(unsigned k=0;k<t->levels;k++) {
-        uint32_t w=std::max(1u,t->width>>k),h=std::max(1u,t->height>>k);
+        uint32_t w=std::max(1u,t->width>>k),h=std::max(1u,t->height>>k),faces=t->cube?6:std::max(1u,t->depth>>k);
         lv->row[k]=(size_t)OPTICS_PIXEL_UNITS(t->layout,k?w:t->pitch)*bpp; lv->face[k]=lv->row[k]*OPTICS_PIXEL_UNITS(t->layout,h);   /* DXT: rows of blocks */
         lv->offset[k]=total; total+=lv->face[k]*faces;
     }
     return total;
 }
 /* Float formats (draw.c floating 1..6: X16, X16Y16, XYZW16, X32, X32Y32, XYZW32, little-endian once unswapped) as
- * RGBA32F through the unit's selects, level 0. */
-static std::vector<float> float_texels(const OpticsTexture *t,const uint8_t *p,size_t row) {
-    unsigned k=t->floating-1u,comps=k%3==2?4:k%3+1; std::vector<float> out((size_t)t->width*t->height*4);
-    for(uint32_t y=0;y<t->height;y++) for(uint32_t x=0;x<t->width;x++) {
-        const uint8_t *q=p+(size_t)y*row+(size_t)x*t->bpp; float c[4]={0,0,0,1};
-        for(unsigned i=0;i<comps;i++){ if(k<3){ __fp16 h; memcpy(&h,q+2*i,2); c[i]=(float)h; } else memcpy(&c[i],q+4*i,4); }
-        float *o=&out[((size_t)y*t->width+x)*4]; for(int j=0;j<4;j++){ unsigned s=t->select[j]; o[j]=s<4?c[s]:s==4?0.0f:1.0f; }
+ * RGBA32F through the unit's selects, every level, one after another. */
+static std::vector<float> float_texels(const OpticsTexture *t,const uint8_t *p,const PtR2Levels *lv) {
+    unsigned k=t->floating-1u,comps=k%3==2?4:k%3+1; std::vector<float> out;
+    for(unsigned l=0;l<lv->levels;l++) {
+        uint32_t w=std::max(1u,t->width>>l),h=std::max(1u,t->height>>l);
+        for(uint32_t y=0;y<h;y++) for(uint32_t x=0;x<w;x++) {
+            const uint8_t *q=p+lv->offset[l]+(size_t)y*lv->row[l]+(size_t)x*t->bpp; float c[4]={0,0,0,1};
+            for(unsigned i=0;i<comps;i++){ if(k<3){ __fp16 h16; memcpy(&h16,q+2*i,2); c[i]=(float)h16; } else memcpy(&c[i],q+4*i,4); }
+            for(int j=0;j<4;j++){ unsigned s=t->select[j]; out.push_back(s<4?c[s]:s==4?0.0f:1.0f); }
+        }
     }
     return out;
 }
@@ -442,8 +447,12 @@ struct Exec {
     }
     /* A guest colour buffer becomes GPU-owned: its bytes are uploaded into a new target (depth cleared). Returns the
      * entry in `owned` (valid until the list changes) or nullptr with the result in *code and the reason in *why. */
-    Surface *import(uint64_t gpu,uint32_t W,uint32_t H,uint8_t fmt,uint8_t sel,const char **why,int *code) {
+    Surface *import(uint64_t gpu,uint32_t W,uint32_t H,uint8_t fmt,uint8_t sel,const char **why,int *code,const OpticsDraw *ms=nullptr) {
         NSError *e=nil; uint8_t bpp=(uint8_t)colour_bytes(fmt); size_t row=(size_t)W*bpp; uint64_t start; OpticsPixelLayout l=colour_layout(fmt,sel);
+        /* A multisampled colour buffer (Tiger's FSAA): a Metal multisample target. Its samples' layout in VRAM is not
+         * modelled; it starts cleared (Tiger clears it before drawing a frame) and a CPU read sees the resolved pixels. */
+        PtR2MsaaInput aa={}; uint8_t samples=ms&&ms->aa_samples>1?ms->aa_samples:1;
+        if(samples>1){ aa.aa_config=ms->aa_config; aa.tile_config=ms->aa_tile; aa.mspos[0]=ms->aa_mspos[0]; aa.mspos[1]=ms->aa_mspos[1]; }
         if(!optics_frontend_vram_offset(dev,gpu,&start)){*code=fail(why,"colour target outside VRAM",nil);return nullptr;}
         if(materialize(start,start+row*H,1)){*code=failhard(why,"export before a colour import",nil);return nullptr;}   /* other owned views go back and are dropped */
         std::vector<uint8_t> rows(row*H);
@@ -452,18 +461,19 @@ struct Exec {
         if(bpp==8)for(size_t i=0;i<(size_t)W*H*4;i++)rows[i]=rows[2*i+1];   /* 16-bit LE channels: high bytes, in place */
         PtR2Texture *current=retry([&]{return owner.on([&]{return [renderer textureWidth:W height:H bytes:rows.data() rowBytes:(size_t)W*(bpp==8?4:bpp)
             layout:l error:&e];});},&e);
-        PtR2Target *target=current?owner.on([&]{return [renderer targetWidth:W height:H samples:(PtR2MsaaInput){} error:&e];}):nil;
+        PtR2Target *target=current?owner.on([&]{return [renderer targetWidth:W height:H samples:aa error:&e];}):nil;
         if(!target && current && e.code==2) {   /* resident budget: drop decoded textures and other owned surfaces, retry */
             e=nil; drop_cache();
             while(!owned.empty()){ if(!write_back(owned.front())){*code=failhard(why,"export for resident budget",nil);return nullptr;} forget(owned.front()); owned.erase(owned.begin()); }
             NSError *c=nil; commit(&c); if(!drain()){*code=failhard(why,"GPU batch",nil);return nullptr;}
-            target=owner.on([&]{return [renderer targetWidth:W height:H samples:(PtR2MsaaInput){} error:&e];});
+            target=owner.on([&]{return [renderer targetWidth:W height:H samples:aa error:&e];});
         }
-        if(!target || !retry([&]{return owner.on([&]{return [renderer load:target from:current error:&e];});},&e)){*code=failhard(why,"target import",e);return nullptr;}
+        if(!target || !retry([&]{return owner.on([&]{return target.samples>1?[renderer clear:target mask:7 color:MTLClearColorMake(0,0,0,0) depth:1 stencil:0 error:&e]
+              :[renderer load:target from:current error:&e];});},&e)){*code=failhard(why,"target import",e);return nullptr;}
         uint8_t clear=0;
         for(size_t i=0;i<pending.size();) if(pending[i].plane==1 && pending[i].gpu==gpu){clear=1;pending.erase(pending.begin()+i);} else i++;
         if(owned.size()>=16){ if(!write_back(owned.front())){*code=failhard(why,"export of an evicted surface",nil);return nullptr;} forget(owned.front()); owned.erase(owned.begin()); }
-        Surface s={start,start+row*H,gpu,W,H,target,false,clear,nil,0,next_version++,PtR2IoToken{},PtR2IoToken{},nil,bpp,fmt,sel};
+        Surface s={start,start+row*H,gpu,W,H,target,false,clear,nil,0,next_version++,PtR2IoToken{},PtR2IoToken{},nil,bpp,fmt,sel}; s.aa=samples;
         if(!watch(s.watch,s.start,s.end-s.start)){*code=failhard(why,"VRAM watch of an imported surface",nil);return nullptr;}
         owned.push_back(s); stats_imports++;
         static uint64_t seen[32]; static unsigned nseen; bool known=false;   /* development trace: distinct colour targets */
@@ -525,14 +535,18 @@ struct Exec {
         if(rx1<=rx0 || ry1<=ry0) return OPTICS_EXEC_DONE;
         uint64_t src_gpu=surface->gpu; uint32_t DW=d->resolve_pitch; uint8_t fmt=surface->fmt;
         Surface *dst=nullptr;
-        for(auto &s:owned) if(s.gpu==d->resolve_offset && s.width==DW && s.fmt==fmt && s.height>=(uint32_t)ry1){dst=&s;break;}
+        uint8_t aa=surface->aa;
+        for(auto &s:owned) if(s.gpu==d->resolve_offset && s.width==DW && s.fmt==fmt && s.aa==1 && s.height>=(uint32_t)ry1){dst=&s;break;}
         int code=OPTICS_EXEC_REFUSED;
         if(!dst && !(dst=import(d->resolve_offset,DW,(uint32_t)ry1,fmt,surface->sel,why,&code))) return code;
         uint64_t dst_gpu=dst->gpu; surface=nullptr; dst=nullptr;   /* the import may have moved or evicted entries */
-        for(auto &s:owned){ if(s.gpu==src_gpu && s.width==W && s.fmt==fmt) surface=&s; if(s.gpu==dst_gpu && s.width==DW && s.fmt==fmt) dst=&s; }
+        for(auto &s:owned){ if(s.gpu==src_gpu && s.width==W && s.fmt==fmt && s.aa==aa) surface=&s; if(s.gpu==dst_gpu && s.width==DW && s.fmt==fmt && s.aa==1) dst=&s; }
         if(!surface || !dst || surface==dst) return fail(why,"resolve buffers",nil);
         if(!apply_clear(*dst,d->color_clear,d->depth_clear_word,d->depth_clear_format)) return failhard(why,"fast clear",nil);
-        if(!retry([&]{return owner.on([&]{return [renderer copy:surface->target x:(uint32_t)rx0 y:(uint32_t)ry0 width:(uint32_t)(rx1-rx0) height:(uint32_t)(ry1-ry0)
+        uint32_t ctl=d->resolve_ctl; Surface *src=surface;
+        if(!retry([&]{return owner.on([&]{return src->target.samples>1?[renderer resolve:src->target control:ctl x:(uint32_t)rx0 y:(uint32_t)ry0 width:(uint32_t)(rx1-rx0)
+              height:(uint32_t)(ry1-ry0) to:dst->target x:(uint32_t)rx0 y:(uint32_t)ry0 error:&e]
+              :[renderer copy:src->target x:(uint32_t)rx0 y:(uint32_t)ry0 width:(uint32_t)(rx1-rx0) height:(uint32_t)(ry1-ry0)
               to:dst->target x:(uint32_t)rx0 y:(uint32_t)ry0 error:&e];});},&e)) return failhard(why,"resolve copy",e);
         if(!touch(*dst)) return failhard(why,"VRAM ownership",nil); invalidate(dst->start,dst->end); stats_draws++;
         static unsigned shown; if(optics_trace() && shown++<6) NSLog(@"optics-frontend: AA resolve %#llx -> %#llx (pitch %u) rect %d,%d-%d,%d",(unsigned long long)src_gpu,(unsigned long long)dst_gpu,DW,rx0,ry0,rx1,ry1);
@@ -685,7 +699,8 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
          * route's position + 8 raw attributes (16 slots). Doom 3's interaction draws use all 8. */
         if(d->varyings>OPTICS_DRAW_VARYINGS) return fail(why,"more than 8 varyings",nil);
         /* 1. The GPU-owned surface for this colour buffer, or a fresh import of the guest bytes. */
-        auto find=[&]()->Surface *{ if(ram) return nullptr; for(auto &s:owned) if(s.gpu==d->cb_offset && s.width==W && s.fmt==cfmt && s.height>=H) return &s; return nullptr; };
+        uint8_t aa=d->aa_samples>1?d->aa_samples:1;
+        auto find=[&]()->Surface *{ if(ram) return nullptr; for(auto &s:owned) if(s.gpu==d->cb_offset && s.width==W && s.fmt==cfmt && s.aa==aa && s.height>=H) return &s; return nullptr; };
         Surface *surface=find();
         /* A point sprite over the drawable (Tiger's GL draws one so, VTE scales without offsets) has the scissor's height,
          * a row past Doom 3's 640x480 buffer; its corners end the surface instead, as draw.c ends a viewport-transformed
@@ -703,13 +718,23 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                 d->cb_offset,W,H,d->scissor[0],d->scissor[1],d->scissor[2],d->scissor[3],d->vte,d->viewport[0],d->viewport[1],d->viewport[2],d->viewport[3],d->resolve,d->sprite,d->vertices); }
         }
         uint8_t sel=d->color_mask?d->cb_select:0;   /* a draw that writes no colour may carry another context's output selects */
-        if(ram){ if(d->resolve) return fail(why,"AA resolve into guest RAM",nil); if(!import_ram(d->cb_offset,W,H,cfmt,sel,d->cb_endian,temp,why,&code)) return code; surface=&temp; }
-        else if(!surface && !(surface=import(d->cb_offset,W,H,cfmt,sel,why,&code))) return code;
+        if(ram){ if(d->resolve) return fail(why,"AA resolve into guest RAM",nil); if(aa>1) return fail(why,"multisampled target in guest RAM",nil);
+            if(!import_ram(d->cb_offset,W,H,cfmt,sel,d->cb_endian,temp,why,&code)) return code; surface=&temp; }
+        else if(!surface && !(surface=import(d->cb_offset,W,H,cfmt,sel,why,&code,d))) return code;
         if(d->color_mask) surface->sel=sel;
         if(d->resolve) return resolve(d,surface,W,why);
         /* Depth/stencil storage of a draw that tests or writes them (ZB_DEPTHOFFSET with both off may be another
          * context's): bound to this target; a draw without depth keeps the binding (its depth state touches nothing). */
-        if(d->depth_enable || d->stencil_enable) {
+        if((d->depth_enable || d->stencil_enable) && surface->aa>1) {
+            /* A multisampled target draws with its own multisampled depth/stencil, not the ZB storage: a pending ZB fast
+             * clear clears it. Approximation: its depth is not exported for the CPU. */
+            if(surface->bound && !owner.on([&]{return [renderer target:surface->target depth:nil error:&e];})) return failhard(why,"depth binding",e);
+            surface->bound=nil;
+            for(size_t i=0;i<pending.size();) if(pending[i].plane==2 && pending[i].gpu==d->zb_offset){ pending.erase(pending.begin()+i);
+                unsigned planes=optics_draw_clear_mask(2,d->depth_clear_format)&6; double z=optics_draw_depth_clear(d->depth_clear_word,d->depth_clear_format);
+                if(planes && !retry([&]{return owner.on([&]{return [renderer clear:surface->target mask:(uint8_t)planes color:MTLClearColorMake(0,0,0,0) depth:z
+                      stencil:(uint8_t)d->depth_clear_word error:&e];});},&e)) return failhard(why,"multisampled depth fast clear",e); } else i++;
+        } else if(d->depth_enable || d->stencil_enable) {
             uint32_t SH=surface->height; Depth *z=depth_for(d,W,SH,why,&code); if(!z) return code;
             if(!ram && !(surface=find())) return failhard(why,"colour target lost to a depth transition",nil);   /* owned may have moved */
             if(surface->bound!=z->depth) {
@@ -795,10 +820,10 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                     m=n/2; for(unsigned k=0;k<lv.levels;k++){lv.offset[k]/=2;lv.row[k]/=2;lv.face[k]/=2;}
                 }
                 OpticsPixelLayout l={t->layout,{t->select[0],t->select[1],t->select[2],t->select[3]}};
-                if(t->floating){ std::vector<float> f=float_texels(t,texels.data(),lv.row[0]);
-                    x=retry([&]{return owner.on([&]{return [renderer floatTextureWidth:t->width height:t->height bytes:f.data() error:&e];});},&e); }
-                else if(t->depth) x=retry([&]{return owner.on([&]{return [renderer textureWidth:t->width height:t->height depth:t->depth bytes:texels.data()
-                    length:m rowBytes:lv.row[0] sliceBytes:lv.face[0] layout:l error:&e];});},&e);
+                if(t->floating){ std::vector<float> f=float_texels(t,texels.data(),&lv);
+                    x=retry([&]{return owner.on([&]{return [renderer floatTextureWidth:t->width height:t->height levels:lv.levels bytes:f.data() error:&e];});},&e); }
+                else if(t->depth) x=retry([&]{return owner.on([&]{return [renderer textureWidth:t->width height:t->height depth:t->depth levels:&lv bytes:texels.data()
+                    length:m layout:l error:&e];});},&e);
                 else x=retry([&]{return owner.on([&]{return [renderer textureWidth:t->width height:t->height faces:t->cube?6u:1u levels:&lv bytes:texels.data() length:m layout:l error:&e];});},&e);
                 if(!x) return failhard(why,"texture upload",e);
                 stats_texture_uploads++; upload_ns+=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-u0;
@@ -808,7 +833,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
                     Cached c; c.start=vram_off; c.end=vram_off+n; memcpy(c.key,key,sizeof key); c.texture=x; c.watch=PtR2IoToken{};
                     if(watch(c.watch,c.start,n)){ cache.push_back(c); cache_adds++; cache_index[tk]=x; cache_bytes+=n; cache_lo=std::min(cache_lo,c.start); cache_hi=std::max(cache_hi,c.end); }
                 } else {   /* budgeted by decoded RGBA8 size */
-                    size_t rgba=0; for(unsigned k=0;k<lv.levels;k++) rgba+=(size_t)std::max(1u,t->width>>k)*std::max(1u,t->height>>k)*4*(t->cube?6:t->depth?t->depth:1)*(t->floating?4:1);
+                    size_t rgba=0; for(unsigned k=0;k<lv.levels;k++) rgba+=(size_t)std::max(1u,t->width>>k)*std::max(1u,t->height>>k)*4*(t->cube?6:std::max(1u,t->depth>>k))*(t->floating?4:1);
                     while(!gart_order.empty() && (gart_order.size()>=GART_ENTRIES || gart_bytes+rgba>GART_LIMIT)){ gart.erase(gart_order.front().first); gart_bytes-=gart_order.front().second; gart_order.pop_front(); }
                     gart[tk]=x; gart_order.push_back({tk,rgba}); gart_bytes+=rgba;
                 }
@@ -905,7 +930,7 @@ int Exec::draw(const OpticsDraw *d,const char **why) {
             if(!(++n[5]&0x3ffff)) NSLog(@"optics-frontend: vertex stage: Metal %llu, CPU %llu (sprite %llu, PVS bypass %llu, VTE %llu last %#x, inputs %llu)",
                 n[0],n[1]+n[2]+n[3]+n[4],n[1],n[2],n[3],last_vte,n[4]);
         }
-        PtR2Route r; memset(&r,0,sizeof r); r.colorOutput=(uint8_t)d->color_output; r.varyingCount=(uint8_t)nv; r.sampleCount=1;
+        PtR2Route r; memset(&r,0,sizeof r); r.colorOutput=(uint8_t)d->color_output; r.varyingCount=(uint8_t)nv; r.sampleCount=(uint8_t)surface->target.samples;
         r.colorMask=(uint8_t)d->color_mask; r.blendState=d->blend; r.flat=d->flat; r.rop=d->rop; r.discard=d->discard;
         for(unsigned u=0;u<OPTICS_DRAW_TEXTURES;u++) if(d->texture_mask>>u&1 && (d->lod_bias[u]!=0 || (d->border_mode[u]&15) || d->chroma[u])) r.textureFixed=1;
         for(unsigned k=0;k<nv;k++) r.usInput[k]=d->us_input[k];

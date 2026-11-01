@@ -23,12 +23,13 @@ formats, the vertex and fragment programs, the rasterizer, the textures, blendin
 
 The Metal executor (`src/optics/frontend_metal.mm`, `src/optics/renderer.mm`) turns the description into one Metal
 draw. Vertex elements are read from guest memory in the R300's stream formats and passed to the vertex shader in a
-shared buffer; quads, strips, fans and polygons become indexed triangles. The guest's vertex program runs in the Metal
-vertex function, with the viewport transform as its epilogue. When the card generates geometry itself (point sprites,
-wide lines, stippled lines), the driver bypasses the vertex program, or the viewport transform is not the standard
-one, the vertices are transformed on the CPU and drawn through a pass-through vertex function. Scissor, culling, depth
-bias, stencil reference and blend colour are dynamic state of the render pass. Up to 512 draws share one command
-buffer.
+shared buffer; quads, strips, fans and polygons become indexed triangles. Primitives the driver writes vertex by
+vertex into the vertex unit's registers (it sends `glPolygonMode` wireframe and points so) are gathered into the same
+form. The guest's vertex program runs in the Metal vertex function, with the viewport transform as its epilogue. When
+the card generates geometry itself (point sprites, wide lines, stippled lines), the driver bypasses the vertex
+program, or the viewport transform is not the standard one, the vertices are transformed on the CPU and drawn through
+a pass-through vertex function. Scissor, culling, depth bias, stencil reference and blend colour are dynamic state of
+the render pass. Up to 512 draws share one command buffer.
 
 ## The card's programs as Metal shaders
 
@@ -68,10 +69,15 @@ view of video memory tells Optics when the CPU touches the range:
 - a CPU write hands the memory back to the CPU, and the next draw imports it again.
 
 The 2D engine's blits and fills work on video memory in the same way: a GPU-owned surface is written back before they
-read it. The display is not: when the screen is a GPU-owned surface, the window gets a GPU copy of it. Depth and
-stencil live in `Depth32Float_Stencil8` textures. When the CPU reads a depth buffer (`glReadPixels` of depth, Halo's
-lens flares), the rows it reads are exported first in the card's depth format. A target in guest RAM (OpenGL readback)
-is drawn into a temporary texture and written back before the draw completes.
+read it. The display is not: when the screen is a GPU-owned surface, the window gets a GPU copy of it.
+
+With FSAA (a multisampled OpenGL context), Tiger's driver draws into a separate buffer with 2, 4 or 6 samples per
+pixel and then asks the card to resolve it into the drawable. Optics makes that buffer a multisampled Metal texture (2
+or 4 samples) with its own multisampled depth and stencil, and runs the resolve as a compute kernel that averages the
+samples, with gamma 2.2 when the driver asks for it. Depth and stencil live in `Depth32Float_Stencil8` textures. When
+the CPU reads a depth buffer (`glReadPixels` of depth, Halo's lens flares), the rows it reads are exported first in
+the card's depth format. A target in guest RAM (OpenGL readback) is drawn into a temporary texture and written back
+before the draw completes.
 
 ## Completion
 

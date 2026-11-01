@@ -287,6 +287,7 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
 @implementation PtR2Target
 - (uint32_t)width {return (uint32_t)surface.color.width;}
 - (uint32_t)height {return (uint32_t)surface.color.height;}
+- (uint32_t)samples {return surface.samples.count;}
 @end
 @interface PtR2Program () {
 @public std::shared_ptr<Runtime> runtime;uint64_t epoch;PtR2Route route;uint32_t textureMask;
@@ -599,34 +600,48 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     PtR2Texture *result=[PtR2Texture new];result->lease=lease;result->ticket=_ticket;result->status.store(0);
     [_leases addObject:result];[_exports addObject:result];_batchBytes+=length;_jobs++;return result;
 }
-- (PtR2Texture *)textureWidth:(uint32_t)w height:(uint32_t)h depth:(uint32_t)z bytes:(const void *)bytes length:(size_t)length
-    rowBytes:(size_t)row sliceBytes:(size_t)slice layout:(OpticsPixelLayout)layout error:(NSError **)error {
-    unsigned bpp=optics_pixel_bytes(layout);
-    if(!bytes||!w||!h||!z||w>2048||h>2048||z>2048||!bpp||layout.format>=OPTICS_PIXEL_YUYV601_SIGNED||row<(size_t)w*bpp||row>UINT32_MAX||
-       slice<(h-1)*row+(size_t)w*bpp||slice>UINT32_MAX||(z-1)*slice>length-((h-1)*row+(size_t)w*bpp)||length<(h-1)*row+(size_t)w*bpp){fail(error,@"Invalid 3D texture upload");return nil;}
+- (PtR2Texture *)textureWidth:(uint32_t)w height:(uint32_t)h depth:(uint32_t)z levels:(const PtR2Levels *)lv bytes:(const void *)bytes
+    length:(size_t)length layout:(OpticsPixelLayout)layout error:(NSError **)error {
+    unsigned bpp=optics_pixel_bytes(layout),n=lv?lv->levels:0;
+    if(!bytes||!w||!h||!z||w>2048||h>2048||z>2048||!bpp||layout.format>=OPTICS_PIXEL_YUYV601_SIGNED||!n||n>12){fail(error,@"Invalid 3D texture upload");return nil;}
+    for(unsigned k=0;k<n;k++) {   /* every row of every slice of every level inside length */
+        size_t lw=std::max(1u,w>>k),lh=std::max(1u,h>>k),lz=std::max(1u,z>>k),r=lv->row[k],one;
+        if(r<lw*bpp||r>UINT32_MAX||r>SIZE_MAX/lh||((one=(lh-1)*r+lw*bpp)>lv->face[k]&&lz>1)||lv->face[k]>UINT32_MAX||
+           (lz>1&&lv->face[k]>(SIZE_MAX-one)/(lz-1))||lv->offset[k]>length||(lz-1)*lv->face[k]+one>length-lv->offset[k]){fail(error,@"Invalid 3D texture upload");return nil;}
+    }
     if(![self admit:length error:error])return nil;
     R2Slice input=[self upload:bytes bytes:length error:error];if(!input.lease)return nil;
-    MTLTextureDescriptor *d=[MTLTextureDescriptor new];d.textureType=MTLTextureType3D;d.pixelFormat=MTLPixelFormatRGBA8Unorm;d.width=w;d.height=h;d.depth=z;
+    MTLTextureDescriptor *d=[MTLTextureDescriptor new];d.textureType=MTLTextureType3D;d.pixelFormat=MTLPixelFormatRGBA8Unorm;d.width=w;d.height=h;d.depth=z;d.mipmapLevelCount=n;
     d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;d.hazardTrackingMode=MTLHazardTrackingModeTracked;
     id<MTLTexture> tex=[_device newTextureWithDescriptor:d];if(!tex){fail(error,@"Unpack texture allocation failed");return nil;}
     R2Lease *lease=[self charge:tex.allocatedSize error:error];if(!lease)return nil;lease->texture=tex;
     [self endRender:0];id<MTLComputeCommandEncoder> e=[_batch computeCommandEncoder];if(!e){fail(error,@"Unpack encoder failed");return nil;}
-    uint32_t p[7]={w,h,(uint32_t)row,bpp,layout.format,0,(uint32_t)slice};for(unsigned i=0;i<4;i++)p[5]|=(uint32_t)layout.component[i]<<(i*3);
     NSUInteger x=_unpack3d.threadExecutionWidth,y=std::min((NSUInteger)8,_unpack3d.maxTotalThreadsPerThreadgroup/x);
-    [e setComputePipelineState:_unpack3d];[e setBytes:p length:sizeof p atIndex:1];[e setBuffer:input.lease->buffer offset:input.offset atIndex:0];[e setTexture:tex atIndex:0];
-    [e dispatchThreads:MTLSizeMake(w,h,z) threadsPerThreadgroup:MTLSizeMake(x,y,1)];[e endEncoding];
+    [e setComputePipelineState:_unpack3d];
+    for(unsigned k=0;k<n;k++) {   /* a level through a 3D view of it */
+        uint32_t lw=std::max(1u,w>>k),lh=std::max(1u,h>>k),lz=std::max(1u,z>>k);
+        uint32_t p[7]={lw,lh,(uint32_t)lv->row[k],bpp,layout.format,0,(uint32_t)lv->face[k]};for(unsigned i=0;i<4;i++)p[5]|=(uint32_t)layout.component[i]<<(i*3);
+        id<MTLTexture> dst=n==1?tex:[tex newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm textureType:MTLTextureType3D levels:NSMakeRange(k,1) slices:NSMakeRange(0,1)];
+        if(!dst){[e endEncoding];fail(error,@"Texture level view failed");return nil;}
+        [e setBytes:p length:sizeof p atIndex:1];[e setBuffer:input.lease->buffer offset:input.offset+lv->offset[k] atIndex:0];[e setTexture:dst atIndex:0];
+        [e dispatchThreads:MTLSizeMake(lw,lh,lz) threadsPerThreadgroup:MTLSizeMake(x,y,1)];
+    }
+    [e endEncoding];
     PtR2Texture *result=[PtR2Texture new];result->lease=lease;result->ticket=_ticket;result->status.store(0);
     [_leases addObject:result];[_exports addObject:result];_batchBytes+=length;_jobs++;return result;
 }
-- (PtR2Texture *)floatTextureWidth:(uint32_t)w height:(uint32_t)h bytes:(const float *)rgba error:(NSError **)error {
+- (PtR2Texture *)floatTextureWidth:(uint32_t)w height:(uint32_t)h levels:(unsigned)n bytes:(const float *)rgba error:(NSError **)error {
     if(![self owner:error])return nil;
-    if(!rgba||!w||!h||w>16384||h>16384){fail(error,@"Invalid float texture upload");return nil;}
-    uint64_t size=(uint64_t)w*h*16;if(![self admit:size error:error])return nil;
-    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:NO];
+    if(!rgba||!w||!h||w>16384||h>16384||!n||n>13||(w>>(n-1))+(h>>(n-1))==0){fail(error,@"Invalid float texture upload");return nil;}
+    uint64_t size=0;for(unsigned k=0;k<n;k++)size+=(uint64_t)std::max(1u,w>>k)*std::max(1u,h>>k)*16;
+    if(![self admit:size error:error])return nil;
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:w height:h mipmapped:n>1];d.mipmapLevelCount=n;
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;d.hazardTrackingMode=MTLHazardTrackingModeTracked;
     id<MTLTexture> tex=[_device newTextureWithDescriptor:d];if(!tex){fail(error,@"Texture allocation failed");return nil;}
     R2Lease *lease=[self charge:tex.allocatedSize error:error];if(!lease)return nil;
-    [tex replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:rgba bytesPerRow:(NSUInteger)w*16];lease->texture=tex;
+    for(unsigned k=0;k<n;k++){uint32_t lw=std::max(1u,w>>k),lh=std::max(1u,h>>k);
+        [tex replaceRegion:MTLRegionMake2D(0,0,lw,lh) mipmapLevel:k withBytes:rgba bytesPerRow:(NSUInteger)lw*16];rgba+=(size_t)lw*lh*4;}
+    lease->texture=tex;
     PtR2Texture *result=[PtR2Texture new];result->lease=lease;result->status.store(1);_jobs++;_batchBytes+=size;return result;
 }
 - (BOOL)renderTarget:(PtR2Target *)t clearMask:(uint8_t)mask color:(MTLClearColor)color depth:(double)depth stencil:(uint8_t)stencil error:(NSError **)error {
@@ -771,6 +786,18 @@ struct R2Slice {R2Lease *__strong lease;size_t offset;};
     if(![self admit:0 error:error])return NO;
     [self endRender:6];id<MTLBlitCommandEncoder> e=[_batch blitCommandEncoder];if(!e)return fail(error,@"Copy blit encoder failed");
     [e copyFromTexture:src->surface.color sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(sx,sy,0) sourceSize:MTLSizeMake(w,h,1)
+        toTexture:dst->surface.color destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dx,dy,0)];[e endEncoding];
+    [_leases addObject:src];[_leases addObject:dst];_jobs++;return YES;
+}
+- (BOOL)resolve:(PtR2Target *)src control:(uint32_t)c x:(uint32_t)sx y:(uint32_t)sy width:(uint32_t)w height:(uint32_t)h
+    to:(PtR2Target *)dst x:(uint32_t)dx y:(uint32_t)dy error:(NSError **)error {
+    if(![self owner:error]||![self valid:src?src->lease:nil error:error]||![self valid:dst?dst->lease:nil error:error])return NO;
+    if(src==dst||src->surface.samples.count<2||dst->surface.samples.count!=1||!src->initialized||!dst->initialized||!w||!h||
+       sx>src.width||w>src.width-sx||sy>src.height||h>src.height-sy||dx>dst.width||w>dst.width-dx||dy>dst.height||h>dst.height-dy)
+        return fail(error,@"Resolve needs an initialized multisampled source, a single-sample target and an in-bounds rectangle");
+    if(![self admit:0 error:error]||![self resolve:src control:c error:error])return NO;
+    id<MTLBlitCommandEncoder> e=[_batch blitCommandEncoder];if(!e)return fail(error,@"Resolve blit encoder failed");
+    [e copyFromTexture:src->surface.resolved sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(sx,sy,0) sourceSize:MTLSizeMake(w,h,1)
         toTexture:dst->surface.color destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(dx,dy,0)];[e endEncoding];
     [_leases addObject:src];[_leases addObject:dst];_jobs++;return YES;
 }

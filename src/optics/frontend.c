@@ -116,6 +116,9 @@ struct PtRadeon {
      * cp_running: inside cp_run; cp_sleeping: waiting on cp_event; cp_progress: packets accepted plus completions published. */
     pthread_mutex_t lock; pthread_t cp; PtEvent cp_event; _Atomic unsigned want;
     int cp_async,cp_quit,cp_kicked,cp_running,cp_sleeping; uint64_t cp_progress;
+    /* Immediate-mode primitive through the VAP vertex registers (vtx_write): VAP_VF_CNTL as written, the current
+     * attributes (0x2300..0x24ab), the 16-byte groups written since it began, and the vertices emitted so far. */
+    uint32_t imm_cntl,imm_attr[(0x24ac-0x2300)/4]; uint32_t imm_groups; int imm_open; uint32_t *imm_data; size_t imm_words,imm_cap;
 };
 
 static OpticsFrameStorage storage;
@@ -161,7 +164,8 @@ static int rate_on(void) { static int on=-1; if(on<0) on=getenv("OPTICS_RATE") &
 int optics_trace(void) { static int on=-1; if(on<0) on=getenv("OPTICS_TRACE") && atoi(getenv("OPTICS_TRACE")); return on; }
 /* OPTICS_REG_LOG=FILE (development): while FILE.on exists (polled every 50 ms), one line per write to the SURFACE and 2D
  * registers (0x0b00..0x0b8c, 0x1400..0x16ff without scratch), per blit with its resolved operands and per 3D draw with
- * RB3D_COLOROFFSET0/PITCH0 and TX_OFFSET/FORMAT0..2 of each enabled unit, and per refused packet3 with its words;
+ * RB3D_COLOROFFSET0/PITCH0 and TX_OFFSET/FORMAT0..2 of each enabled unit, per 3D register write and CPU read (0x2000..0x4fff),
+ * and per refused packet3 with its words;
  * host monotonic seconds; at most 400000 lines.
  * SURFACE and memory-controller/GART writes (MC_FB/AGP_LOCATION, AGP_BASE, AIC, PCIGART_PT_BASE; rare) are logged from the start. Returns the stream with the time stamp written, or NULL. */
 static FILE *reg_log(int always) {
@@ -598,6 +602,35 @@ static void zpass_end(PtRadeon *d,uint32_t address) {
     static unsigned shown; if(shown<4 && first && !query_gpu()){ shown++; fprintf(stderr,"optics-frontend: occlusion query: %u pixels (on-screen area, depth not tested) to %#x\n",n,address); }
 }
 /* One register write, from MMIO or from a type-0 packet. 3D-space words also feed the owned state shadow. */
+static int run_draw(PtRadeon *d,uint8_t opcode,const uint32_t *payload,uint32_t words);
+/* Immediate-mode primitives through the VAP vertex registers: Tiger's driver draws polygons in glPolygonMode line and
+ * point modes so (with edge flags). VAP_VF_CNTL written as a register begins one (its primitive type); VAP_VTX_*
+ * 0x2300..0x23ff hold the current attributes in 16-byte groups (POS_0 at 0x2300, COLOR_0 at 0x2320: what it writes);
+ * POS_0's W (0x230c) emits a vertex of the groups written since the begin, in address order, VAP_VTX_SIZE dwords as an
+ * IMMD_2 packet lays them out; VAP_VTX_END_OF_PKT (0x24ac) draws them as that packet would. Unverified beyond Tiger's
+ * polygon modes: the layout for other attribute sets. Edge flags (VAP_VTX_EDGE_FLAG 0x245c) are not modelled. */
+static void vtx_write(PtRadeon *d,uint32_t a,uint32_t v,int from_cp) {
+    if(a==0x2084){ d->imm_cntl=v; d->imm_open=1; d->imm_groups=0; d->imm_words=0; return; }
+    if(!d->imm_open) return;
+    uint32_t size=d->reg[0x20b4/4]&0x7f;   /* VAP_VTX_SIZE */
+    if(a<0x24ac) {
+        d->imm_attr[(a-0x2300)/4]=v; if(a<0x2400) d->imm_groups|=1u<<((a-0x2300)/16);
+        if(a!=0x230c) return;
+        if(!size || d->imm_words+size>(size_t)65535*size){ d->imm_open=0; return; }
+        if(d->imm_words+size>d->imm_cap){ size_t cap=d->imm_cap?d->imm_cap*2:1024; while(cap<d->imm_words+size) cap*=2;
+            uint32_t *p=realloc(d->imm_data,cap*4); if(!p){ d->imm_open=0; return; } d->imm_data=p; d->imm_cap=cap; }
+        uint32_t n=0; for(unsigned g=0;g<16 && n<size;g++) if(d->imm_groups>>g&1) for(unsigned c=0;c<4 && n<size;c++) d->imm_data[d->imm_words+n++]=d->imm_attr[4*g+c];
+        while(n<size) d->imm_data[d->imm_words+n++]=0;
+        d->imm_words+=size; return;
+    }
+    d->imm_open=0; uint32_t count=size?(uint32_t)(d->imm_words/size):0;   /* 0x24ac: END_OF_PKT */
+    if(!count) return;
+    if(!from_cp){ static unsigned shown; if(shown++<4) fprintf(stderr,"optics-frontend: immediate primitive written through MMIO, not drawn\n"); return; }
+    uint32_t *payload=malloc((1+(size_t)count*size)*4); if(!payload) return;
+    payload[0]=(d->imm_cntl&15)|3u<<4|count<<16;   /* VF_CNTL: its primitive, the vertices in the packet */
+    memcpy(payload+1,d->imm_data,(size_t)count*size*4);
+    (void)run_draw(d,0x35,payload,1+count*size); free(payload);
+}
 static void reg_write(PtRadeon *d,uint32_t a,uint32_t v,int from_cp) {
     if(a>=REG_BYTES || (a&3)) {d->stats.unknown_writes++;return;}
     if(a>=PCI_MIRROR && a<PCI_MIRROR+256) return;                     /* read-only mirror */
@@ -650,6 +683,8 @@ static void reg_write(PtRadeon *d,uint32_t a,uint32_t v,int from_cp) {
             unsigned i=(a-SCRATCH_REG0)/4;
             if(d->reg[SCRATCH_UMSK/4]>>i&1) writeback(d,d->reg[SCRATCH_ADDR/4]+4*i,v);
         } else if(a>=0x2000 && a<0x5000) {
+            { FILE *f=reg_log(0); if(f) fprintf(f,"3d %04x %08x%s\n",a,v,from_cp?"":" mmio"); }   /* OPTICS_REG_LOG: every 3D register write */
+            if(a==0x2084 || (a>=0x2300 && a<=0x24ac)) vtx_write(d,a,v,from_cp);
             if(a==ZB_ZPASS_DATA){ d->zpass=v; d->zpass_draws=0; d->zpass_open=1; if(!++d->zpass_query) d->zpass_query=1; }
             else if(a==ZB_ZPASS_ADDR) zpass_end(d,v);
             if(d->r300) (void)optics_r300_write(d->r300,a,v);
@@ -659,6 +694,7 @@ static void reg_write(PtRadeon *d,uint32_t a,uint32_t v,int from_cp) {
 static uint32_t reg_read_value(PtRadeon *d,uint32_t a);
 static uint32_t reg_read(PtRadeon *d,uint32_t a) {   /* development trace: first read of each register, with the value */
     uint32_t v=reg_read_value(d,a);
+    if(a>=0x2000 && a<0x5000){ FILE *f=reg_log(0); if(f) fprintf(f,"r %04x %08x\n",a,v); }   /* OPTICS_REG_LOG: CPU reads of 3D registers */
     if(optics_trace() && a<REG_BYTES) { static uint8_t seen[0x10000/4/8]; unsigned i=a/4;
         if(!(seen[i/8]>>(i&7)&1)){ seen[i/8]|=(uint8_t)(1u<<(i&7)); fprintf(stderr,"optics-frontend: first read %#06x = %08x\n",a,v); } }
     return v;
@@ -839,6 +875,67 @@ static int admit_completion(PtRadeon *d,unsigned writes) {
     if(!was_held) d->stats.fence_waits++;
     d->held=1; d->cp_wait=1; return 1;   /* the whole packet stays in the ring/IB, unexecuted */
 }
+/* One draw: built from the packet payload (IMMD_2/VBUF_2/INDX_2 words) against the register state and run by the
+ * executor. 0, or 2 to stop the CP (a GPU failure; OPTICS_STRICT=1 also for a refused draw). */
+static int run_draw(PtRadeon *d,uint8_t opcode,const uint32_t *payload,uint32_t words) {
+    OpticsDraw draw; const char *why="no draw executor installed";
+    /* Vertex arrays: VAP_VTX_NUM_ARRAYS, then per pair VAP_VTX_AOS_ATTR (comps|stride<<8, two halves) and two addresses. */
+    OpticsAos aos={0}; aos.count=d->reg[0x20c0/4]&31; if(aos.count>16) aos.count=16;
+    for(uint32_t k=0;k<aos.count;k++){uint32_t attr=d->reg[(0x20c4+12*(k/2))/4]>>(16*(k&1));
+        aos.array[k].components=attr&0x7f; aos.array[k].stride=attr>>8&0x7f; aos.array[k].offset=d->reg[(0x20c8+12*(k/2)+4*(k&1))/4];
+        uint64_t vo; if(optics_frontend_vram_offset(d,aos.array[k].offset,&vo)) aos.local|=1u<<k;}
+    uint64_t t0=rate_on()?mono_ns():0;
+    int built=payload && optics_draw_build(&draw,d->reg,d->r300,opcode,payload,words,&aos,fetch_gpu,d,&why);
+    uint64_t t1=t0?mono_ns():0; d->rate_build+=t1-t0;
+    draw.query=d->zpass_open?d->zpass_query:0;
+    d->in_executor=1; int result=OPTICS_EXEC_REFUSED;
+    if(built && exec_ops.draw && draw.poly_front!=draw.poly_back && !draw.lines && !draw.sprite) {
+        /* glPolygonMode with different modes per face: the front faces in theirs (back faces culled), then the back
+         * faces in theirs. Approximation: a face in point mode beside another mode is drawn as lines. */
+        OpticsDraw *back=malloc(sizeof *back);
+        if(back) { memcpy(back,&draw,sizeof draw);   /* shares the arrays: the original alone is freed */
+            draw.cull|=2; draw.fill=draw.poly_front!=2; back->cull|=1; back->fill=back->poly_back!=2;
+            if(!draw.poly_front || !draw.poly_back) draw.approx|=OPTICS_APPROX_FIXED;
+            result=exec_ops.draw(d->exec,d,&draw,&why);
+            if(result==OPTICS_EXEC_DONE) result=exec_ops.draw(d->exec,d,back,&why);
+            free(back); }
+    } else if(built && exec_ops.draw) result=exec_ops.draw(d->exec,d,&draw,&why);
+    d->in_executor=0;
+    if(t1) d->rate_exec+=mono_ns()-t1;
+    if(result==OPTICS_EXEC_DONE){ (void)optics_frontend_job(d); if(!query_gpu()) zpass_draw(d,&draw); else d->zpass_draws+=d->zpass_open;
+        d->stats.approx_mip+=draw.approx&OPTICS_APPROX_MIP?1:0; d->stats.approx_border+=draw.approx&OPTICS_APPROX_BORDER?1:0;
+        d->stats.approx_aniso+=draw.approx&OPTICS_APPROX_ANISO?1:0; d->stats.approx_tiled+=draw.approx&OPTICS_APPROX_TILED?1:0;
+        d->stats.approx_signed+=draw.approx&OPTICS_APPROX_SIGNED?1:0; }
+    if(payload) optics_draw_free(&draw);   /* the builder zeroes first: a failed build is freed too */
+    if(result==OPTICS_EXEC_FAILED){ failed(d,why); return 2; }
+    int done=result==OPTICS_EXEC_DONE;
+    if(done) d->stats.draws++;
+    else {
+        static unsigned shown; if(shown++<LOG_LIMIT) fprintf(stderr,"optics-frontend: draw refused (opcode %02x): %s\n",opcode,why);
+        d->stats.draws_refused++;
+    }
+    if(done) why="executed";
+    { FILE *f=reg_log(0); if(f) { uint32_t en=d->reg[0x4104/4]&0xffff;
+        fprintf(f,"draw %02x %s approx %x cb %08x pitch %08x tx_enable %04x",opcode,why,built?draw.approx:0,d->reg[0x4e28/4],d->reg[0x4e38/4],en);
+        for(unsigned u=0;u<16;u++) if(en>>u&1) fprintf(f," | t%u off %08x f0 %08x f1 %08x f2 %08x",u,d->reg[(0x4540+4*u)/4],d->reg[(0x4480+4*u)/4],d->reg[(0x44c0+4*u)/4],d->reg[(0x4500+4*u)/4]);
+        fputc('\n',f); } }
+    static FILE *log; static int checked; static const char *reasons[64]; static uint64_t counts[64];
+    if(!checked){checked=1;const char *e=getenv("OPTICS_DRAW_LOG");if(e)log=fopen(e,"w");}
+    if(log) {   /* OPTICS_DRAW_LOG=FILE: counts per refusal reason (development), rewritten every 4096 draws */
+        unsigned k=0; while(k<64 && reasons[k] && strcmp(reasons[k],why)) k++;
+        int fresh=k<64 && !reasons[k]; if(k<64){ if(!reasons[k]) reasons[k]=why; counts[k]++; }
+        if(fresh || ((d->stats.draws+d->stats.draws_refused)&255)==0) {
+            rewind(log); for(unsigned i=0;i<64 && reasons[i];i++) fprintf(log,"%12llu %s\n",(unsigned long long)counts[i],reasons[i]);
+            fprintf(log,"blits %llu refused %llu (last GMC %08x); packets refused %llu (last opcode %02x)\n",(unsigned long long)d->stats.blits,
+                (unsigned long long)d->stats.blits_refused,d->stats.last_refused_gmc,(unsigned long long)d->stats.packets_refused,d->stats.last_refused_opcode);
+            fflush(log);
+        }
+    }
+    if(done) return 0;
+    if(strict()) return 2;   /* OPTICS_STRICT=1: an unexecuted draw stops the CP instead of the DEGRADED default */
+    d->stats.last_refused_opcode=opcode;
+    return 0;
+}
 static int execute(PtRadeon *d,const PtR2Pm4Packet *p) {
     if(d->stats.failed) return 2;
     if(p->type==0) {
@@ -879,60 +976,17 @@ static int execute(PtRadeon *d,const PtR2Pm4Packet *p) {
         return 0;
     }
     if(effect==OPTICS_EFFECT_DRAW) {
-        OpticsDraw draw; const char *why="no draw executor installed";
         uint32_t *payload=malloc((p->words?p->words:1)*4u);
         if(payload) for(uint32_t i=0;i<p->words;i++) pt_r2_pm4_word(p,i,&payload[i]);
-        /* Vertex arrays: VAP_VTX_NUM_ARRAYS, then per pair VAP_VTX_AOS_ATTR (comps|stride<<8, two halves) and two addresses. */
-        OpticsAos aos={0}; aos.count=d->reg[0x20c0/4]&31; if(aos.count>16) aos.count=16;
-        for(uint32_t k=0;k<aos.count;k++){uint32_t attr=d->reg[(0x20c4+12*(k/2))/4]>>(16*(k&1));
-            aos.array[k].components=attr&0x7f; aos.array[k].stride=attr>>8&0x7f; aos.array[k].offset=d->reg[(0x20c8+12*(k/2)+4*(k&1))/4];
-            uint64_t vo; if(optics_frontend_vram_offset(d,aos.array[k].offset,&vo)) aos.local|=1u<<k;}
-        uint64_t t0=rate_on()?mono_ns():0;
-        int built=payload && optics_draw_build(&draw,d->reg,d->r300,p->opcode,payload,p->words,&aos,fetch_gpu,d,&why);
-        uint64_t t1=t0?mono_ns():0; d->rate_build+=t1-t0;
-        draw.query=d->zpass_open?d->zpass_query:0;
-        d->in_executor=1; int result=built && exec_ops.draw ? exec_ops.draw(d->exec,d,&draw,&why) : OPTICS_EXEC_REFUSED; d->in_executor=0;
-        if(t1) d->rate_exec+=mono_ns()-t1;
-        if(result==OPTICS_EXEC_DONE){ (void)optics_frontend_job(d); if(!query_gpu()) zpass_draw(d,&draw); else d->zpass_draws+=d->zpass_open;
-            d->stats.approx_mip+=draw.approx&OPTICS_APPROX_MIP?1:0; d->stats.approx_border+=draw.approx&OPTICS_APPROX_BORDER?1:0;
-            d->stats.approx_aniso+=draw.approx&OPTICS_APPROX_ANISO?1:0; d->stats.approx_tiled+=draw.approx&OPTICS_APPROX_TILED?1:0; }
-        if(payload){ optics_draw_free(&draw); free(payload); }   /* the builder zeroes first: a failed build is freed too */
-        if(result==OPTICS_EXEC_FAILED){ failed(d,why); return 2; }
-        int done=result==OPTICS_EXEC_DONE;
-        if(done) d->stats.draws++;
-        else {
-            static unsigned shown; if(shown++<LOG_LIMIT) fprintf(stderr,"optics-frontend: draw refused (opcode %02x): %s\n",p->opcode,why);
-            d->stats.draws_refused++;
-        }
-        if(done) why="executed";
-        { FILE *f=reg_log(0); if(f) { uint32_t en=d->reg[0x4104/4]&0xffff;
-            fprintf(f,"draw %02x %s approx %x cb %08x pitch %08x tx_enable %04x",p->opcode,why,built?draw.approx:0,d->reg[0x4e28/4],d->reg[0x4e38/4],en);
-            for(unsigned u=0;u<16;u++) if(en>>u&1) fprintf(f," | t%u off %08x f0 %08x f1 %08x f2 %08x",u,d->reg[(0x4540+4*u)/4],d->reg[(0x4480+4*u)/4],d->reg[(0x44c0+4*u)/4],d->reg[(0x4500+4*u)/4]);
-            fputc('\n',f); } }
-        static FILE *log; static int checked; static const char *reasons[64]; static uint64_t counts[64];
-        if(!checked){checked=1;const char *e=getenv("OPTICS_DRAW_LOG");if(e)log=fopen(e,"w");}
-        if(log) {   /* OPTICS_DRAW_LOG=FILE: counts per refusal reason (development), rewritten every 4096 draws */
-            unsigned k=0; while(k<64 && reasons[k] && strcmp(reasons[k],why)) k++;
-            int fresh=k<64 && !reasons[k]; if(k<64){ if(!reasons[k]) reasons[k]=why; counts[k]++; }
-            if(fresh || ((d->stats.draws+d->stats.draws_refused)&255)==0) {
-                rewind(log); for(unsigned i=0;i<64 && reasons[i];i++) fprintf(log,"%12llu %s\n",(unsigned long long)counts[i],reasons[i]);
-                fprintf(log,"blits %llu refused %llu (last GMC %08x); packets refused %llu (last opcode %02x)\n",(unsigned long long)d->stats.blits,
-                    (unsigned long long)d->stats.blits_refused,d->stats.last_refused_gmc,(unsigned long long)d->stats.packets_refused,d->stats.last_refused_opcode);
-                fflush(log);
-            }
-        }
-        if(done) return 0;
-        if(strict()) return 2;   /* OPTICS_STRICT=1: an unexecuted draw stops the CP instead of the DEGRADED default */
-    } else d->stats.packets_refused++;
-    d->stats.last_refused_opcode=p->opcode;
-    if(effect!=OPTICS_EFFECT_DRAW) {
-        static unsigned shown; uint32_t w[3]={0,0,0}; for(uint32_t i=0;i<3 && i<p->words;i++) pt_r2_pm4_word(p,i,&w[i]);
+        int r=run_draw(d,p->opcode,payload,p->words); free(payload); return r;
+    }
+    d->stats.packets_refused++; d->stats.last_refused_opcode=p->opcode;
+    {   static unsigned shown; uint32_t w[3]={0,0,0}; for(uint32_t i=0;i<3 && i<p->words;i++) pt_r2_pm4_word(p,i,&w[i]);
         if(shown++<48) fprintf(stderr,"optics-frontend: packet3 %02x refused (%u words: %08x %08x %08x): not executed by the own frontend\n",p->opcode,p->words,w[0],w[1],w[2]);
         { FILE *f=reg_log(0); if(f) { fprintf(f,"p3 %02x refused %u words:",p->opcode,p->words);   /* OPTICS_REG_LOG: every word, up to 16 */
-            for(uint32_t i=0;i<p->words && i<16;i++){ uint32_t v=0; pt_r2_pm4_word(p,i,&v); fprintf(f," %08x",v); } fputc('\n',f); } }
-    }
+            for(uint32_t i=0;i<p->words && i<16;i++){ uint32_t v=0; pt_r2_pm4_word(p,i,&v); fprintf(f," %08x",v); } fputc('\n',f); } } }
     /* DEGRADED default: the CP progresses past the refusal, which is counted and logged, never reported as executed. */
-    return strict() && effect!=OPTICS_EFFECT_DRAW ? 2 : 0;
+    return strict() ? 2 : 0;
 }
 static int optics_ring_execute(void *o,const PtR2Pm4Packet *p,uint64_t epoch) { (void)epoch; int r=execute(o,p); if(!r) ((PtRadeon *)o)->cp_progress++; return r; }
 static int stream_execute(void *o,const PtR2Pm4Packet *p,uint64_t epoch) { (void)epoch; int r=execute(o,p); if(!r) ((PtRadeon *)o)->cp_progress++; return r; }
@@ -1226,13 +1280,13 @@ void pt_radeon_stats(PtRadeon *d,FILE *f) {
     enter(d); OpticsFrontendStats s=d->stats; int direct=d->direct; leave(d);
     fprintf(f,"optics-frontend: draws %llu packets %llu type0 %llu IBs %llu blits %llu (%llu bytes) refused: draws %llu packets %llu blits %llu; "
         "faults %llu (last %08x) writebacks %llu frames %llu (native %llu copied %llu) fence waits %llu completions deferred %llu RBBM reads %llu export failures %llu; "
-        "VRAM %s (switches %llu), CPU view faults %llu (late syncs %llu, written granules returned %llu); approximated draws: mip %llu border %llu aniso %llu tiled %llu%s%s\n",(unsigned long long)s.draws,(unsigned long long)s.packets,(unsigned long long)s.type0_words,
+        "VRAM %s (switches %llu), CPU view faults %llu (late syncs %llu, written granules returned %llu); approximated draws: mip %llu border %llu aniso %llu tiled %llu signed %llu%s%s\n",(unsigned long long)s.draws,(unsigned long long)s.packets,(unsigned long long)s.type0_words,
         (unsigned long long)s.ib_launches,(unsigned long long)s.blits,(unsigned long long)s.blit_bytes,(unsigned long long)s.draws_refused,
         (unsigned long long)s.packets_refused,(unsigned long long)s.blits_refused,(unsigned long long)s.translate_faults,s.last_fault_address,
         (unsigned long long)s.writebacks,(unsigned long long)s.frames,(unsigned long long)s.native_frames,(unsigned long long)s.copied_frames,
         (unsigned long long)s.fence_waits,(unsigned long long)s.completions_deferred,(unsigned long long)s.rbbm_reads,(unsigned long long)s.materialize_failures,direct?"CPU view":"trapped",(unsigned long long)s.direct_switches,(unsigned long long)s.guard_faults,
         (unsigned long long)s.guard_emulated,(unsigned long long)s.guard_groups,(unsigned long long)s.approx_mip,(unsigned long long)s.approx_border,
-        (unsigned long long)s.approx_aniso,(unsigned long long)s.approx_tiled,s.failed?"; FAILED":"",strict()?"; strict":"; DEGRADED (refusals continue)");
+        (unsigned long long)s.approx_aniso,(unsigned long long)s.approx_tiled,(unsigned long long)s.approx_signed,s.failed?"; FAILED":"",strict()?"; strict":"; DEGRADED (refusals continue)");
 }
 static int reset(PtRadeon *d);
 int pt_radeon_reset(PtRadeon *d) { if(!d) return EINVAL; enter(d); int r=reset(d); leave(d); return r; }
@@ -1287,7 +1341,7 @@ void pt_radeon_close(PtRadeon *d) {
     for(unsigned i=0;i<FRAME_SLOTS;i++) slot_free(&d->slot[i]);
     if(d->ring_ready) pt_r2_ring_destroy(&d->ring);
     pthread_mutex_destroy(&d->frame_lock);
-    optics_stream_destroy(d->stream); optics_r300_state_destroy(d->r300); munmap(d->vram,d->vram_bytes); free(d);
+    optics_stream_destroy(d->stream); optics_r300_state_destroy(d->r300); munmap(d->vram,d->vram_bytes); free(d->imm_data); free(d);
 }
 void optics_frontend_stats(const PtRadeon *d,OpticsFrontendStats *s) { if(d && s) *s=d->stats; }
 void optics_frontend_cpu_vram(const PtRadeon *d,uint64_t *accesses,uint64_t *bytes) { *accesses=d?d->stats.cpu_vram_accesses:0; *bytes=d?d->stats.cpu_vram_bytes:0; }

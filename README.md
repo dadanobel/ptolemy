@@ -46,7 +46,8 @@ and the graphics card:
   Core Image and OpenGL on the Mac's GPU.
 
 On a MacBook Air with the M4, Tiger in Ptolemy scores about 4400 in Geekbench 2.2 (a Power Mac G5 at 1.6 GHz scores
-1000), runs Halo's built-in time demo at 82.5 fps and reaches its desktop about 10 seconds after the machine starts.
+1000), runs Halo's built-in time demo at about 90 fps with 2× FSAA and reaches its desktop about 10 seconds after the
+machine starts.
 Published Geekbench 2.2 results for Tiger in [QEMU 7.0 on an M1 Mac mini](https://browser.geekbench.com/geekbench2/2730728)
 and [UTM 3.2.4 on an M1 Pro MacBook Pro](https://browser.geekbench.com/geekbench2/2730718) are 731 and 774. Those Macs
 are older, so the comparison is approximate.
@@ -65,7 +66,7 @@ OpenGL and Quartz Extreme run as they would on the real card. Each draw the driv
   fixed-function stages built in;
 - compute kernels decode textures on the GPU, DXT and YUV included;
 - render targets are Metal textures that own the guest's video memory, and Hypervisor.framework's page protection
-  tells Optics when Tiger's CPU touches them;
+  tells Optics when Tiger's CPU touches them; with FSAA they are multisampled and resolved on the GPU;
 - the driver's fences and occlusion queries complete from Metal's completion handlers;
 - the window presents through a `CAMetalLayer` at 60 Hz.
 
@@ -122,12 +123,13 @@ Ptolemy takes the resulting `.cdr` file, as well as `.dmg` and `.iso` images.
 ## What has been tried
 
 On a 13.6-inch MacBook Air with the M4 (10-core CPU and GPU, 24 GB), macOS 27, with Tiger 10.4.11 on the G4 7447A.
-Halo and Doom 3 were measured with 1.0 beta 1, the others with builds of the weeks before it.
+Halo was measured with this release, Doom 3 with an earlier build of the same day, the others with builds of the weeks
+before it.
 
 | Software | Result |
 |---|---|
 | Mac OS X Tiger 10.4 | Installs from the retail DVD image; updates to 10.4.11 with the Combo update; Finder and Dock with Quartz Extreme |
-| Halo (Universal) | Campaign plays. Built-in time demo at 800 × 600 with lens flares: 82.5 fps (the game's FSAA setting draws without antialiasing, see below) |
+| Halo (Universal) | Campaign plays. Built-in time demo at 800 × 600 with 2× FSAA and lens flares: 87–95 fps (two runs) |
 | Doom 3 1.3.1 | Renders completely (ARB2 path). `timedemo demo1` at 640 × 480: 55 fps |
 | Half-Life (Xash3D) | 1024 × 768: 430–650 fps, depending on the run |
 | SimCity 4 | Starts from its disc image; the tutorial city renders |
@@ -140,9 +142,9 @@ Everything else is untested. Reports are welcome.
 
 ## Known limitations
 
-- **Graphics.** Not modelled yet: wireframe and point polygon modes (they draw nothing), multisampling (antialiasing
-  settings draw with one sample), signed texture components, mip levels of 3D and float textures. See
-  [docs/graphics.md](docs/graphics.md).
+- **Graphics.** Every case of the OpenGL comparison test matches Apple's software renderer, but some details are
+  approximate: edge flags in wireframe mode (every edge is drawn), the R300's 3- and 6-sample FSAA modes (drawn with
+  4 samples) and its exact sample positions. See [docs/graphics.md](docs/graphics.md).
 - **Sleep.** When Tiger goes to sleep, the machine stops. Set Energy Saver to never put the computer to sleep.
 - **NVRAM.** Settings that Mac OS X keeps in NVRAM (for example Startup Disk) are not saved.
 - **Classic.** The Mac OS 9 environment does not start, and the firmware cannot start a disk that Tiger marked for

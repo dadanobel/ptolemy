@@ -10,7 +10,7 @@ static BOOL fail(NSError **error,NSString *message)
         userInfo:@{NSLocalizedDescriptionKey:message}];
     return NO;
 }
-@implementation PtR2MetalSurface
+@implementation PtR2MetalSurface { BOOL _positions; }
 + (instancetype)surfaceWithDevice:(id<MTLDevice>)device width:(uint32_t)w
     height:(uint32_t)h input:(PtR2MsaaInput)input budget:(uint64_t)budget error:(NSError **)error
 {
@@ -19,10 +19,15 @@ static BOOL fail(NSError **error,NSString *message)
     for(unsigned n=1;n<=6;n++)if([device supportsTextureSampleCount:n])input.metal_sample_counts|=1u<<n;
     input.programmable_positions=device.areProgrammableSamplePositionsSupported;
     PtR2MsaaPlan p=pt_r2_msaa_plan(input);uint64_t estimate=0;
-    if(p.issues || !pt_r2_msaa_payload_bytes(w,h,4,0,&p,p.count>1,&estimate) || estimate>budget) {
-        fail(error,@"Unsupported exact sample pattern or insufficient surface budget");return nil;
+    /* Approximations: Metal has 2 and 4 samples, not the R300's 3 and 6 (the next count of the two), and the R300's
+     * positions only where they land on Metal's 1/16 grid and the device takes programmable positions (else Metal's
+     * standard positions for the count). */
+    BOOL positions=p.count>1&&!p.issues;
+    if(p.count>1&&(p.issues&PT_R2_MSAA_COUNT)){unsigned m=p.count<=2?2:4;if(!(input.metal_sample_counts>>m&1))m=input.metal_sample_counts>>2&1?2:1;p.count=(uint8_t)m;}
+    if(!pt_r2_msaa_payload_bytes(w,h,4,0,&p,p.count>1,&estimate) || estimate>budget) {
+        fail(error,@"Insufficient surface budget");return nil;
     }
-    PtR2MetalSurface *s=[PtR2MetalSurface new];s->_samples=p;
+    PtR2MetalSurface *s=[PtR2MetalSurface new];s->_samples=p;s->_positions=positions;
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
     d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
     if(p.count>1){d.textureType=MTLTextureType2DMultisample;d.sampleCount=p.count;}
@@ -45,7 +50,7 @@ static BOOL fail(NSError **error,NSString *message)
     MTLRenderPassDescriptor *r=[MTLRenderPassDescriptor renderPassDescriptor];
     r.colorAttachments[0].texture=self.color;r.colorAttachments[0].loadAction=load;
     r.colorAttachments[0].storeAction=MTLStoreActionStore;r.colorAttachments[0].clearColor=clear;
-    if(_samples.count>1) {
+    if(_samples.count>1&&_positions) {
         MTLSamplePosition positions[6];
         for(unsigned k=0;k<_samples.count;k++)positions[k]=(MTLSamplePosition){_samples.position[k].metal_x/16.0f,_samples.position[k].metal_y/16.0f};
         [r setSamplePositions:positions count:_samples.count];

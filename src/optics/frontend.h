@@ -23,7 +23,7 @@ typedef struct {
     uint64_t draws,packets,type0_words,ib_launches,blits,blit_bytes,draws_refused,packets_refused,blits_refused,
         translate_faults,unknown_writes,writebacks,frames;
     uint32_t last_refused_opcode,last_refused_gmc,last_fault_address;
-    uint64_t approx_mip,approx_border,approx_aniso,approx_tiled;   /* draws executed with OPTICS_APPROX_* state */
+    uint64_t approx_mip,approx_border,approx_aniso,approx_tiled,approx_signed;   /* draws executed with OPTICS_APPROX_* state */
     uint64_t fence_waits,completions_deferred,materialize_failures,native_frames,copied_frames,rbbm_reads,guard_faults,guard_emulated,guard_groups,direct_switches;
     uint64_t cpu_vram_accesses,cpu_vram_bytes;   /* trapped CPU aperture accesses (OPTICS_HITCH) */
     int failed;                         /* GPU/export failure: the CP stopped; only a device reset clears it */
