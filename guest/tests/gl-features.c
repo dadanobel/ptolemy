@@ -38,72 +38,134 @@
 #define GL_COORD_REPLACE_ARB 0x8862
 #endif
 
-enum { W = 128, H = 128 };
-static CGLContextObj ctx[2];                  /* 0: accelerated, 1: software */
+enum {
+    W = 128,
+    H = 128
+};
+static CGLContextObj ctx[2]; /* 0: accelerated, 1: software */
 static unsigned char soft[W * H * 4], img[2][W * H * 4];
 static float depth[2][W * H];
-static int renderer;                          /* the context the scene is drawn into */
 
-static void reset(void)
-{
+static void reset(void) {
     glViewport(0, 0, W, H);
-    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
-    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    glDisable(GL_DITHER); glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_BLEND);
-    glDisable(GL_ALPHA_TEST); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDisable(GL_TEXTURE_3D);
-    glDisable(GL_FOG); glDisable(GL_SCISSOR_TEST); glDisable(GL_COLOR_LOGIC_OP); glDisable(GL_LIGHTING);
-    glDisable(GL_LINE_STIPPLE); glDisable(GL_POLYGON_STIPPLE); glDisable(GL_CLIP_PLANE0); glDisable(GL_CLIP_PLANE1);
-    glShadeModel(GL_SMOOTH); glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); glLineWidth(1); glPointSize(1);
-    glColorMask(1, 1, 1, 1); glDepthMask(1); glDepthFunc(GL_LESS);
-    glClearColor(26 / 255.0f, 51 / 255.0f, 77 / 255.0f, 1); glClearDepth(1); glClearStencil(0);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, W, 0, H, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glDisable(GL_DITHER);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_TEXTURE_3D);
+    glDisable(GL_FOG);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_LINE_STIPPLE);
+    glDisable(GL_POLYGON_STIPPLE);
+    glDisable(GL_CLIP_PLANE0);
+    glDisable(GL_CLIP_PLANE1);
+    glShadeModel(GL_SMOOTH);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glLineWidth(1);
+    glPointSize(1);
+    glColorMask(1, 1, 1, 1);
+    glDepthMask(1);
+    glDepthFunc(GL_LESS);
+    glClearColor(26 / 255.0f, 51 / 255.0f, 77 / 255.0f, 1);
+    glClearDepth(1);
+    glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 }
 
-static void quad(float x0, float y0, float x1, float y1)
-{
-    glBegin(GL_QUADS); glVertex2f(x0, y0); glVertex2f(x1, y0); glVertex2f(x1, y1); glVertex2f(x0, y1); glEnd();
+static void quad(float x0, float y0, float x1, float y1) {
+    glBegin(GL_QUADS);
+    glVertex2f(x0, y0);
+    glVertex2f(x1, y0);
+    glVertex2f(x1, y1);
+    glVertex2f(x0, y1);
+    glEnd();
 }
 
-static void textured_quad(float x0, float y0, float x1, float y1, float s0, float t0, float s1, float t1)
-{
+static void textured_quad(float x0, float y0, float x1, float y1, float s0, float t0, float s1, float t1) {
     glBegin(GL_QUADS);
-    glTexCoord2f(s0, t0); glVertex2f(x0, y0); glTexCoord2f(s1, t0); glVertex2f(x1, y0);
-    glTexCoord2f(s1, t1); glVertex2f(x1, y1); glTexCoord2f(s0, t1); glVertex2f(x0, y1);
+    glTexCoord2f(s0, t0);
+    glVertex2f(x0, y0);
+    glTexCoord2f(s1, t0);
+    glVertex2f(x1, y0);
+    glTexCoord2f(s1, t1);
+    glVertex2f(x1, y1);
+    glTexCoord2f(s0, t1);
+    glVertex2f(x0, y1);
     glEnd();
 }
 
 /* ---- Scenes ---- */
 
-static void s_clear(void) { reset(); }
-static void s_clear_alpha(void) { reset(); glClearColor(0.6f, 0.3f, 0.9f, 0.5f); glClear(GL_COLOR_BUFFER_BIT); }
+static void s_clear(void) {
+    reset();
+}
+static void s_clear_alpha(void) {
+    reset();
+    glClearColor(0.6f, 0.3f, 0.9f, 0.5f);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
 
-static void s_smooth(void)
-{
+static void s_smooth(void) {
     reset();
     glBegin(GL_TRIANGLES);
-    glColor3ub(250, 20, 40); glVertex2f(8, 8); glColor3ub(30, 240, 60); glVertex2f(120, 20); glColor3ub(40, 60, 230); glVertex2f(60, 120);
+    glColor3ub(250, 20, 40);
+    glVertex2f(8, 8);
+    glColor3ub(30, 240, 60);
+    glVertex2f(120, 20);
+    glColor3ub(40, 60, 230);
+    glVertex2f(60, 120);
     glEnd();
 }
 
-static void s_depth(void)
-{
-    reset(); glEnable(GL_DEPTH_TEST);
-    glBegin(GL_QUADS);
-    glColor3ub(200, 60, 60); glVertex3f(10, 10, -0.5f); glVertex3f(100, 10, -0.5f); glVertex3f(100, 100, 0.5f); glVertex3f(10, 100, 0.5f);
-    glColor3ub(60, 200, 60); glVertex3f(30, 30, 0.2f); glVertex3f(118, 30, 0.2f); glVertex3f(118, 118, 0.2f); glVertex3f(30, 118, 0.2f);
-    glEnd();
-}
-
-static void receding_floor(GLenum mode, float a, float b)
-{
+static void s_depth(void) {
     reset();
-    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glFrustum(-1, 1, -1, 1, 1, 60);
-    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    if (mode) {   GLfloat red[4] = { 0.9f, 0.1f, 0.1f, 1 };
-        glEnable(GL_FOG); glFogi(GL_FOG_MODE, mode); glFogfv(GL_FOG_COLOR, red); glHint(GL_FOG_HINT, GL_NICEST);
-        if (mode == GL_LINEAR) { glFogf(GL_FOG_START, a); glFogf(GL_FOG_END, b); } else glFogf(GL_FOG_DENSITY, a); }
-    {   /* a 24 x 24 grid: OpenGL lets fog be computed per vertex, and Tiger's driver does */
-        int i, j; const int n = 24;
+    glEnable(GL_DEPTH_TEST);
+    glBegin(GL_QUADS);
+    glColor3ub(200, 60, 60);
+    glVertex3f(10, 10, -0.5f);
+    glVertex3f(100, 10, -0.5f);
+    glVertex3f(100, 100, 0.5f);
+    glVertex3f(10, 100, 0.5f);
+    glColor3ub(60, 200, 60);
+    glVertex3f(30, 30, 0.2f);
+    glVertex3f(118, 30, 0.2f);
+    glVertex3f(118, 118, 0.2f);
+    glVertex3f(30, 118, 0.2f);
+    glEnd();
+}
+
+static void receding_floor(GLenum mode, float a, float b) {
+    reset();
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glFrustum(-1, 1, -1, 1, 1, 60);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    if (mode) {
+        GLfloat red[4] = {0.9f, 0.1f, 0.1f, 1};
+        glEnable(GL_FOG);
+        glFogi(GL_FOG_MODE, mode);
+        glFogfv(GL_FOG_COLOR, red);
+        glHint(GL_FOG_HINT, GL_NICEST);
+        if (mode == GL_LINEAR) {
+            glFogf(GL_FOG_START, a);
+            glFogf(GL_FOG_END, b);
+        } else
+            glFogf(GL_FOG_DENSITY, a);
+    }
+    { /* a 24 x 24 grid: OpenGL lets fog be computed per vertex, and Tiger's driver does */
+        int i, j;
+        const int n = 24;
         for (j = 0; j < n; j++) {
             glBegin(GL_QUAD_STRIP);
             for (i = 0; i <= n; i++) {
@@ -118,373 +180,603 @@ static void receding_floor(GLenum mode, float a, float b)
         }
     }
 }
-static void s_grid(void) { receding_floor(0, 0, 0); }
-static void s_quad_strip(void)
-{
-    reset(); glBegin(GL_QUAD_STRIP);
-    glColor3ub(240, 60, 60); glVertex2f(10, 20); glVertex2f(10, 100); glColor3ub(60, 240, 60); glVertex2f(60, 30); glVertex2f(60, 110);
-    glColor3ub(60, 60, 240); glVertex2f(118, 10); glVertex2f(118, 90);
+static void s_grid(void) {
+    receding_floor(0, 0, 0);
+}
+static void s_quad_strip(void) {
+    reset();
+    glBegin(GL_QUAD_STRIP);
+    glColor3ub(240, 60, 60);
+    glVertex2f(10, 20);
+    glVertex2f(10, 100);
+    glColor3ub(60, 240, 60);
+    glVertex2f(60, 30);
+    glVertex2f(60, 110);
+    glColor3ub(60, 60, 240);
+    glVertex2f(118, 10);
+    glVertex2f(118, 90);
     glEnd();
 }
-static void s_fog_linear(void) { receding_floor(GL_LINEAR, 2, 40); }
-static void s_fog_exp(void) { receding_floor(GL_EXP, 0.06f, 0); }
-static void s_fog_exp2(void) { receding_floor(GL_EXP2, 0.05f, 0); }
-
-static void s_clip_one(void)
-{
-    GLdouble plane[4] = { 1, 1, 0, -128 };    /* keeps x + y >= 128 */
-    reset(); glClipPlane(GL_CLIP_PLANE0, plane); glEnable(GL_CLIP_PLANE0);
-    glColor3ub(230, 200, 30); quad(4, 4, 124, 124);
+static void s_fog_linear(void) {
+    receding_floor(GL_LINEAR, 2, 40);
+}
+static void s_fog_exp(void) {
+    receding_floor(GL_EXP, 0.06f, 0);
+}
+static void s_fog_exp2(void) {
+    receding_floor(GL_EXP2, 0.05f, 0);
 }
 
-static void s_clip_two(void)
-{
-    GLdouble p0[4] = { 1, 0, 0, -40 }, p1[4] = { 0, -1, 0, 90 };   /* x >= 40 and y <= 90 */
-    reset(); glClipPlane(GL_CLIP_PLANE0, p0); glClipPlane(GL_CLIP_PLANE1, p1);
-    glEnable(GL_CLIP_PLANE0); glEnable(GL_CLIP_PLANE1);
-    glBegin(GL_TRIANGLES); glColor3ub(250, 80, 80); glVertex2f(4, 4); glColor3ub(80, 250, 80); glVertex2f(124, 30); glColor3ub(80, 80, 250); glVertex2f(50, 124); glEnd();
+static void s_clip_one(void) {
+    GLdouble plane[4] = {1, 1, 0, -128}; /* keeps x + y >= 128 */
+    reset();
+    glClipPlane(GL_CLIP_PLANE0, plane);
+    glEnable(GL_CLIP_PLANE0);
+    glColor3ub(230, 200, 30);
+    quad(4, 4, 124, 124);
 }
 
-static void star(void)
-{
+static void s_clip_two(void) {
+    GLdouble p0[4] = {1, 0, 0, -40}, p1[4] = {0, -1, 0, 90}; /* x >= 40 and y <= 90 */
+    reset();
+    glClipPlane(GL_CLIP_PLANE0, p0);
+    glClipPlane(GL_CLIP_PLANE1, p1);
+    glEnable(GL_CLIP_PLANE0);
+    glEnable(GL_CLIP_PLANE1);
+    glBegin(GL_TRIANGLES);
+    glColor3ub(250, 80, 80);
+    glVertex2f(4, 4);
+    glColor3ub(80, 250, 80);
+    glVertex2f(124, 30);
+    glColor3ub(80, 80, 250);
+    glVertex2f(50, 124);
+    glEnd();
+}
+
+static void star(void) {
     int i;
     glBegin(GL_LINES);
     for (i = 0; i < 12; i++) {
         float a = (float)i * 0.2618f;
         glColor3ub((GLubyte)(40 + 17 * i), (GLubyte)(250 - 15 * i), 120);
-        glVertex2f(64 + 10 * cosf(a), 64 + 10 * sinf(a)); glVertex2f(64 + 56 * cosf(a), 64 + 56 * sinf(a));
+        glVertex2f(64 + 10 * cosf(a), 64 + 10 * sinf(a));
+        glVertex2f(64 + 56 * cosf(a), 64 + 56 * sinf(a));
     }
     glEnd();
 }
-static void s_line_1(void) { reset(); star(); }
-static void s_line_3(void) { reset(); glLineWidth(3); star(); }
-static void s_line_7(void) { reset(); glLineWidth(7); star(); }
-static void s_line_strip(void)
-{
+static void s_line_1(void) {
+    reset();
+    star();
+}
+static void s_line_3(void) {
+    reset();
+    glLineWidth(3);
+    star();
+}
+static void s_line_7(void) {
+    reset();
+    glLineWidth(7);
+    star();
+}
+static void s_line_strip(void) {
     int i;
-    reset(); glLineWidth(4); glColor3ub(240, 230, 60);
-    glBegin(GL_LINE_STRIP); for (i = 0; i < 9; i++) glVertex2f(8 + 14 * i, i & 1 ? 110 : 20); glEnd();
-}
-static void s_line_stipple(void)
-{
-    reset(); glEnable(GL_LINE_STIPPLE); glLineStipple(2, 0x0F35); star();
-}
-static void s_line_stipple_wide(void)
-{
-    reset(); glEnable(GL_LINE_STIPPLE); glLineStipple(1, 0x00FF); glLineWidth(3); star();
-}
-
-static void dots(void)
-{
-    int i;
-    glBegin(GL_POINTS);
-    for (i = 0; i < 25; i++) { glColor3ub((GLubyte)(30 + 9 * i), 200, (GLubyte)(240 - 8 * i)); glVertex2f(12.5f + 25 * (i % 5), 12.5f + 25 * (i / 5)); }
+    reset();
+    glLineWidth(4);
+    glColor3ub(240, 230, 60);
+    glBegin(GL_LINE_STRIP);
+    for (i = 0; i < 9; i++)
+        glVertex2f(8 + 14 * i, i & 1 ? 110 : 20);
     glEnd();
 }
-static void s_point_1(void) { reset(); dots(); }
-static void s_point_6(void) { reset(); glPointSize(6); dots(); }
-static void s_point_indexed(void)
-{
-    static const GLfloat v[] = { 20, 20, 60, 30, 100, 20, 30, 70, 70, 80, 110, 100, 40, 110 };
-    static const GLubyte c[] = { 250,60,60, 60,250,60, 60,60,250, 250,250,60, 60,250,250, 250,60,250, 250,250,250 };
-    static const GLushort i[] = { 6, 0, 3, 5, 1, 4, 2 };
-    reset(); glPointSize(6);
-    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
-    glVertexPointer(2, GL_FLOAT, 0, v); glColorPointer(3, GL_UNSIGNED_BYTE, 0, c);
-    glDrawElements(GL_POINTS, 7, GL_UNSIGNED_SHORT, i);
-    glDisableClientState(GL_VERTEX_ARRAY); glDisableClientState(GL_COLOR_ARRAY);
+static void s_line_stipple(void) {
+    reset();
+    glEnable(GL_LINE_STIPPLE);
+    glLineStipple(2, 0x0F35);
+    star();
 }
-static void s_point_vertex_size(void)
-{
+static void s_line_stipple_wide(void) {
+    reset();
+    glEnable(GL_LINE_STIPPLE);
+    glLineStipple(1, 0x00FF);
+    glLineWidth(3);
+    star();
+}
+
+static void dots(void) {
+    int i;
+    glBegin(GL_POINTS);
+    for (i = 0; i < 25; i++) {
+        glColor3ub((GLubyte)(30 + 9 * i), 200, (GLubyte)(240 - 8 * i));
+        glVertex2f(12.5f + 25 * (i % 5), 12.5f + 25 * (i / 5));
+    }
+    glEnd();
+}
+static void s_point_1(void) {
+    reset();
+    dots();
+}
+static void s_point_6(void) {
+    reset();
+    glPointSize(6);
+    dots();
+}
+static void s_point_indexed(void) {
+    static const GLfloat v[] = {20, 20, 60, 30, 100, 20, 30, 70, 70, 80, 110, 100, 40, 110};
+    static const GLubyte c[] = {250, 60, 60,  60,  250, 60, 60,  60,  250, 250, 250,
+                                60,  60, 250, 250, 250, 60, 250, 250, 250, 250};
+    static const GLushort i[] = {6, 0, 3, 5, 1, 4, 2};
+    reset();
+    glPointSize(6);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, v);
+    glColorPointer(3, GL_UNSIGNED_BYTE, 0, c);
+    glDrawElements(GL_POINTS, 7, GL_UNSIGNED_SHORT, i);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+}
+static void s_point_vertex_size(void) {
     /* Per-vertex size from an ARB vertex program: 2 + the vertex's x / 10. */
-    static const char vp[] =
-        "!!ARBvp1.0\n"
-        "PARAM mvp[4] = { state.matrix.mvp };\n"
-        "DP4 result.position.x, mvp[0], vertex.position;\n"
-        "DP4 result.position.y, mvp[1], vertex.position;\n"
-        "DP4 result.position.z, mvp[2], vertex.position;\n"
-        "DP4 result.position.w, mvp[3], vertex.position;\n"
-        "MOV result.color, vertex.color;\n"
-        "MAD result.pointsize.x, vertex.position.x, 0.1, 2;\n"
-        "END\n";
+    static const char vp[] = "!!ARBvp1.0\n"
+                             "PARAM mvp[4] = { state.matrix.mvp };\n"
+                             "DP4 result.position.x, mvp[0], vertex.position;\n"
+                             "DP4 result.position.y, mvp[1], vertex.position;\n"
+                             "DP4 result.position.z, mvp[2], vertex.position;\n"
+                             "DP4 result.position.w, mvp[3], vertex.position;\n"
+                             "MOV result.color, vertex.color;\n"
+                             "MAD result.pointsize.x, vertex.position.x, 0.1, 2;\n"
+                             "END\n";
     GLuint id;
     reset();
-    glGenProgramsARB(1, &id); glBindProgramARB(GL_VERTEX_PROGRAM_ARB, id);
+    glGenProgramsARB(1, &id);
+    glBindProgramARB(GL_VERTEX_PROGRAM_ARB, id);
     glProgramStringARB(GL_VERTEX_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, (GLsizei)strlen(vp), vp);
-    glEnable(GL_VERTEX_PROGRAM_ARB); glEnable(GL_VERTEX_PROGRAM_POINT_SIZE_ARB);
+    glEnable(GL_VERTEX_PROGRAM_ARB);
+    glEnable(GL_VERTEX_PROGRAM_POINT_SIZE_ARB);
     dots();
-    glDisable(GL_VERTEX_PROGRAM_POINT_SIZE_ARB); glDisable(GL_VERTEX_PROGRAM_ARB); glDeleteProgramsARB(1, &id);
+    glDisable(GL_VERTEX_PROGRAM_POINT_SIZE_ARB);
+    glDisable(GL_VERTEX_PROGRAM_ARB);
+    glDeleteProgramsARB(1, &id);
 }
-static void s_program_unbound_texture(void)
-{
+static void s_program_unbound_texture(void) {
     /* An ARB fragment program samples unit 1, which has no texture: (0, 0, 0, 1) by ARB_fragment_program. Against that
      * expected image: Apple's software renderer gives white or black depending on what ran before. */
     static const char fp[] = "!!ARBfp1.0\nTEX result.color, fragment.texcoord[0], texture[1], 2D;\nEND\n";
     GLuint id;
     reset();
-    glGenProgramsARB(1, &id); glBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, id);
+    glGenProgramsARB(1, &id);
+    glBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, id);
     glProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, (GLsizei)strlen(fp), fp);
     glEnable(GL_FRAGMENT_PROGRAM_ARB);
     textured_quad(32, 32, 96, 96, 0, 0, 1, 1);
-    glDisable(GL_FRAGMENT_PROGRAM_ARB); glDeleteProgramsARB(1, &id);
+    glDisable(GL_FRAGMENT_PROGRAM_ARB);
+    glDeleteProgramsARB(1, &id);
 }
 
-static GLuint checker_texture(int size)
-{
+static GLuint checker_texture(int size) {
     static unsigned char t[64 * 64 * 4];
-    GLuint id; int x, y;
-    for (y = 0; y < size; y++) for (x = 0; x < size; x++) {
-        unsigned char *p = t + (y * size + x) * 4; int on = ((x / 4) ^ (y / 4)) & 1;
-        p[0] = on ? 240 : 30; p[1] = (unsigned char)(x * 255 / size); p[2] = (unsigned char)(y * 255 / size); p[3] = 255;
-    }
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    GLuint id;
+    int x, y;
+    for (y = 0; y < size; y++)
+        for (x = 0; x < size; x++) {
+            unsigned char *p = t + (y * size + x) * 4;
+            int on = ((x / 4) ^ (y / 4)) & 1;
+            p[0] = on ? 240 : 30;
+            p[1] = (unsigned char)(x * 255 / size);
+            p[2] = (unsigned char)(y * 255 / size);
+            p[3] = 255;
+        }
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
     return id;
 }
-static void s_point_sprite(void)
-{
+static void s_point_sprite(void) {
     GLuint id;
-    reset(); id = checker_texture(16);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-    glEnable(GL_POINT_SPRITE_ARB); glTexEnvi(GL_POINT_SPRITE_ARB, GL_COORD_REPLACE_ARB, GL_TRUE); glPointSize(16);
+    reset();
+    id = checker_texture(16);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_POINT_SPRITE_ARB);
+    glTexEnvi(GL_POINT_SPRITE_ARB, GL_COORD_REPLACE_ARB, GL_TRUE);
+    glPointSize(16);
     dots();
-    glDisable(GL_POINT_SPRITE_ARB); glDeleteTextures(1, &id);
+    glDisable(GL_POINT_SPRITE_ARB);
+    glDeleteTextures(1, &id);
 }
 
-static void s_flat(void)
-{
+static void s_flat(void) {
     int i;
-    reset(); glShadeModel(GL_FLAT);
-    glBegin(GL_TRIANGLES);       /* provoking vertex: the last of each triangle */
-    glColor3ub(250, 0, 0); glVertex2f(4, 4); glColor3ub(0, 250, 0); glVertex2f(60, 4); glColor3ub(0, 0, 250); glVertex2f(30, 40);
+    reset();
+    glShadeModel(GL_FLAT);
+    glBegin(GL_TRIANGLES); /* provoking vertex: the last of each triangle */
+    glColor3ub(250, 0, 0);
+    glVertex2f(4, 4);
+    glColor3ub(0, 250, 0);
+    glVertex2f(60, 4);
+    glColor3ub(0, 0, 250);
+    glVertex2f(30, 40);
     glEnd();
-    glBegin(GL_TRIANGLE_STRIP);  /* vertex i+2 */
-    for (i = 0; i < 6; i++) { glColor3ub((GLubyte)(40 * i), (GLubyte)(250 - 40 * i), 128); glVertex2f(68 + 11 * i, i & 1 ? 40 : 4); }
+    glBegin(GL_TRIANGLE_STRIP); /* vertex i+2 */
+    for (i = 0; i < 6; i++) {
+        glColor3ub((GLubyte)(40 * i), (GLubyte)(250 - 40 * i), 128);
+        glVertex2f(68 + 11 * i, i & 1 ? 40 : 4);
+    }
     glEnd();
-    glBegin(GL_TRIANGLE_FAN);    /* vertex i+2 */
-    glColor3ub(255, 255, 255); glVertex2f(30, 84);
-    for (i = 0; i < 5; i++) { glColor3ub((GLubyte)(50 * i), 120, (GLubyte)(250 - 50 * i)); glVertex2f(30 + 26 * cosf(i * 0.6f), 84 + 26 * sinf(i * 0.6f)); }
+    glBegin(GL_TRIANGLE_FAN); /* vertex i+2 */
+    glColor3ub(255, 255, 255);
+    glVertex2f(30, 84);
+    for (i = 0; i < 5; i++) {
+        glColor3ub((GLubyte)(50 * i), 120, (GLubyte)(250 - 50 * i));
+        glVertex2f(30 + 26 * cosf(i * 0.6f), 84 + 26 * sinf(i * 0.6f));
+    }
     glEnd();
-    glBegin(GL_QUADS);           /* the last vertex of each quad */
-    glColor3ub(250, 250, 0); glVertex2f(70, 60); glColor3ub(0, 250, 250); glVertex2f(100, 60); glColor3ub(250, 0, 250); glVertex2f(100, 90); glColor3ub(90, 160, 30); glVertex2f(70, 90);
+    glBegin(GL_QUADS); /* the last vertex of each quad */
+    glColor3ub(250, 250, 0);
+    glVertex2f(70, 60);
+    glColor3ub(0, 250, 250);
+    glVertex2f(100, 60);
+    glColor3ub(250, 0, 250);
+    glVertex2f(100, 90);
+    glColor3ub(90, 160, 30);
+    glVertex2f(70, 90);
     glEnd();
-    glBegin(GL_POLYGON);         /* the first vertex */
-    glColor3ub(200, 100, 30); glVertex2f(104, 96); glColor3ub(30, 100, 200); glVertex2f(124, 100); glColor3ub(100, 200, 30); glVertex2f(120, 124); glColor3ub(0, 0, 0); glVertex2f(100, 120);
+    glBegin(GL_POLYGON); /* the first vertex */
+    glColor3ub(200, 100, 30);
+    glVertex2f(104, 96);
+    glColor3ub(30, 100, 200);
+    glVertex2f(124, 100);
+    glColor3ub(100, 200, 30);
+    glVertex2f(120, 124);
+    glColor3ub(0, 0, 0);
+    glVertex2f(100, 120);
     glEnd();
 }
 
-static void fan_of_triangles(void)
-{
+static void fan_of_triangles(void) {
     glBegin(GL_TRIANGLES);
-    glColor3ub(250, 60, 60); glVertex2f(10, 10); glVertex2f(60, 14); glVertex2f(30, 60);        /* counter-clockwise */
-    glColor3ub(60, 250, 60); glVertex2f(70, 10); glVertex2f(90, 60); glVertex2f(120, 14);       /* clockwise */
-    glColor3ub(60, 60, 250); glVertex2f(20, 70); glVertex2f(110, 72); glVertex2f(64, 120);
+    glColor3ub(250, 60, 60);
+    glVertex2f(10, 10);
+    glVertex2f(60, 14);
+    glVertex2f(30, 60); /* counter-clockwise */
+    glColor3ub(60, 250, 60);
+    glVertex2f(70, 10);
+    glVertex2f(90, 60);
+    glVertex2f(120, 14); /* clockwise */
+    glColor3ub(60, 60, 250);
+    glVertex2f(20, 70);
+    glVertex2f(110, 72);
+    glVertex2f(64, 120);
     glEnd();
 }
-static void s_polygon_line(void) { reset(); glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); fan_of_triangles(); }
-static void s_polygon_point(void) { reset(); glPointSize(3); glPolygonMode(GL_FRONT_AND_BACK, GL_POINT); fan_of_triangles(); }
-static void s_polygon_front_line(void)
-{
-    reset(); glPolygonMode(GL_FRONT, GL_LINE); glPolygonMode(GL_BACK, GL_FILL); fan_of_triangles();
+static void s_polygon_line(void) {
+    reset();
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    fan_of_triangles();
 }
-static void s_polygon_line_quads(void)
-{
+static void s_polygon_point(void) {
+    reset();
+    glPointSize(3);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_POINT);
+    fan_of_triangles();
+}
+static void s_polygon_front_line(void) {
+    reset();
+    glPolygonMode(GL_FRONT, GL_LINE);
+    glPolygonMode(GL_BACK, GL_FILL);
+    fan_of_triangles();
+}
+static void s_polygon_line_quads(void) {
     /* Quads, a quad strip and a triangle strip in line mode: the quads' outlines (no diagonals), the strip's every edge. */
     int i;
-    reset(); glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    glColor3ub(250, 200, 50); glBegin(GL_QUADS); glVertex2f(8, 8); glVertex2f(56, 12); glVertex2f(52, 56); glVertex2f(10, 50); glEnd();
-    glColor3ub(60, 200, 250); glBegin(GL_QUAD_STRIP);
-    for (i = 0; i < 4; i++) { glVertex2f(68 + 18 * i, 10); glVertex2f(70 + 18 * i, 56); }
+    reset();
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glColor3ub(250, 200, 50);
+    glBegin(GL_QUADS);
+    glVertex2f(8, 8);
+    glVertex2f(56, 12);
+    glVertex2f(52, 56);
+    glVertex2f(10, 50);
     glEnd();
-    glColor3ub(200, 90, 220); glBegin(GL_TRIANGLE_STRIP);
-    for (i = 0; i < 6; i++) glVertex2f(10 + 22 * i, i & 1 ? 120 : 76);
+    glColor3ub(60, 200, 250);
+    glBegin(GL_QUAD_STRIP);
+    for (i = 0; i < 4; i++) {
+        glVertex2f(68 + 18 * i, 10);
+        glVertex2f(70 + 18 * i, 56);
+    }
+    glEnd();
+    glColor3ub(200, 90, 220);
+    glBegin(GL_TRIANGLE_STRIP);
+    for (i = 0; i < 6; i++)
+        glVertex2f(10 + 22 * i, i & 1 ? 120 : 76);
     glEnd();
 }
-static void s_polygon_line_cull(void)
-{
+static void s_polygon_line_cull(void) {
     /* Line mode with back faces culled: the counter-clockwise (front) triangles' edges only. */
-    reset(); glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); fan_of_triangles();
+    reset();
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    fan_of_triangles();
 }
-static void s_polygon_edge_flags(void)
-{
+static void s_polygon_edge_flags(void) {
     /* A quad as two triangles in line mode, the shared diagonal flagged off (a vertex's flag is for the edge it starts):
      * only the outline is drawn; then a pentagon with two of its edges off. */
-    reset(); glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); glColor3ub(250, 200, 50);
+    reset();
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glColor3ub(250, 200, 50);
     glBegin(GL_TRIANGLES);
-    glEdgeFlag(GL_TRUE); glVertex2f(10, 10); glVertex2f(60, 10); glEdgeFlag(GL_FALSE); glVertex2f(60, 60);
-    glEdgeFlag(GL_TRUE); glVertex2f(60, 60); glVertex2f(10, 60); glEdgeFlag(GL_FALSE); glVertex2f(10, 10);
+    glEdgeFlag(GL_TRUE);
+    glVertex2f(10, 10);
+    glVertex2f(60, 10);
+    glEdgeFlag(GL_FALSE);
+    glVertex2f(60, 60);
+    glEdgeFlag(GL_TRUE);
+    glVertex2f(60, 60);
+    glVertex2f(10, 60);
+    glEdgeFlag(GL_FALSE);
+    glVertex2f(10, 10);
     glEnd();
     glColor3ub(60, 200, 250);
     glBegin(GL_POLYGON);
-    glEdgeFlag(GL_TRUE); glVertex2f(90, 70); glEdgeFlag(GL_FALSE); glVertex2f(120, 90); glEdgeFlag(GL_TRUE); glVertex2f(110, 122);
-    glVertex2f(70, 122); glEdgeFlag(GL_FALSE); glVertex2f(60, 90);
+    glEdgeFlag(GL_TRUE);
+    glVertex2f(90, 70);
+    glEdgeFlag(GL_FALSE);
+    glVertex2f(120, 90);
+    glEdgeFlag(GL_TRUE);
+    glVertex2f(110, 122);
+    glVertex2f(70, 122);
+    glEdgeFlag(GL_FALSE);
+    glVertex2f(60, 90);
     glEnd();
     glEdgeFlag(GL_TRUE);
 }
 
-static void s_polygon_stipple(void)
-{
-    GLubyte pattern[128]; int i;
-    for (i = 0; i < 128; i++) pattern[i] = (GLubyte)((i / 4) & 1 ? 0xF0 : 0x3C) ^ (GLubyte)i;
-    reset(); glPolygonStipple(pattern); glEnable(GL_POLYGON_STIPPLE);
-    glColor3ub(250, 200, 50); quad(3, 5, 125, 122);
+static void s_polygon_stipple(void) {
+    GLubyte pattern[128];
+    int i;
+    for (i = 0; i < 128; i++)
+        pattern[i] = (GLubyte)((i / 4) & 1 ? 0xF0 : 0x3C) ^ (GLubyte)i;
+    reset();
+    glPolygonStipple(pattern);
+    glEnable(GL_POLYGON_STIPPLE);
+    glColor3ub(250, 200, 50);
+    quad(3, 5, 125, 122);
 }
 
-static void logic(GLenum op)
-{
+static void logic(GLenum op) {
     reset();
-    glColor3ub(0xC3, 0x5A, 0x0F); quad(10, 10, 90, 90);
-    glEnable(GL_COLOR_LOGIC_OP); glLogicOp(op);
-    glColor3ub(0x96, 0x3C, 0xF0); quad(40, 40, 118, 118);
+    glColor3ub(0xC3, 0x5A, 0x0F);
+    quad(10, 10, 90, 90);
+    glEnable(GL_COLOR_LOGIC_OP);
+    glLogicOp(op);
+    glColor3ub(0x96, 0x3C, 0xF0);
+    quad(40, 40, 118, 118);
 }
-static void s_logic_xor(void) { logic(GL_XOR); }
-static void s_logic_and(void) { logic(GL_AND); }
-static void s_logic_or(void) { logic(GL_OR); }
-static void s_logic_invert(void) { logic(GL_INVERT); }
-static void s_logic_copy_inverted(void) { logic(GL_COPY_INVERTED); }
-static void s_logic_equiv(void) { logic(GL_EQUIV); }
+static void s_logic_xor(void) {
+    logic(GL_XOR);
+}
+static void s_logic_and(void) {
+    logic(GL_AND);
+}
+static void s_logic_or(void) {
+    logic(GL_OR);
+}
+static void s_logic_invert(void) {
+    logic(GL_INVERT);
+}
+static void s_logic_copy_inverted(void) {
+    logic(GL_COPY_INVERTED);
+}
+static void s_logic_equiv(void) {
+    logic(GL_EQUIV);
+}
 
 /* Each mip level one colour, so the chosen level is visible. */
-static const unsigned char level_colour[7][4] = { {250,40,40,255}, {40,250,40,255}, {40,40,250,255}, {250,250,40,255},
-                                                  {40,250,250,255}, {250,40,250,255}, {250,250,250,255} };
-static GLuint level_texture(void)
-{
+static const unsigned char level_colour[7][4] = {{250, 40, 40, 255},  {40, 250, 40, 255},  {40, 40, 250, 255},
+                                                 {250, 250, 40, 255}, {40, 250, 250, 255}, {250, 40, 250, 255},
+                                                 {250, 250, 250, 255}};
+static GLuint level_texture(void) {
     static unsigned char t[64 * 64 * 4];
-    GLuint id; int level, size, i;
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
+    GLuint id;
+    int level, size, i;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
     for (level = 0, size = 64; size; level++, size /= 2) {
-        for (i = 0; i < size * size; i++) memcpy(t + i * 4, level_colour[level], 4);
+        for (i = 0; i < size * size; i++)
+            memcpy(t + i * 4, level_colour[level], 4);
         glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     return id;
 }
-static void lod(float bias)
-{
+static void lod(float bias) {
     GLuint id;
-    reset(); id = level_texture(); glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    reset();
+    id = level_texture();
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     glTexEnvf(GL_TEXTURE_FILTER_CONTROL_EXT, GL_TEXTURE_LOD_BIAS_EXT, bias);
-    textured_quad(0, 0, 64, 64, 0, 0, 4, 4);         /* 4 texels per pixel: level 2 */
-    textured_quad(64, 0, 128, 64, 0, 0, 1, 1);       /* level 0 */
-    textured_quad(0, 64, 64, 128, 0, 0, 8, 8);       /* level 3 */
-    textured_quad(64, 64, 128, 128, 0, 0, 2, 2);     /* level 1 */
+    textured_quad(0, 0, 64, 64, 0, 0, 4, 4); /* 4 texels per pixel: level 2 */
+    textured_quad(64, 0, 128, 64, 0, 0, 1, 1); /* level 0 */
+    textured_quad(0, 64, 64, 128, 0, 0, 8, 8); /* level 3 */
+    textured_quad(64, 64, 128, 128, 0, 0, 2, 2); /* level 1 */
     glTexEnvf(GL_TEXTURE_FILTER_CONTROL_EXT, GL_TEXTURE_LOD_BIAS_EXT, 0);
     glDeleteTextures(1, &id);
 }
-static void s_lod_bias_0(void) { lod(0); }
-static void s_lod_bias_plus(void) { lod(1.0f); }
-static void s_lod_bias_minus(void) { lod(-1.0f); }
+static void s_lod_bias_0(void) {
+    lod(0);
+}
+static void s_lod_bias_plus(void) {
+    lod(1.0f);
+}
+static void s_lod_bias_minus(void) {
+    lod(-1.0f);
+}
 
-static void s_border(void)
-{
-    GLfloat border[4] = { 0.2f, 0.8f, 0.4f, 0.6f };
+static void s_border(void) {
+    GLfloat border[4] = {0.2f, 0.8f, 0.4f, 0.6f};
     GLuint id;
-    reset(); id = checker_texture(16);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    reset();
+    id = checker_texture(16);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
     glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     textured_quad(4, 4, 124, 124, -0.5f, -0.5f, 1.5f, 1.5f);
     glDeleteTextures(1, &id);
 }
 
-static void s_texture_3d(void)
-{
+static void s_texture_3d(void) {
     static unsigned char t[8 * 8 * 4 * 4];
-    GLuint id; int i;
-    for (i = 0; i < 8 * 8 * 4; i++) { int z = i / 64; t[i * 4] = (unsigned char)(60 * z + 40); t[i * 4 + 1] = (unsigned char)(i * 7); t[i * 4 + 2] = (unsigned char)(250 - 60 * z); t[i * 4 + 3] = 255; }
+    GLuint id;
+    int i;
+    for (i = 0; i < 8 * 8 * 4; i++) {
+        int z = i / 64;
+        t[i * 4] = (unsigned char)(60 * z + 40);
+        t[i * 4 + 1] = (unsigned char)(i * 7);
+        t[i * 4 + 2] = (unsigned char)(250 - 60 * z);
+        t[i * 4 + 3] = 255;
+    }
     reset();
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_3D, id);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_3D, id);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 8, 8, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
-    glEnable(GL_TEXTURE_3D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_TEXTURE_3D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     for (i = 0; i < 4; i++) {
         float x0 = (float)(i % 2) * 64, y0 = (float)(i / 2) * 64, r = (i + 0.5f) / 4;
         glBegin(GL_QUADS);
-        glTexCoord3f(0, 0, r); glVertex2f(x0, y0); glTexCoord3f(1, 0, r); glVertex2f(x0 + 64, y0);
-        glTexCoord3f(1, 1, r); glVertex2f(x0 + 64, y0 + 64); glTexCoord3f(0, 1, r); glVertex2f(x0, y0 + 64);
+        glTexCoord3f(0, 0, r);
+        glVertex2f(x0, y0);
+        glTexCoord3f(1, 0, r);
+        glVertex2f(x0 + 64, y0);
+        glTexCoord3f(1, 1, r);
+        glVertex2f(x0 + 64, y0 + 64);
+        glTexCoord3f(0, 1, r);
+        glVertex2f(x0, y0 + 64);
         glEnd();
     }
-    glDisable(GL_TEXTURE_3D); glDeleteTextures(1, &id);
+    glDisable(GL_TEXTURE_3D);
+    glDeleteTextures(1, &id);
 }
 
-static void float_texture(GLenum format)
-{
+static void float_texture(GLenum format) {
     static float t[16 * 16 * 4];
-    GLuint id; int i;
-    for (i = 0; i < 16 * 16; i++) { t[i * 4] = (float)(i % 16) / 15.0f; t[i * 4 + 1] = (float)(i / 16) / 15.0f * 2.0f; t[i * 4 + 2] = 0.25f; t[i * 4 + 3] = 1; }
+    GLuint id;
+    int i;
+    for (i = 0; i < 16 * 16; i++) {
+        t[i * 4] = (float)(i % 16) / 15.0f;
+        t[i * 4 + 1] = (float)(i / 16) / 15.0f * 2.0f;
+        t[i * 4 + 2] = 0.25f;
+        t[i * 4 + 3] = 1;
+    }
     reset();
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, format, 16, 16, 0, GL_RGBA, GL_FLOAT, t);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     textured_quad(0, 0, 128, 128, 0, 0, 1, 1);
     glDeleteTextures(1, &id);
 }
-static void s_texture_float32(void) { float_texture(GL_RGBA_FLOAT32_ATI); }
-static void s_texture_float16(void) { float_texture(GL_RGBA_FLOAT16_ATI); }
+static void s_texture_float32(void) {
+    float_texture(GL_RGBA_FLOAT32_ATI);
+}
+static void s_texture_float16(void) {
+    float_texture(GL_RGBA_FLOAT16_ATI);
+}
 
 /* A 64-texel texture over four 64-pixel quads at 4, 1, 8 and 2 texels per pixel: levels 2, 0, 3 and 1, as lod() draws
  * them; r in the middle of a 3D texture. */
-static void level_quads(void)
-{
-    static const float range[4] = { 4, 1, 8, 2 };
+static void level_quads(void) {
+    static const float range[4] = {4, 1, 8, 2};
     int i;
     for (i = 0; i < 4; i++) {
         float x0 = (float)(i % 2) * 64, y0 = (float)(i / 2) * 64, r = range[i];
         glBegin(GL_QUADS);
-        glTexCoord3f(0, 0, 0.5f); glVertex2f(x0, y0); glTexCoord3f(r, 0, 0.5f); glVertex2f(x0 + 64, y0);
-        glTexCoord3f(r, r, 0.5f); glVertex2f(x0 + 64, y0 + 64); glTexCoord3f(0, r, 0.5f); glVertex2f(x0, y0 + 64);
+        glTexCoord3f(0, 0, 0.5f);
+        glVertex2f(x0, y0);
+        glTexCoord3f(r, 0, 0.5f);
+        glVertex2f(x0 + 64, y0);
+        glTexCoord3f(r, r, 0.5f);
+        glVertex2f(x0 + 64, y0 + 64);
+        glTexCoord3f(0, r, 0.5f);
+        glVertex2f(x0, y0 + 64);
         glEnd();
     }
 }
-static void s_texture_3d_mip(void)
-{
+static void s_texture_3d_mip(void) {
     /* 64 x 64 x 4: the depth stops halving at level 2, so later levels lie where a fixed slice count would not put them. */
     static unsigned char t[64 * 64 * 4 * 4];
-    GLuint id; int level, size, depth, i;
+    GLuint id;
+    int level, size, depth, i;
     reset();
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_3D, id);
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_3D, id);
     for (level = 0, size = 64, depth = 4; size; level++, size /= 2, depth = depth > 1 ? depth / 2 : 1) {
-        for (i = 0; i < size * size * depth; i++) memcpy(t + i * 4, level_colour[level], 4);
+        for (i = 0; i < size * size * depth; i++)
+            memcpy(t + i * 4, level_colour[level], 4);
         glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA8, size, size, depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, t);
     }
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glEnable(GL_TEXTURE_3D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glEnable(GL_TEXTURE_3D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     level_quads();
-    glDisable(GL_TEXTURE_3D); glDeleteTextures(1, &id);
+    glDisable(GL_TEXTURE_3D);
+    glDeleteTextures(1, &id);
 }
-static void float_mip(GLenum format)
-{
+static void float_mip(GLenum format) {
     static float t[64 * 64 * 4];
-    GLuint id; int level, size, i, c;
+    GLuint id;
+    int level, size, i, c;
     reset();
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
     for (level = 0, size = 64; size; level++, size /= 2) {
-        for (i = 0; i < size * size; i++) for (c = 0; c < 4; c++) t[i * 4 + c] = level_colour[level][c] / 255.0f;
+        for (i = 0; i < size * size; i++)
+            for (c = 0; c < 4; c++)
+                t[i * 4 + c] = level_colour[level][c] / 255.0f;
         glTexImage2D(GL_TEXTURE_2D, level, format, size, size, 0, GL_RGBA, GL_FLOAT, t);
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     level_quads();
     glDeleteTextures(1, &id);
 }
-static void s_texture_float32_mip(void) { float_mip(GL_RGBA_FLOAT32_ATI); }
-static void s_texture_float16_mip(void) { float_mip(GL_RGBA_FLOAT16_ATI); }
+static void s_texture_float32_mip(void) {
+    float_mip(GL_RGBA_FLOAT32_ATI);
+}
+static void s_texture_float16_mip(void) {
+    float_mip(GL_RGBA_FLOAT16_ATI);
+}
 
-static void s_copy_texture(void)
-{
+static void s_copy_texture(void) {
     /* glCopyTexSubImage2D from the frame, then the copy drawn back over the other half. */
     GLuint id;
     s_smooth();
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 32, 32, 64, 64);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     textured_quad(64, 0, 128, 64, 0, 0, 1, 1);
-    glDisable(GL_TEXTURE_2D); glDeleteTextures(1, &id);
+    glDisable(GL_TEXTURE_2D);
+    glDeleteTextures(1, &id);
 }
 
 /* Texture formats: the same pseudo-random bytes go to both renderers in one internal format, format and type and are
@@ -515,348 +807,523 @@ static void s_copy_texture(void)
 #define T2 GL_TEXTURE_2D
 #define TR GL_TEXTURE_RECTANGLE_EXT
 #define S3TC "GL_EXT_texture_compression_s3tc"
-typedef struct { const char *id; GLenum target, internal, format, type; int csize, rep, storage, tol; const char *needs; int pairs; } Fmt;
+typedef struct {
+    const char *id;
+    GLenum target, internal, format, type;
+    int csize, rep, storage, tol;
+    const char *needs;
+    int pairs;
+} Fmt;
 static const Fmt fmts[] = {
-    /* generic internal formats: the driver may keep the type's layout where the card has one */
-    { "format.rgba-4444", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, 0, 0, 0, 2, NULL },
-    { "format.rgba-4444rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4_REV, 0, 0, 0, 2, NULL },
-    { "format.bgra-4444", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4, 0, 0, 0, 2, NULL },
-    { "format.bgra-4444rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, 0, 0, 0, 2, NULL },
-    { "format.rgba-5551", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, 0, 0, 0, 2, NULL, 1 },
-    { "format.bgra-5551", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_5_5_5_1, 0, 0, 0, 2, NULL },
-    { "format.rgba-1555rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL },
-    { "format.bgra-1555rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL },
-    { "format.rgb-565", T2, GL_RGB, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 0, 0, 0, 2, NULL },
-    { "format.rgb-565rev", T2, GL_RGB, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, 0, 0, 0, 2, NULL },
-    { "format.rgba-8888", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, 0, 0, 0, 1, NULL },
-    { "format.rgba-8888rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 0, 1, NULL },
-    { "format.bgra-8888", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, 0, 0, 0, 1, NULL },
-    { "format.bgra-8888rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 0, 1, NULL },
-    { "format.bgra-ubyte", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.rgb-ubyte", T2, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.bgr-ubyte", T2, GL_RGB, GL_BGR, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.rgba-1010102", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_10_10_10_2, 0, 0, 0, 2, NULL },
-    { "format.rgba-2101010rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, 0, 0, 0, 2, NULL },
-    { "format.bgra-2101010rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV, 0, 0, 0, 2, NULL },
-    { "format.rgb-332", T2, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE_3_3_2, 0, 0, 0, 2, NULL },
-    { "format.rgb-233rev", T2, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE_2_3_3_REV, 0, 0, 0, 2, NULL },
-    /* sized internal formats, data of the same precision */
-    { "format.rgba4", T2, GL_RGBA4, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, 0, 0, 0, 2, NULL },
-    { "format.rgb5-a1", T2, GL_RGB5_A1, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL },
-    { "format.rgb5", T2, GL_RGB5, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL },
-    { "format.r3-g3-b2", T2, GL_R3_G3_B2, GL_RGB, GL_UNSIGNED_BYTE_3_3_2, 0, 0, 0, 2, NULL },
-    { "format.rgb10-a2", T2, GL_RGB10_A2, GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV, 0, 0, 0, 2, NULL },
-    { "format.rgba16", T2, GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT, 0, 0, 0, 2, NULL },
-    /* sized internal formats from bytes, converted by the driver (the "16-bit textures" of games) */
-    { "format.rgba4-from-ubyte", T2, GL_RGBA4, GL_RGBA, GL_UNSIGNED_BYTE, 0, 4, 0, 2, NULL },
-    { "format.rgb5-a1-from-ubyte", T2, GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_BYTE, 0, 5, 0, 2, NULL, 1 },
-    { "format.rgb5-from-ubyte", T2, GL_RGB5, GL_RGB, GL_UNSIGNED_BYTE, 0, 55, 0, 2, NULL },
-    /* luminance, alpha, intensity */
-    { "format.luminance8", T2, GL_LUMINANCE8, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.alpha8", T2, GL_ALPHA8, GL_ALPHA, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.intensity8", T2, GL_INTENSITY8, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.luminance8-alpha8", T2, GL_LUMINANCE8_ALPHA8, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL },
-    { "format.luminance4-alpha4", T2, GL_LUMINANCE4_ALPHA4, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 0, 4, 0, 2, NULL },
-    { "format.luminance16", T2, GL_LUMINANCE16, GL_LUMINANCE, GL_UNSIGNED_SHORT, 0, 0, 0, 2, NULL },
-    /* compressed: any bytes are valid blocks */
-    { "format.dxt1-rgb", T2, GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 0, 32, 0, 0, 3, S3TC },
-    { "format.dxt1-rgba", T2, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 0, 0, 32, 0, 0, 3, S3TC },
-    { "format.dxt3", T2, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 0, 0, 64, 0, 0, 3, S3TC },
-    { "format.dxt5", T2, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 0, 64, 0, 0, 3, S3TC },
-    /* video */
-    { "format.ycbcr", T2, GL_RGB, GL_YCBCR_422_APPLE, GL_UNSIGNED_SHORT_8_8_APPLE, 0, 0, 0, 4, "GL_APPLE_ycbcr_422" },
-    { "format.ycbcr-rev", T2, GL_RGB, GL_YCBCR_422_APPLE, GL_UNSIGNED_SHORT_8_8_REV_APPLE, 0, 0, 0, 4, "GL_APPLE_ycbcr_422" },
-    /* rectangle textures as Quartz Extreme and video use them; storage 1: in the program's memory (AGP) */
-    { "format.rect-bgra-8888rev", TR, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 0, 1, "GL_EXT_texture_rectangle" },
-    { "format.rect-bgra-1555rev", TR, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, "GL_EXT_texture_rectangle" },
-    { "format.rect-client-storage", TR, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 1, 1, "GL_APPLE_client_storage" },
-    { "format.rect-ycbcr-client-storage", TR, GL_RGB, GL_YCBCR_422_APPLE, GL_UNSIGNED_SHORT_8_8_REV_APPLE, 0, 0, 1, 4, "GL_APPLE_ycbcr_422" },
+        /* generic internal formats: the driver may keep the type's layout where the card has one */
+        {"format.rgba-4444", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, 0, 0, 0, 2, NULL},
+        {"format.rgba-4444rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4_REV, 0, 0, 0, 2, NULL},
+        {"format.bgra-4444", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4, 0, 0, 0, 2, NULL},
+        {"format.bgra-4444rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, 0, 0, 0, 2, NULL},
+        {"format.rgba-5551", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, 0, 0, 0, 2, NULL, 1},
+        {"format.bgra-5551", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_5_5_5_1, 0, 0, 0, 2, NULL},
+        {"format.rgba-1555rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL},
+        {"format.bgra-1555rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL},
+        {"format.rgb-565", T2, GL_RGB, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 0, 0, 0, 2, NULL},
+        {"format.rgb-565rev", T2, GL_RGB, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, 0, 0, 0, 2, NULL},
+        {"format.rgba-8888", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, 0, 0, 0, 1, NULL},
+        {"format.rgba-8888rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 0, 1, NULL},
+        {"format.bgra-8888", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8, 0, 0, 0, 1, NULL},
+        {"format.bgra-8888rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 0, 1, NULL},
+        {"format.bgra-ubyte", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.rgb-ubyte", T2, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.bgr-ubyte", T2, GL_RGB, GL_BGR, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.rgba-1010102", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_10_10_10_2, 0, 0, 0, 2, NULL},
+        {"format.rgba-2101010rev", T2, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, 0, 0, 0, 2, NULL},
+        {"format.bgra-2101010rev", T2, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV, 0, 0, 0, 2, NULL},
+        {"format.rgb-332", T2, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE_3_3_2, 0, 0, 0, 2, NULL},
+        {"format.rgb-233rev", T2, GL_RGB, GL_RGB, GL_UNSIGNED_BYTE_2_3_3_REV, 0, 0, 0, 2, NULL},
+        /* sized internal formats, data of the same precision */
+        {"format.rgba4", T2, GL_RGBA4, GL_BGRA, GL_UNSIGNED_SHORT_4_4_4_4_REV, 0, 0, 0, 2, NULL},
+        {"format.rgb5-a1", T2, GL_RGB5_A1, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL},
+        {"format.rgb5", T2, GL_RGB5, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2, NULL},
+        {"format.r3-g3-b2", T2, GL_R3_G3_B2, GL_RGB, GL_UNSIGNED_BYTE_3_3_2, 0, 0, 0, 2, NULL},
+        {"format.rgb10-a2", T2, GL_RGB10_A2, GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV, 0, 0, 0, 2, NULL},
+        {"format.rgba16", T2, GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT, 0, 0, 0, 2, NULL},
+        /* sized internal formats from bytes, converted by the driver (the "16-bit textures" of games) */
+        {"format.rgba4-from-ubyte", T2, GL_RGBA4, GL_RGBA, GL_UNSIGNED_BYTE, 0, 4, 0, 2, NULL},
+        {"format.rgb5-a1-from-ubyte", T2, GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_BYTE, 0, 5, 0, 2, NULL, 1},
+        {"format.rgb5-from-ubyte", T2, GL_RGB5, GL_RGB, GL_UNSIGNED_BYTE, 0, 55, 0, 2, NULL},
+        /* luminance, alpha, intensity */
+        {"format.luminance8", T2, GL_LUMINANCE8, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.alpha8", T2, GL_ALPHA8, GL_ALPHA, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.intensity8", T2, GL_INTENSITY8, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.luminance8-alpha8", T2, GL_LUMINANCE8_ALPHA8, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 0, 0, 0, 1, NULL},
+        {"format.luminance4-alpha4", T2, GL_LUMINANCE4_ALPHA4, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 0, 4, 0, 2, NULL},
+        {"format.luminance16", T2, GL_LUMINANCE16, GL_LUMINANCE, GL_UNSIGNED_SHORT, 0, 0, 0, 2, NULL},
+        /* compressed: any bytes are valid blocks */
+        {"format.dxt1-rgb", T2, GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 0, 32, 0, 0, 3, S3TC},
+        {"format.dxt1-rgba", T2, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, 0, 0, 32, 0, 0, 3, S3TC},
+        {"format.dxt3", T2, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 0, 0, 64, 0, 0, 3, S3TC},
+        {"format.dxt5", T2, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 0, 64, 0, 0, 3, S3TC},
+        /* video */
+        {"format.ycbcr", T2, GL_RGB, GL_YCBCR_422_APPLE, GL_UNSIGNED_SHORT_8_8_APPLE, 0, 0, 0, 4, "GL_APPLE_ycbcr_422"},
+        {"format.ycbcr-rev", T2, GL_RGB, GL_YCBCR_422_APPLE, GL_UNSIGNED_SHORT_8_8_REV_APPLE, 0, 0, 0, 4,
+         "GL_APPLE_ycbcr_422"},
+        /* rectangle textures as Quartz Extreme and video use them; storage 1: in the program's memory (AGP) */
+        {"format.rect-bgra-8888rev", TR, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 0, 1,
+         "GL_EXT_texture_rectangle"},
+        {"format.rect-bgra-1555rev", TR, GL_RGBA, GL_BGRA, GL_UNSIGNED_SHORT_1_5_5_5_REV, 0, 0, 0, 2,
+         "GL_EXT_texture_rectangle"},
+        {"format.rect-client-storage", TR, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0, 0, 1, 1,
+         "GL_APPLE_client_storage"},
+        {"format.rect-ycbcr-client-storage", TR, GL_RGB, GL_YCBCR_422_APPLE, GL_UNSIGNED_SHORT_8_8_REV_APPLE, 0, 0, 1,
+         4, "GL_APPLE_ycbcr_422"},
 };
 static int has_extension(const char *name);
-static int arg;                               /* the format a format case draws: index into fmts */
-static unsigned char data[16 * 16 * 4];        /* its texels, as uploaded */
-static void s_format(void)
-{
+static int arg; /* the format a format case draws: index into fmts */
+static unsigned char data[16 * 16 * 4]; /* its texels, as uploaded */
+/* n pseudo-random bytes from seed, shaped by rep (see "Texture formats" above) */
+static void texels(unsigned char *p, unsigned n, unsigned seed, int rep) {
+    unsigned i, v;
+    for (i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        v = seed >> 24;
+        if (rep == 4)
+            v = (v >> 4) * 17;
+        else if (rep == 5 && i % 4 == 3)
+            v = v & 1 ? 255 : 0;
+        else if (rep == 5 || rep == 55)
+            v = (v & 0xf8) | v >> 5;
+        p[i] = (unsigned char)v;
+    }
+}
+static void s_format(void) {
     const Fmt *f = &fmts[arg];
     int rect = f->target == TR, w = rect ? 12 : 8, h = rect ? 10 : 8;
-    unsigned seed = 7919u * (unsigned)(arg + 1), i, v; GLuint id;
-    for (i = 0; i < sizeof data; i++) {
-        seed = seed * 1664525u + 1013904223u; v = seed >> 24;
-        if (f->rep == 4) v = (v >> 4) * 17;
-        else if (f->rep == 5 && i % 4 == 3) v = v & 1 ? 255 : 0;
-        else if (f->rep == 5 || f->rep == 55) v = (v & 0xf8) | v >> 5;
-        data[i] = (unsigned char)v;
-    }
+    GLuint id;
+    texels(data, sizeof data, 7919u * (unsigned)(arg + 1), f->rep);
     reset();
-    glGenTextures(1, &id); glBindTexture(f->target, id);
-    glTexParameteri(f->target, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(f->target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &id);
+    glBindTexture(f->target, id);
+    glTexParameteri(f->target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(f->target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     if (f->storage) {
         glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, GL_TRUE);
-        if (has_extension("GL_APPLE_texture_range")) glTexParameteri(f->target, GL_TEXTURE_STORAGE_HINT_APPLE, GL_STORAGE_SHARED_APPLE);
+        if (has_extension("GL_APPLE_texture_range"))
+            glTexParameteri(f->target, GL_TEXTURE_STORAGE_HINT_APPLE, GL_STORAGE_SHARED_APPLE);
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    if (f->csize) glCompressedTexImage2D(f->target, 0, f->internal, w, h, 0, f->csize, data);
-    else glTexImage2D(f->target, 0, f->internal, w, h, 0, f->format, f->type, data);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4); glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, GL_FALSE);
-    glEnable(f->target); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-    if (rect) textured_quad(16, 24, 112, 104, 0, 0, (float)w, (float)h);   /* rectangle: texel coordinates, 8 pixels a texel */
-    else textured_quad(32, 32, 96, 96, 0, 0, 1, 1);
-    glDisable(f->target); glDeleteTextures(1, &id);
+    if (f->csize)
+        glCompressedTexImage2D(f->target, 0, f->internal, w, h, 0, f->csize, data);
+    else
+        glTexImage2D(f->target, 0, f->internal, w, h, 0, f->format, f->type, data);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, GL_FALSE);
+    glEnable(f->target);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    if (rect)
+        textured_quad(16, 24, 112, 104, 0, 0, (float)w, (float)h); /* rectangle: texel coordinates, 8 pixels a texel */
+    else
+        textured_quad(32, 32, 96, 96, 0, 0, 1, 1);
+    glDisable(f->target);
+    glDeleteTextures(1, &id);
 }
 
 /* pairs: Tiger's libGLImage converts these to ARGB1555 two texels at a time (lwz; rlwinm 15,0,16; rlwinm 31,1,31; and
  * 0x80008000; or; stw), and the shift right leaves the first texel's alpha in the second's alpha bit: on a real Mac the
  * second texel's alpha is its own OR the first's. Apple's software renderer does not take that path, so its image gets
  * the same OR before the comparison. */
-static void pair_alpha(unsigned char *sw)
-{
+static void pair_alpha(unsigned char *sw) {
     int tx, ty, x, y;
-    for (ty = 0; ty < 8; ty++) for (tx = 1; tx < 8; tx += 2) {
-        int a = sw[((32 + ty * 8 + 4) * W + 32 + (tx - 1) * 8 + 4) * 4 + 3];
-        if (a < 128) continue;
-        for (y = 32 + ty * 8; y < 40 + ty * 8; y++) for (x = 32 + tx * 8; x < 40 + tx * 8; x++) sw[(y * W + x) * 4 + 3] = 255;
-    }
+    for (ty = 0; ty < 8; ty++)
+        for (tx = 1; tx < 8; tx += 2) {
+            int a = sw[((32 + ty * 8 + 4) * W + 32 + (tx - 1) * 8 + 4) * 4 + 3];
+            if (a < 128)
+                continue;
+            for (y = 32 + ty * 8; y < 40 + ty * 8; y++)
+                for (x = 32 + tx * 8; x < 40 + tx * 8; x++)
+                    sw[(y * W + x) * 4 + 3] = 255;
+        }
 }
 
 /* A failed format case: the first texels whose colours differ, with their bytes as uploaded. */
-static void explain_format(int index, int tol)
-{
+static void explain_format(int index, int tol) {
     const Fmt *f = &fmts[index];
-    int rect = f->target == TR, w = rect ? 12 : 8, h = rect ? 10 : 8, x0 = rect ? 16 : 32, y0 = rect ? 24 : 32, tx, ty, c, shown = 0;
-    int comps = f->format == GL_RGBA || f->format == GL_BGRA ? 4 : f->format == GL_RGB || f->format == GL_BGR ? 3 : f->format == GL_LUMINANCE_ALPHA ? 2 : 1;
-    int bytes = f->csize ? 0 : f->type == GL_UNSIGNED_BYTE ? comps : f->type == GL_UNSIGNED_SHORT ? 2 * comps :
-        f->type == GL_UNSIGNED_BYTE_3_3_2 || f->type == GL_UNSIGNED_BYTE_2_3_3_REV ? 1 :
-        f->type == GL_UNSIGNED_INT_8_8_8_8 || f->type == GL_UNSIGNED_INT_8_8_8_8_REV || f->type == GL_UNSIGNED_INT_10_10_10_2 ||
-        f->type == GL_UNSIGNED_INT_2_10_10_10_REV ? 4 : 2;
-    for (ty = 0; ty < h && shown < 6; ty++) for (tx = 0; tx < w && shown < 6; tx++) {
-        int px = x0 + tx * 8 + 4, py = y0 + ty * 8 + 4, bad = 0;
-        const unsigned char *a = img[0] + (py * W + px) * 4, *b = img[1] + (py * W + px) * 4;
-        for (c = 0; c < 4; c++) bad |= abs(a[c] - b[c]) > tol;
-        if (!bad) continue;
-        printf("  texel %d,%d bytes", tx, ty);
-        for (c = 0; c < bytes; c++) printf(" %02x", data[(ty * w + tx) * bytes + c]);
-        printf(" ati %d %d %d %d sw %d %d %d %d\n", a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]); shown++;
-    }
+    int rect = f->target == TR, w = rect ? 12 : 8, h = rect ? 10 : 8, x0 = rect ? 16 : 32, y0 = rect ? 24 : 32, tx, ty,
+        c, shown = 0;
+    int comps = f->format == GL_RGBA || f->format == GL_BGRA ? 4
+                : f->format == GL_RGB || f->format == GL_BGR ? 3
+                : f->format == GL_LUMINANCE_ALPHA            ? 2
+                                                             : 1;
+    int bytes = f->csize                                                                     ? 0
+                : f->type == GL_UNSIGNED_BYTE                                                ? comps
+                : f->type == GL_UNSIGNED_SHORT                                               ? 2 * comps
+                : f->type == GL_UNSIGNED_BYTE_3_3_2 || f->type == GL_UNSIGNED_BYTE_2_3_3_REV ? 1
+                : f->type == GL_UNSIGNED_INT_8_8_8_8 || f->type == GL_UNSIGNED_INT_8_8_8_8_REV ||
+                                f->type == GL_UNSIGNED_INT_10_10_10_2 || f->type == GL_UNSIGNED_INT_2_10_10_10_REV
+                        ? 4
+                        : 2;
+    for (ty = 0; ty < h && shown < 6; ty++)
+        for (tx = 0; tx < w && shown < 6; tx++) {
+            int px = x0 + tx * 8 + 4, py = y0 + ty * 8 + 4, bad = 0;
+            const unsigned char *a = img[0] + (py * W + px) * 4, *b = img[1] + (py * W + px) * 4;
+            for (c = 0; c < 4; c++)
+                bad |= abs(a[c] - b[c]) > tol;
+            if (!bad)
+                continue;
+            printf("  texel %d,%d bytes", tx, ty);
+            for (c = 0; c < bytes; c++)
+                printf(" %02x", data[(ty * w + tx) * bytes + c]);
+            printf(" ati %d %d %d %d sw %d %d %d %d\n", a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
+            shown++;
+        }
 }
 
 /* Mip levels: each level one colour (distinct in every channel), each drawn by a 32-pixel quad at 2^(k + 0.25) texels
  * per pixel, which selects level k. DXT: solid blocks where the renderer has S3TC, elsewhere (Apple's software renderer)
  * the same colours after a DXT colour's 5-6-5 rounding. 256 x 256: large enough for the driver to tile it. */
-typedef struct { const char *id; GLenum internal, format; int w, h, block, tol; } Mip;   /* block: DXT block bytes, 0: none */
+typedef struct {
+    const char *id;
+    GLenum internal, format;
+    int w, h, block, tol;
+} Mip; /* block: DXT block bytes, 0: none */
 static const Mip mips[] = {
-    { "texture.mip-rgba8", GL_RGBA8, GL_RGBA, 64, 64, 0, 1 },
-    { "texture.mip-rgba8-wide", GL_RGBA8, GL_RGBA, 64, 16, 0, 1 },
-    { "texture.mip-rgba8-256", GL_RGBA8, GL_RGBA, 256, 256, 0, 1 },
-    { "texture.mip-rgb5", GL_RGB5, GL_RGBA, 64, 64, 0, 9 },
-    { "texture.mip-luminance8", GL_LUMINANCE8, GL_LUMINANCE, 64, 64, 0, 1 },
-    { "texture.mip-dxt1", GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 64, 64, 8, 2 },
-    { "texture.mip-dxt1-wide", GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 64, 16, 8, 2 },
-    { "texture.mip-dxt1-256", GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 256, 256, 8, 2 },
-    { "texture.mip-dxt3", GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 0, 64, 64, 16, 2 },
-    { "texture.mip-dxt5", GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 64, 64, 16, 2 },
-    { "texture.mip-dxt5-wide", GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 64, 16, 16, 2 },
+        {"texture.mip-rgba8", GL_RGBA8, GL_RGBA, 64, 64, 0, 1},
+        {"texture.mip-rgba8-wide", GL_RGBA8, GL_RGBA, 64, 16, 0, 1},
+        {"texture.mip-rgba8-256", GL_RGBA8, GL_RGBA, 256, 256, 0, 1},
+        {"texture.mip-rgb5", GL_RGB5, GL_RGBA, 64, 64, 0, 9},
+        {"texture.mip-luminance8", GL_LUMINANCE8, GL_LUMINANCE, 64, 64, 0, 1},
+        {"texture.mip-dxt1", GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 64, 64, 8, 2},
+        {"texture.mip-dxt1-wide", GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 64, 16, 8, 2},
+        {"texture.mip-dxt1-256", GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 256, 256, 8, 2},
+        {"texture.mip-dxt3", GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, 0, 64, 64, 16, 2},
+        {"texture.mip-dxt5", GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 64, 64, 16, 2},
+        {"texture.mip-dxt5-wide", GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 64, 16, 16, 2},
 };
-static int mip_arg;   /* the mip case drawn: index into mips */
-static void s_mip(void)
-{
+static int mip_arg; /* the mip case drawn: index into mips */
+static void s_mip(void) {
     static unsigned char t[256 * 256 * 4];
     const Mip *m = &mips[mip_arg];
-    int s3tc = m->block && has_extension(S3TC), level, w, h, i; GLuint id;
+    int s3tc = m->block && has_extension(S3TC), level, w, h, i;
+    GLuint id;
     reset();
-    glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    for (level = 0, w = m->w, h = m->h; ; level++, w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1) {
-        unsigned char q[3] = { (unsigned char)(20 + 26 * level), (unsigned char)(228 - 26 * level), level & 1 ? 220 : 50 }, c[4] = { q[0], q[1], q[2], 255 };
-        if (m->block) { c[0] = (q[0] & 0xf8) | q[0] >> 5; c[1] = (q[1] & 0xfc) | q[1] >> 6; c[2] = (q[2] & 0xf8) | q[2] >> 5; }
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (level = 0, w = m->w, h = m->h;; level++, w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1) {
+        unsigned char q[3] = {(unsigned char)(20 + 26 * level), (unsigned char)(228 - 26 * level),
+                              level & 1 ? 220 : 50},
+                      c[4] = {q[0], q[1], q[2], 255};
+        if (m->block) {
+            c[0] = (q[0] & 0xf8) | q[0] >> 5;
+            c[1] = (q[1] & 0xfc) | q[1] >> 6;
+            c[2] = (q[2] & 0xf8) | q[2] >> 5;
+        }
         if (s3tc) {
-            int blocks = ((w + 3) / 4) * ((h + 3) / 4), e = m->block - 8; unsigned v = (unsigned)(q[0] >> 3) << 11 | (unsigned)(q[1] >> 2) << 5 | q[2] >> 3;
+            int blocks = ((w + 3) / 4) * ((h + 3) / 4), e = m->block - 8;
+            unsigned v = (unsigned)(q[0] >> 3) << 11 | (unsigned)(q[1] >> 2) << 5 | q[2] >> 3;
             for (i = 0; i < blocks; i++) {
-                unsigned char *b = t + i * m->block; memset(b, 0, m->block);
-                if (e) { if (m->internal == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT) memset(b, 0xff, 8); else b[0] = b[1] = 255; }   /* alpha 1 */
-                b[e] = b[e + 2] = (unsigned char)v; b[e + 1] = b[e + 3] = (unsigned char)(v >> 8);   /* both colours v, every index 0 */
+                unsigned char *b = t + i * m->block;
+                memset(b, 0, m->block);
+                if (e) {
+                    if (m->internal == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT)
+                        memset(b, 0xff, 8);
+                    else
+                        b[0] = b[1] = 255;
+                } /* alpha 1 */
+                b[e] = b[e + 2] = (unsigned char)v;
+                b[e + 1] = b[e + 3] = (unsigned char)(v >> 8); /* both colours v, every index 0 */
             }
             glCompressedTexImage2D(GL_TEXTURE_2D, level, m->internal, w, h, 0, blocks * m->block, t);
         } else {
             int n = m->format == GL_LUMINANCE ? 1 : 4;
-            for (i = 0; i < w * h; i++) memcpy(t + i * n, c, n);
-            glTexImage2D(GL_TEXTURE_2D, level, m->block ? GL_RGBA8 : m->internal, w, h, 0, m->block ? GL_RGBA : m->format, GL_UNSIGNED_BYTE, t);
+            for (i = 0; i < w * h; i++)
+                memcpy(t + i * n, c, n);
+            glTexImage2D(GL_TEXTURE_2D, level, m->block ? GL_RGBA8 : m->internal, w, h, 0,
+                         m->block ? GL_RGBA : m->format, GL_UNSIGNED_BYTE, t);
         }
-        if (w == 1 && h == 1) break;
+        if (w == 1 && h == 1)
+            break;
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     for (i = 0; i <= level; i++) {
         float r = 1.189207f * (float)(1 << i) * 32 / (float)m->w, x0 = (float)(i % 4) * 32, y0 = (float)(i / 4) * 32;
         textured_quad(x0, y0, x0 + 32, y0 + 32, 0, 0, r, r);
     }
-    glDisable(GL_TEXTURE_2D); glDeleteTextures(1, &id);
+    glDisable(GL_TEXTURE_2D);
+    glDeleteTextures(1, &id);
 }
 
 /* ---- Cases ---- */
 
 /* Expected images drawn on the CPU, for features Apple's software renderer does not have (per-vertex point size from a
  * vertex program, point sprites): squares of the rounded size centred on each point, as OpenGL rasterises points. */
-static void expect_dots(unsigned char *out, int sprite)
-{
+static void expect_dots(unsigned char *out, int sprite) {
     int i, x, y, k;
-    for (i = 0; i < W * H; i++) { out[i * 4] = 26; out[i * 4 + 1] = 51; out[i * 4 + 2] = 77; out[i * 4 + 3] = 255; }
+    for (i = 0; i < W * H; i++) {
+        out[i * 4] = 26;
+        out[i * 4 + 1] = 51;
+        out[i * 4 + 2] = 77;
+        out[i * 4 + 3] = 255;
+    }
     for (i = 0; i < 25; i++) {
-        float cx = 12.5f + 25 * (i % 5), cy = 12.5f + 25 * (i / 5), size = sprite ? 16 : (float)(int)(2 + 0.1f * cx + 0.5f);
-        unsigned char c[4]; c[0] = (unsigned char)(30 + 9 * i); c[1] = 200; c[2] = (unsigned char)(240 - 8 * i); c[3] = 255;
-        for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
-            if (px < cx - size / 2 || px >= cx + size / 2 || py < cy - size / 2 || py >= cy + size / 2) continue;
-            if (sprite) {   /* the checker texture: s across, t up from the bottom. Unverified: ARB_point_sprite puts t = 0 at
+        float cx = 12.5f + 25 * (i % 5), cy = 12.5f + 25 * (i / 5),
+              size = sprite ? 16 : (float)(int)(2 + 0.1f * cx + 0.5f);
+        unsigned char c[4];
+        c[0] = (unsigned char)(30 + 9 * i);
+        c[1] = 200;
+        c[2] = (unsigned char)(240 - 8 * i);
+        c[3] = 255;
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++) {
+                float px = x + 0.5f, py = y + 0.5f;
+                if (px < cx - size / 2 || px >= cx + size / 2 || py < cy - size / 2 || py >= cy + size / 2)
+                    continue;
+                if (sprite) { /* the checker texture: s across, t up from the bottom. Unverified: ARB_point_sprite puts t = 0 at
                              * the top; Tiger's driver programs the R300's sprite coordinates with t = 0 at the bottom. */
-                int tx = (int)(px - (cx - 8)), ty = (int)(py - (cy - 8)), on = ((tx / 4) ^ (ty / 4)) & 1;
-                c[0] = on ? 240 : 30; c[1] = (unsigned char)(tx * 255 / 16); c[2] = (unsigned char)(ty * 255 / 16);
+                    int tx = (int)(px - (cx - 8)), ty = (int)(py - (cy - 8)), on = ((tx / 4) ^ (ty / 4)) & 1;
+                    c[0] = on ? 240 : 30;
+                    c[1] = (unsigned char)(tx * 255 / 16);
+                    c[2] = (unsigned char)(ty * 255 / 16);
+                }
+                for (k = 0; k < 4; k++)
+                    out[(y * W + x) * 4 + k] = c[k];
             }
-            for (k = 0; k < 4; k++) out[(y * W + x) * 4 + k] = c[k];
+    }
+}
+static void expect_vertex_size(unsigned char *out) {
+    expect_dots(out, 0);
+}
+static void expect_border(unsigned char *out) {
+    int x, y;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            unsigned char *p = out + (y * W + x) * 4;
+            float s = -0.5f + 2 * (x + 0.5f - 4) / 120, t = -0.5f + 2 * (y + 0.5f - 4) / 120;
+            if (x < 4 || x >= 124 || y < 4 || y >= 124) {
+                p[0] = 26;
+                p[1] = 51;
+                p[2] = 77;
+                p[3] = 255;
+                continue;
+            }
+            if (s < 0 || s >= 1 || t < 0 || t >= 1) {
+                p[0] = 51;
+                p[1] = 204;
+                p[2] = 102;
+                p[3] = 153;
+                continue;
+            }
+            {
+                int tx = (int)(s * 16), ty = (int)(t * 16), on = ((tx / 4) ^ (ty / 4)) & 1;
+                p[0] = on ? 240 : 30;
+                p[1] = (unsigned char)(tx * 255 / 16);
+                p[2] = (unsigned char)(ty * 255 / 16);
+                p[3] = 255;
+            }
         }
-    }
 }
-static void expect_vertex_size(unsigned char *out) { expect_dots(out, 0); }
-static void expect_border(unsigned char *out)
-{
-    int x, y;
-    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
-        unsigned char *p = out + (y * W + x) * 4;
-        float s = -0.5f + 2 * (x + 0.5f - 4) / 120, t = -0.5f + 2 * (y + 0.5f - 4) / 120;
-        if (x < 4 || x >= 124 || y < 4 || y >= 124) { p[0] = 26; p[1] = 51; p[2] = 77; p[3] = 255; continue; }
-        if (s < 0 || s >= 1 || t < 0 || t >= 1) { p[0] = 51; p[1] = 204; p[2] = 102; p[3] = 153; continue; }
-        {   int tx = (int)(s * 16), ty = (int)(t * 16), on = ((tx / 4) ^ (ty / 4)) & 1;
-            p[0] = on ? 240 : 30; p[1] = (unsigned char)(tx * 255 / 16); p[2] = (unsigned char)(ty * 255 / 16); p[3] = 255; }
-    }
+static void expect_sprite(unsigned char *out) {
+    expect_dots(out, 1);
 }
-static void expect_sprite(unsigned char *out) { expect_dots(out, 1); }
-static void expect_unbound(unsigned char *out)
-{
+static void expect_unbound(unsigned char *out) {
     int x, y;
-    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
-        unsigned char *p = out + (y * W + x) * 4; int in = x >= 32 && x < 96 && y >= 32 && y < 96;
-        p[0] = in ? 0 : 26; p[1] = in ? 0 : 51; p[2] = in ? 0 : 77; p[3] = 255;
-    }
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            unsigned char *p = out + (y * W + x) * 4;
+            int in = x >= 32 && x < 96 && y >= 32 && y < 96;
+            p[0] = in ? 0 : 26;
+            p[1] = in ? 0 : 51;
+            p[2] = in ? 0 : 77;
+            p[3] = 255;
+        }
 }
 
-typedef struct { const char *id; void (*draw)(void); int tol; unsigned allow; int depth; const char *needs; void (*expect)(unsigned char *);
-                 void (*fixup)(unsigned char *); } Case;   /* fixup: applied to the software image before the comparison */
+typedef struct {
+    const char *id;
+    void (*draw)(void);
+    int tol;
+    unsigned allow;
+    int depth;
+    const char *needs;
+    void (*expect)(unsigned char *);
+    void (*fixup)(unsigned char *);
+} Case; /* fixup: applied to the software image before the comparison */
 static const Case cases[] = {
-    { "readback.clear", s_clear, 0, 0, 0, NULL },
-    { "readback.clear-alpha", s_clear_alpha, 1, 0, 0, NULL },
-    { "readback.smooth", s_smooth, 3, 0, 0, NULL },
-    { "readback.depth", s_depth, 3, 0, 1, NULL },
-    { "geometry.quad-strip", s_quad_strip, 3, 0, 0, NULL },
-    { "geometry.grid", s_grid, 3, 0, 0, NULL },
-    { "fog.linear", s_fog_linear, 6, 0, 0, NULL },
-    { "fog.exp", s_fog_exp, 6, 0, 0, NULL },
-    { "fog.exp2", s_fog_exp2, 6, 0, 0, NULL },
-    { "clip.one-plane", s_clip_one, 2, 0, 0, NULL },
-    { "clip.two-planes", s_clip_two, 3, 0, 0, NULL },
-    { "line.width-1", s_line_1, 3, 0, 0, NULL },
-    { "line.width-3", s_line_3, 3, 24, 0, NULL },      /* allow: the ends of wide lines (OpenGL leaves their shape open) */
-    { "line.width-7", s_line_7, 3, 48, 0, NULL },
-    { "line.strip-4", s_line_strip, 3, 0, 0, NULL },
-    { "line.stipple", s_line_stipple, 3, 0, 0, NULL },
-    { "line.stipple-wide", s_line_stipple_wide, 3, 24, 0, NULL },   /* pattern phase at the ends of the wide segments */
-    { "point.size-1", s_point_1, 3, 0, 0, NULL },
-    { "point.size-6", s_point_6, 3, 0, 0, NULL },
-    { "point.indexed", s_point_indexed, 3, 0, 0, NULL },
-    { "point.vertex-size", s_point_vertex_size, 3, 0, 0, "GL_ARB_vertex_program", expect_vertex_size },
-    { "point.sprite", s_point_sprite, 3, 0, 0, "GL_ARB_point_sprite", expect_sprite },
-    { "shade.flat", s_flat, 0, 0, 0, NULL },
-    { "polygon.mode-line", s_polygon_line, 3, 0, 0, NULL },
-    { "polygon.mode-point", s_polygon_point, 3, 0, 0, NULL },
-    { "polygon.mode-front-line", s_polygon_front_line, 3, 0, 0, NULL },
-    { "polygon.mode-line-quads", s_polygon_line_quads, 3, 0, 0, NULL },
-    { "polygon.mode-line-cull", s_polygon_line_cull, 3, 0, 0, NULL },
-    { "polygon.edge-flags", s_polygon_edge_flags, 3, 0, 0, NULL },
-    { "program.unbound-texture", s_program_unbound_texture, 1, 0, 0, "GL_ARB_fragment_program", expect_unbound },
-    { "polygon.stipple", s_polygon_stipple, 0, 0, 0, NULL },
-    { "logic.xor", s_logic_xor, 0, 0, 0, NULL },
-    { "logic.and", s_logic_and, 0, 0, 0, NULL },
-    { "logic.or", s_logic_or, 0, 0, 0, NULL },
-    { "logic.invert", s_logic_invert, 0, 0, 0, NULL },
-    { "logic.copy-inverted", s_logic_copy_inverted, 0, 0, 0, NULL },
-    { "logic.equiv", s_logic_equiv, 0, 0, 0, NULL },
-    { "texture.lod-bias-0", s_lod_bias_0, 0, 0, 0, "GL_EXT_texture_lod_bias" },
-    { "texture.lod-bias-plus", s_lod_bias_plus, 0, 0, 0, "GL_EXT_texture_lod_bias" },
-    { "texture.lod-bias-minus", s_lod_bias_minus, 0, 0, 0, "GL_EXT_texture_lod_bias" },
-    { "texture.border-colour", s_border, 1, 0, 0, "GL_ARB_texture_border_clamp", expect_border },
-    { "texture.3d", s_texture_3d, 0, 0, 0, NULL },
-    { "texture.3d-mip", s_texture_3d_mip, 0, 0, 0, NULL },
-    { "texture.float32", s_texture_float32, 2, 0, 0, "GL_ATI_texture_float" },
-    { "texture.float16", s_texture_float16, 2, 0, 0, "GL_ATI_texture_float" },
-    { "texture.float32-mip", s_texture_float32_mip, 2, 0, 0, "GL_ATI_texture_float" },
-    { "texture.float16-mip", s_texture_float16_mip, 2, 0, 0, "GL_ATI_texture_float" },
-    { "texture.copy-subimage", s_copy_texture, 3, 0, 0, NULL },
+        {"readback.clear", s_clear, 0, 0, 0, NULL},
+        {"readback.clear-alpha", s_clear_alpha, 1, 0, 0, NULL},
+        {"readback.smooth", s_smooth, 3, 0, 0, NULL},
+        {"readback.depth", s_depth, 3, 0, 1, NULL},
+        {"geometry.quad-strip", s_quad_strip, 3, 0, 0, NULL},
+        {"geometry.grid", s_grid, 3, 0, 0, NULL},
+        {"fog.linear", s_fog_linear, 6, 0, 0, NULL},
+        {"fog.exp", s_fog_exp, 6, 0, 0, NULL},
+        {"fog.exp2", s_fog_exp2, 6, 0, 0, NULL},
+        {"clip.one-plane", s_clip_one, 2, 0, 0, NULL},
+        {"clip.two-planes", s_clip_two, 3, 0, 0, NULL},
+        {"line.width-1", s_line_1, 3, 0, 0, NULL},
+        {"line.width-3", s_line_3, 3, 24, 0, NULL}, /* allow: the ends of wide lines (OpenGL leaves their shape open) */
+        {"line.width-7", s_line_7, 3, 48, 0, NULL},
+        {"line.strip-4", s_line_strip, 3, 0, 0, NULL},
+        {"line.stipple", s_line_stipple, 3, 0, 0, NULL},
+        {"line.stipple-wide", s_line_stipple_wide, 3, 24, 0, NULL}, /* pattern phase at the ends of the wide segments */
+        {"point.size-1", s_point_1, 3, 0, 0, NULL},
+        {"point.size-6", s_point_6, 3, 0, 0, NULL},
+        {"point.indexed", s_point_indexed, 3, 0, 0, NULL},
+        {"point.vertex-size", s_point_vertex_size, 3, 0, 0, "GL_ARB_vertex_program", expect_vertex_size},
+        {"point.sprite", s_point_sprite, 3, 0, 0, "GL_ARB_point_sprite", expect_sprite},
+        {"shade.flat", s_flat, 0, 0, 0, NULL},
+        {"polygon.mode-line", s_polygon_line, 3, 0, 0, NULL},
+        {"polygon.mode-point", s_polygon_point, 3, 0, 0, NULL},
+        {"polygon.mode-front-line", s_polygon_front_line, 3, 0, 0, NULL},
+        {"polygon.mode-line-quads", s_polygon_line_quads, 3, 0, 0, NULL},
+        {"polygon.mode-line-cull", s_polygon_line_cull, 3, 0, 0, NULL},
+        {"polygon.edge-flags", s_polygon_edge_flags, 3, 0, 0, NULL},
+        {"program.unbound-texture", s_program_unbound_texture, 1, 0, 0, "GL_ARB_fragment_program", expect_unbound},
+        {"polygon.stipple", s_polygon_stipple, 0, 0, 0, NULL},
+        {"logic.xor", s_logic_xor, 0, 0, 0, NULL},
+        {"logic.and", s_logic_and, 0, 0, 0, NULL},
+        {"logic.or", s_logic_or, 0, 0, 0, NULL},
+        {"logic.invert", s_logic_invert, 0, 0, 0, NULL},
+        {"logic.copy-inverted", s_logic_copy_inverted, 0, 0, 0, NULL},
+        {"logic.equiv", s_logic_equiv, 0, 0, 0, NULL},
+        {"texture.lod-bias-0", s_lod_bias_0, 0, 0, 0, "GL_EXT_texture_lod_bias"},
+        {"texture.lod-bias-plus", s_lod_bias_plus, 0, 0, 0, "GL_EXT_texture_lod_bias"},
+        {"texture.lod-bias-minus", s_lod_bias_minus, 0, 0, 0, "GL_EXT_texture_lod_bias"},
+        {"texture.border-colour", s_border, 1, 0, 0, "GL_ARB_texture_border_clamp", expect_border},
+        {"texture.3d", s_texture_3d, 0, 0, 0, NULL},
+        {"texture.3d-mip", s_texture_3d_mip, 0, 0, 0, NULL},
+        {"texture.float32", s_texture_float32, 2, 0, 0, "GL_ATI_texture_float"},
+        {"texture.float16", s_texture_float16, 2, 0, 0, "GL_ATI_texture_float"},
+        {"texture.float32-mip", s_texture_float32_mip, 2, 0, 0, "GL_ATI_texture_float"},
+        {"texture.float16-mip", s_texture_float16_mip, 2, 0, 0, "GL_ATI_texture_float"},
+        {"texture.copy-subimage", s_copy_texture, 3, 0, 0, NULL},
 };
 
-static int has_extension(const char *name)
-{
-    const char *all = (const char *)glGetString(GL_EXTENSIONS), *p = all; size_t n = strlen(name);
-    while (all && (p = strstr(p, name))) { if ((p == all || p[-1] == ' ') && (p[n] == ' ' || !p[n])) return 1; p += n; }
+static int has_extension(const char *name) {
+    const char *all = (const char *)glGetString(GL_EXTENSIONS), *p = all;
+    size_t n = strlen(name);
+    while (all && (p = strstr(p, name))) {
+        if ((p == all || p[-1] == ' ') && (p[n] == ' ' || !p[n]))
+            return 1;
+        p += n;
+    }
     return 0;
 }
 
 /* Pixels of a with no pixel of b within tol at the same place or one pixel away; *maxd: the largest difference at the
  * same place. */
-static unsigned unmatched(const unsigned char *a, const unsigned char *b, int tol, int *maxd)
-{
-    unsigned bad = 0; int x, y, dx, dy, c;
-    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
-        const unsigned char *p = a + (y * W + x) * 4; int best = 1000;
-        for (dy = -1; dy <= 1 && best > tol; dy++) for (dx = -1; dx <= 1 && best > tol; dx++) {
-            int d = 0; const unsigned char *q;
-            if (x + dx < 0 || x + dx >= W || y + dy < 0 || y + dy >= H) continue;
-            q = b + ((y + dy) * W + x + dx) * 4;
-            for (c = 0; c < 4; c++) { int e = abs((int)p[c] - (int)q[c]); if (e > d) d = e; }
-            if (!dx && !dy && d > *maxd) *maxd = d;
-            if (d < best) best = d;
+static unsigned unmatched(const unsigned char *a, const unsigned char *b, int tol, int *maxd) {
+    unsigned bad = 0;
+    int x, y, dx, dy, c;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            const unsigned char *p = a + (y * W + x) * 4;
+            int best = 1000;
+            for (dy = -1; dy <= 1 && best > tol; dy++)
+                for (dx = -1; dx <= 1 && best > tol; dx++) {
+                    int d = 0;
+                    const unsigned char *q;
+                    if (x + dx < 0 || x + dx >= W || y + dy < 0 || y + dy >= H)
+                        continue;
+                    q = b + ((y + dy) * W + x + dx) * 4;
+                    for (c = 0; c < 4; c++) {
+                        int e = abs((int)p[c] - (int)q[c]);
+                        if (e > d)
+                            d = e;
+                    }
+                    if (!dx && !dy && d > *maxd)
+                        *maxd = d;
+                    if (d < best)
+                        best = d;
+                }
+            bad += best > tol;
         }
-        bad += best > tol;
-    }
     return bad;
 }
-static unsigned depth_unmatched(const float *a, const float *b)
-{
-    unsigned bad = 0; int x, y, dx, dy;
-    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
-        int ok = 0;
-        for (dy = -1; dy <= 1 && !ok; dy++) for (dx = -1; dx <= 1 && !ok; dx++)
-            if (x + dx >= 0 && x + dx < W && y + dy >= 0 && y + dy < H) ok = fabsf(a[y * W + x] - b[(y + dy) * W + x + dx]) <= 0.002f;
-        bad += !ok;
-    }
+static unsigned depth_unmatched(const float *a, const float *b) {
+    unsigned bad = 0;
+    int x, y, dx, dy;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            int ok = 0;
+            for (dy = -1; dy <= 1 && !ok; dy++)
+                for (dx = -1; dx <= 1 && !ok; dx++)
+                    if (x + dx >= 0 && x + dx < W && y + dy >= 0 && y + dy < H)
+                        ok = fabsf(a[y * W + x] - b[(y + dy) * W + x + dx]) <= 0.002f;
+            bad += !ok;
+        }
     return bad;
 }
-static unsigned lit(const unsigned char *a)
-{
+static unsigned lit(const unsigned char *a) {
     unsigned n = 0, i;
-    for (i = 0; i < W * H; i++) n += abs(a[i * 4] - 26) > 3 || abs(a[i * 4 + 1] - 51) > 3 || abs(a[i * 4 + 2] - 77) > 3;
+    for (i = 0; i < W * H; i++)
+        n += abs(a[i * 4] - 26) > 3 || abs(a[i * 4 + 1] - 51) > 3 || abs(a[i * 4 + 2] - 77) > 3;
     return n;
 }
-static void ppm(const char *dir, const char *id, const char *who, const unsigned char *a)
-{
-    char path[512]; FILE *f; int x, y;
+static void ppm(const char *dir, const char *id, const char *who, const unsigned char *a) {
+    char path[512];
+    FILE *f;
+    int x, y;
     snprintf(path, sizeof path, "%s/%s-%s.ppm", dir, id, who);
-    if (!(f = fopen(path, "wb"))) return;
+    if (!(f = fopen(path, "wb")))
+        return;
     fprintf(f, "P6\n%d %d\n255\n", W, H);
-    for (y = H - 1; y >= 0; y--) for (x = 0; x < W; x++) fwrite(a + (y * W + x) * 4, 1, 3, f);
+    for (y = H - 1; y >= 0; y--)
+        for (x = 0; x < W; x++)
+            fwrite(a + (y * W + x) * 4, 1, 3, f);
     fclose(f);
 }
 
-static int make_contexts(void)
-{
-    CGLPixelFormatAttribute accelerated[] = { kCGLPFAAccelerated, kCGLPFAPBuffer, kCGLPFAColorSize, 24, kCGLPFAAlphaSize, 8,
-                                              kCGLPFADepthSize, 24, kCGLPFAStencilSize, 8, 0 };
-    CGLPixelFormatAttribute software[] = { kCGLPFARendererID, kCGLRendererGenericFloatID, kCGLPFAOffScreen, kCGLPFAColorSize, 32, kCGLPFAAlphaSize, 8,
-                                           kCGLPFADepthSize, 24, kCGLPFAStencilSize, 8, 0 };
-    CGLPixelFormatObj pf; CGLPBufferObj pbuffer; long n, screen = 0;   /* long: the Mac OS X 10.4 CGL signatures */
-    if (CGLChoosePixelFormat(accelerated, &pf, &n) || !pf) { puts("setup: no accelerated pbuffer format"); return 0; }
-    if (CGLCreateContext(pf, NULL, &ctx[0]) || CGLCreatePBuffer(W, H, GL_TEXTURE_2D, GL_RGBA, 0, &pbuffer)) { puts("setup: accelerated context"); return 0; }
-    CGLDestroyPixelFormat(pf); CGLGetVirtualScreen(ctx[0], &screen);
-    if (CGLSetPBuffer(ctx[0], pbuffer, 0, 0, screen)) { puts("setup: pbuffer"); return 0; }
-    if (CGLChoosePixelFormat(software, &pf, &n) || !pf) { puts("setup: no software format"); return 0; }
-    if (CGLCreateContext(pf, NULL, &ctx[1]) || CGLSetOffScreen(ctx[1], W, H, W * 4, soft)) { puts("setup: software context"); return 0; }
+static int make_contexts(void) {
+    CGLPixelFormatAttribute accelerated[] = {kCGLPFAAccelerated,
+                                             kCGLPFAPBuffer,
+                                             kCGLPFAColorSize,
+                                             24,
+                                             kCGLPFAAlphaSize,
+                                             8,
+                                             kCGLPFADepthSize,
+                                             24,
+                                             kCGLPFAStencilSize,
+                                             8,
+                                             0};
+    CGLPixelFormatAttribute software[] = {kCGLPFARendererID,
+                                          kCGLRendererGenericFloatID,
+                                          kCGLPFAOffScreen,
+                                          kCGLPFAColorSize,
+                                          32,
+                                          kCGLPFAAlphaSize,
+                                          8,
+                                          kCGLPFADepthSize,
+                                          24,
+                                          kCGLPFAStencilSize,
+                                          8,
+                                          0};
+    CGLPixelFormatObj pf;
+    CGLPBufferObj pbuffer;
+    long n, screen = 0; /* long: the Mac OS X 10.4 CGL signatures */
+    if (CGLChoosePixelFormat(accelerated, &pf, &n) || !pf) {
+        puts("setup: no accelerated pbuffer format");
+        return 0;
+    }
+    if (CGLCreateContext(pf, NULL, &ctx[0]) || CGLCreatePBuffer(W, H, GL_TEXTURE_2D, GL_RGBA, 0, &pbuffer)) {
+        puts("setup: accelerated context");
+        return 0;
+    }
+    CGLDestroyPixelFormat(pf);
+    CGLGetVirtualScreen(ctx[0], &screen);
+    if (CGLSetPBuffer(ctx[0], pbuffer, 0, 0, screen)) {
+        puts("setup: pbuffer");
+        return 0;
+    }
+    if (CGLChoosePixelFormat(software, &pf, &n) || !pf) {
+        puts("setup: no software format");
+        return 0;
+    }
+    if (CGLCreateContext(pf, NULL, &ctx[1]) || CGLSetOffScreen(ctx[1], W, H, W * 4, soft)) {
+        puts("setup: software context");
+        return 0;
+    }
     CGLDestroyPixelFormat(pf);
     return 1;
 }
@@ -866,16 +1333,24 @@ static int make_contexts(void)
 #define kCGLCPGPUVertexProcessing 311
 #endif
 /* --gpu-state: whether the accelerated renderer reports the polygon modes processed on the GPU (CGL), after one draw. */
-static void gpu_state(void)
-{
-    static const struct { const char *name; GLenum face, mode; } s[] = { { "fill", GL_FRONT_AND_BACK, GL_FILL },
-        { "line", GL_FRONT_AND_BACK, GL_LINE }, { "point", GL_FRONT_AND_BACK, GL_POINT }, { "front-line", GL_FRONT, GL_LINE } };
+static void gpu_state(void) {
+    static const struct {
+        const char *name;
+        GLenum face, mode;
+    } s[] = {{"fill", GL_FRONT_AND_BACK, GL_FILL},
+             {"line", GL_FRONT_AND_BACK, GL_LINE},
+             {"point", GL_FRONT_AND_BACK, GL_POINT},
+             {"front-line", GL_FRONT, GL_LINE}};
     int i;
     CGLSetCurrentContext(ctx[0]);
     for (i = 0; i < 4; i++) {
         long v = -1, f = -1;
-        reset(); glPolygonMode(s[i].face, s[i].mode); fan_of_triangles(); glFlush();
-        CGLGetParameter(ctx[0], kCGLCPGPUVertexProcessing, &v); CGLGetParameter(ctx[0], kCGLCPGPUFragmentProcessing, &f);
+        reset();
+        glPolygonMode(s[i].face, s[i].mode);
+        fan_of_triangles();
+        glFlush();
+        CGLGetParameter(ctx[0], kCGLCPGPUVertexProcessing, &v);
+        CGLGetParameter(ctx[0], kCGLCPGPUFragmentProcessing, &f);
         printf("gpu-state %s: vertex %ld fragment %ld error 0x%x\n", s[i].name, v, f, (unsigned)glGetError());
     }
 }
@@ -883,59 +1358,110 @@ static void gpu_state(void)
 /* --msaa: a multisampled full-screen context (as games use for FSAA; Tiger's pbuffers have no sample buffers) for each
  * sample count the driver offers; one tilted triangle, then the pixels along its edges with a colour between the
  * triangle's and the background's in the back buffer (0 without antialiasing). */
-static void msaa(void)
-{
-    static const long counts[] = { 2, 4, 6 };
+static void msaa(void) {
+    static const long counts[] = {2, 4, 6};
     static unsigned char a[W * H * 4];
     CGDirectDisplayID display = CGMainDisplayID();
     int i, j;
-    if (CGDisplayCapture(display)) { puts("msaa: display not captured"); return; }
+    if (CGDisplayCapture(display)) {
+        puts("msaa: display not captured");
+        return;
+    }
     for (i = 0; i < 3; i++) {
-        CGLPixelFormatAttribute attr[] = { kCGLPFAFullScreen, kCGLPFADisplayMask, (CGLPixelFormatAttribute)CGDisplayIDToOpenGLDisplayMask(display),
-                                           kCGLPFADoubleBuffer, kCGLPFAAccelerated, kCGLPFAColorSize, 24, kCGLPFAAlphaSize, 8, kCGLPFADepthSize, 24,
-                                           kCGLPFASampleBuffers, 1, kCGLPFASamples, (CGLPixelFormatAttribute)counts[i], 0 };
-        CGLPixelFormatObj pf = NULL; CGLContextObj c = NULL; long n = 0; GLint sb = -1, sm = -1; unsigned mixed = 0;
-        if (CGLChoosePixelFormat(attr, &pf, &n) || !pf) { printf("msaa %ld: no pixel format\n", counts[i]); continue; }
-        if (CGLCreateContext(pf, NULL, &c)) { printf("msaa %ld: no context\n", counts[i]); CGLDestroyPixelFormat(pf); continue; }
+        CGLPixelFormatAttribute attr[] = {kCGLPFAFullScreen,
+                                          kCGLPFADisplayMask,
+                                          (CGLPixelFormatAttribute)CGDisplayIDToOpenGLDisplayMask(display),
+                                          kCGLPFADoubleBuffer,
+                                          kCGLPFAAccelerated,
+                                          kCGLPFAColorSize,
+                                          24,
+                                          kCGLPFAAlphaSize,
+                                          8,
+                                          kCGLPFADepthSize,
+                                          24,
+                                          kCGLPFASampleBuffers,
+                                          1,
+                                          kCGLPFASamples,
+                                          (CGLPixelFormatAttribute)counts[i],
+                                          0};
+        CGLPixelFormatObj pf = NULL;
+        CGLContextObj c = NULL;
+        long n = 0;
+        GLint sb = -1, sm = -1;
+        unsigned mixed = 0;
+        if (CGLChoosePixelFormat(attr, &pf, &n) || !pf) {
+            printf("msaa %ld: no pixel format\n", counts[i]);
+            continue;
+        }
+        if (CGLCreateContext(pf, NULL, &c)) {
+            printf("msaa %ld: no context\n", counts[i]);
+            CGLDestroyPixelFormat(pf);
+            continue;
+        }
         CGLDestroyPixelFormat(pf);
-        if (CGLSetCurrentContext(c) || CGLSetFullScreen(c)) { printf("msaa %ld: no full-screen drawable\n", counts[i]); CGLSetCurrentContext(NULL); CGLDestroyContext(c); continue; }
-        glGetIntegerv(GL_SAMPLE_BUFFERS_ARB, &sb); glGetIntegerv(GL_SAMPLES_ARB, &sm);
-        reset(); glEnable(GL_MULTISAMPLE_ARB); glColor3f(1, 1, 1);
-        glBegin(GL_TRIANGLES); glVertex2f(10, 20); glVertex2f(118, 6); glVertex2f(40, 120); glEnd(); glFinish();
-        glReadBuffer(GL_BACK); glPixelStorei(GL_PACK_ALIGNMENT, 1); glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, a);
-        for (j = 0; j < W * H; j++) mixed += a[j * 4 + 1] > 51 + 8 && a[j * 4 + 1] < 255 - 8;   /* green: background 51, triangle 255 */
+        if (CGLSetCurrentContext(c) || CGLSetFullScreen(c)) {
+            printf("msaa %ld: no full-screen drawable\n", counts[i]);
+            CGLSetCurrentContext(NULL);
+            CGLDestroyContext(c);
+            continue;
+        }
+        glGetIntegerv(GL_SAMPLE_BUFFERS_ARB, &sb);
+        glGetIntegerv(GL_SAMPLES_ARB, &sm);
+        reset();
+        glEnable(GL_MULTISAMPLE_ARB);
+        glColor3f(1, 1, 1);
+        glBegin(GL_TRIANGLES);
+        glVertex2f(10, 20);
+        glVertex2f(118, 6);
+        glVertex2f(40, 120);
+        glEnd();
+        glFinish();
+        glReadBuffer(GL_BACK);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, a);
+        for (j = 0; j < W * H; j++)
+            mixed += a[j * 4 + 1] > 51 + 8 && a[j * 4 + 1] < 255 - 8; /* green: background 51, triangle 255 */
         printf("msaa %ld %s: sample buffers %d samples %d, edge pixels with mixed colour %u, error 0x%x\n", counts[i],
-               sb == 1 && sm == counts[i] && mixed >= 100 ? "pass" : "FAIL", (int)sb, (int)sm, mixed, (unsigned)glGetError());
-        CGLSetCurrentContext(NULL); CGLClearDrawable(c); CGLDestroyContext(c);
+               sb == 1 && sm == counts[i] && mixed >= 100 ? "pass" : "FAIL", (int)sb, (int)sm, mixed,
+               (unsigned)glGetError());
+        CGLSetCurrentContext(NULL);
+        CGLClearDrawable(c);
+        CGLDestroyContext(c);
     }
     CGDisplayRelease(display);
 }
 
 /* --upload: a format case's texture at 512 x 512, uploaded again and drawn in the accelerated context until SECONDS
  * pass, so the driver's conversion of the texels is the hottest guest code (PT_PROF). */
-static void upload_loop(const char *id, int seconds)
-{
+static void upload_loop(const char *id, int seconds) {
     static unsigned char big[512 * 512 * 8];
-    int i, k = -1, n = 0; unsigned seed = 1, v; GLuint tex; time_t end;
-    for (i = 0; i < (int)(sizeof fmts / sizeof fmts[0]); i++) if (!strcmp(fmts[i].id, id)) k = i;
-    if (k < 0 || fmts[k].csize || fmts[k].target != T2) { printf("upload: no uncompressed 2D format case %s\n", id); return; }
-    for (i = 0; i < (int)sizeof big; i++) {
-        seed = seed * 1664525u + 1013904223u; v = seed >> 24;
-        if (fmts[k].rep == 4) v = (v >> 4) * 17;
-        else if (fmts[k].rep == 5 && i % 4 == 3) v = v & 1 ? 255 : 0;
-        else if (fmts[k].rep == 5 || fmts[k].rep == 55) v = (v & 0xf8) | v >> 5;
-        big[i] = (unsigned char)v;
+    int i, k = -1, n = 0;
+    GLuint tex;
+    time_t end;
+    for (i = 0; i < (int)(sizeof fmts / sizeof fmts[0]); i++)
+        if (!strcmp(fmts[i].id, id))
+            k = i;
+    if (k < 0 || fmts[k].csize || fmts[k].target != T2) {
+        printf("upload: no uncompressed 2D format case %s\n", id);
+        return;
     }
-    CGLSetCurrentContext(ctx[0]); reset();
-    glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    texels(big, sizeof big, 1, fmts[k].rep);
+    CGLSetCurrentContext(ctx[0]);
+    reset();
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, fmts[k].internal, 512, 512, 0, fmts[k].format, fmts[k].type, big);
-    glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
     end = time(NULL) + seconds;
     while (time(NULL) < end) {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 512, 512, fmts[k].format, fmts[k].type, big);
-        textured_quad(0, 0, 8, 8, 0, 0, 1, 1); glFinish(); n++;
+        textured_quad(0, 0, 8, 8, 0, 0, 1, 1);
+        glFinish();
+        n++;
     }
     printf("upload %s: %d uploads of 512 x 512 in %d s, error 0x%x\n", id, n, seconds, (unsigned)glGetError());
 }
@@ -943,34 +1469,45 @@ static void upload_loop(const char *id, int seconds)
 /* --alpha: RGBA bytes (5 bits replicated, alpha 0 or 255) as GL_RGB5_A1 textures of several widths by 8 rows, drawn
  * texel for texel and read back; each texel against its own bytes (colour within 1, alpha exact), even and odd columns
  * counted apart: Tiger's conversion to 1555 can pack two texels at a time. */
-static void alpha_check(void)
-{
-    static const int widths[] = { 4, 8, 12, 16, 24, 32, 64, 128, 512 };
+static void alpha_check(void) {
+    static const int widths[] = {4, 8, 12, 16, 24, 32, 64, 128, 512};
     static unsigned char src[512 * 8 * 4], out[128 * 8 * 4];
-    int w, i, x, y, c, bad[2], shown; unsigned seed = 99, v; GLuint tex;
-    for (i = 0; i < (int)sizeof src; i++) {
-        seed = seed * 1664525u + 1013904223u; v = seed >> 24;
-        src[i] = (unsigned char)(i % 4 == 3 ? (v & 1 ? 255 : 0) : (v & 0xf8) | v >> 5);
-    }
+    int w, x, y, c, bad[2], shown;
+    GLuint tex;
+    texels(src, sizeof src, 99, 5);
     CGLSetCurrentContext(ctx[0]);
     for (w = 0; w < (int)(sizeof widths / sizeof widths[0]); w++) {
         int width = widths[w], cols = width < 128 ? width : 128;
-        reset(); glGenTextures(1, &tex); glBindTexture(GL_TEXTURE_2D, tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        reset();
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, width, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, src);
-        glEnable(GL_TEXTURE_2D); glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        glEnable(GL_TEXTURE_2D);
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
         textured_quad(0, 0, (float)cols, 8, 0, 0, (float)cols / width, 1);
-        glFinish(); glPixelStorei(GL_PACK_ALIGNMENT, 1); glReadPixels(0, 0, cols, 8, GL_RGBA, GL_UNSIGNED_BYTE, out);
-        bad[0] = bad[1] = 0; shown = 0;
-        for (y = 0; y < 8; y++) for (x = 0; x < cols; x++) {
-            const unsigned char *s = src + (y * width + x) * 4, *o = out + (y * cols + x) * 4; int e = o[3] != s[3];
-            for (c = 0; c < 3; c++) e |= abs(o[c] - s[c]) > 1;
-            if (!e) continue;
-            bad[x & 1]++;
-            if (shown++ < 3) printf("  width %d texel %d,%d bytes %02x %02x %02x %02x read %02x %02x %02x %02x\n", width, x, y, s[0], s[1], s[2], s[3], o[0], o[1], o[2], o[3]);
-        }
-        printf("alpha width %d: %d texels, %d in even and %d in odd columns differ, error 0x%x\n", width, cols * 8, bad[0], bad[1], (unsigned)glGetError());
+        glFinish();
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, cols, 8, GL_RGBA, GL_UNSIGNED_BYTE, out);
+        bad[0] = bad[1] = 0;
+        shown = 0;
+        for (y = 0; y < 8; y++)
+            for (x = 0; x < cols; x++) {
+                const unsigned char *s = src + (y * width + x) * 4, *o = out + (y * cols + x) * 4;
+                int e = o[3] != s[3];
+                for (c = 0; c < 3; c++)
+                    e |= abs(o[c] - s[c]) > 1;
+                if (!e)
+                    continue;
+                bad[x & 1]++;
+                if (shown++ < 3)
+                    printf("  width %d texel %d,%d bytes %02x %02x %02x %02x read %02x %02x %02x %02x\n", width, x, y,
+                           s[0], s[1], s[2], s[3], o[0], o[1], o[2], o[3]);
+            }
+        printf("alpha width %d: %d texels, %d in even and %d in odd columns differ, error 0x%x\n", width, cols * 8,
+               bad[0], bad[1], (unsigned)glGetError());
         glDeleteTextures(1, &tex);
     }
 }
@@ -979,96 +1516,199 @@ static void alpha_check(void)
  * accelerated context, for the engine's OPTICS_TEXTURE_DUMP: 8888, 565, 8-bit luminance, DXT1, DXT5 at 64 x 64,
  * 256 x 256 and 64 x 16. 8888: x, y, level, 0x5a; 565: x | y << 6 | level << 12; luminance: x + 7y + 50 level;
  * blocks: x, y, level, 0x5a, then 0xa4, 0xa5, ... */
-static void layout_textures(void)
-{
-    static const struct { GLenum internal, format, type; int bytes, block; } f[] = {
-        { GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 4, 0 }, { GL_RGB5, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 2, 0 },
-        { GL_LUMINANCE8, GL_LUMINANCE, GL_UNSIGNED_BYTE, 1, 0 }, { GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 0, 8, 1 },
-        { GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 0, 16, 1 } };
-    static const int size[3][2] = { {64, 64}, {256, 256}, {64, 16} };
+static void layout_textures(void) {
+    static const struct {
+        GLenum internal, format, type;
+        int bytes, block;
+    } f[] = {{GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 4, 0},
+             {GL_RGB5, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 2, 0},
+             {GL_LUMINANCE8, GL_LUMINANCE, GL_UNSIGNED_BYTE, 1, 0},
+             {GL_COMPRESSED_RGB_S3TC_DXT1_EXT, 0, 0, 8, 1},
+             {GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, 0, 0, 16, 1}};
+    static const int size[3][2] = {{64, 64}, {256, 256}, {64, 16}};
     static unsigned char t[256 * 256 * 4];
     int i, j, level, w, h, x, y, k;
     CGLSetCurrentContext(ctx[0]);
-    for (i = 0; i < 5; i++) for (j = 0; j < 3; j++) {
-        GLuint id; reset();
-        glGenTextures(1, &id); glBindTexture(GL_TEXTURE_2D, id); glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        for (level = 0, w = size[j][0], h = size[j][1]; ; level++, w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1) {
-            if (f[i].block) {
-                int bw = (w + 3) / 4, bh = (h + 3) / 4;
-                for (y = 0; y < bh; y++) for (x = 0; x < bw; x++) { unsigned char *b = t + (y * bw + x) * f[i].bytes;
-                    for (k = 0; k < f[i].bytes; k++) b[k] = (unsigned char)(0xa0 + k);
-                    b[0] = (unsigned char)x; b[1] = (unsigned char)y; b[2] = (unsigned char)level; b[3] = 0x5a; }
-                glCompressedTexImage2D(GL_TEXTURE_2D, level, f[i].internal, w, h, 0, bw * bh * f[i].bytes, t);
-            } else {
-                for (y = 0; y < h; y++) for (x = 0; x < w; x++) { unsigned char *p = t + (y * w + x) * f[i].bytes;
-                    if (f[i].bytes == 4) { p[0] = (unsigned char)x; p[1] = (unsigned char)y; p[2] = (unsigned char)level; p[3] = 0x5a; }
-                    else if (f[i].bytes == 2) { unsigned v = (unsigned)(x & 63) | (unsigned)(y & 63) << 6 | (unsigned)level << 12; p[0] = (unsigned char)(v >> 8); p[1] = (unsigned char)v; }
-                    else p[0] = (unsigned char)(x + 7 * y + 50 * level); }
-                glTexImage2D(GL_TEXTURE_2D, level, f[i].internal, w, h, 0, f[i].format, f[i].type, t);
+    for (i = 0; i < 5; i++)
+        for (j = 0; j < 3; j++) {
+            GLuint id;
+            reset();
+            glGenTextures(1, &id);
+            glBindTexture(GL_TEXTURE_2D, id);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            for (level = 0, w = size[j][0], h = size[j][1];; level++, w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1) {
+                if (f[i].block) {
+                    int bw = (w + 3) / 4, bh = (h + 3) / 4;
+                    for (y = 0; y < bh; y++)
+                        for (x = 0; x < bw; x++) {
+                            unsigned char *b = t + (y * bw + x) * f[i].bytes;
+                            for (k = 0; k < f[i].bytes; k++)
+                                b[k] = (unsigned char)(0xa0 + k);
+                            b[0] = (unsigned char)x;
+                            b[1] = (unsigned char)y;
+                            b[2] = (unsigned char)level;
+                            b[3] = 0x5a;
+                        }
+                    glCompressedTexImage2D(GL_TEXTURE_2D, level, f[i].internal, w, h, 0, bw * bh * f[i].bytes, t);
+                } else {
+                    for (y = 0; y < h; y++)
+                        for (x = 0; x < w; x++) {
+                            unsigned char *p = t + (y * w + x) * f[i].bytes;
+                            if (f[i].bytes == 4) {
+                                p[0] = (unsigned char)x;
+                                p[1] = (unsigned char)y;
+                                p[2] = (unsigned char)level;
+                                p[3] = 0x5a;
+                            } else if (f[i].bytes == 2) {
+                                unsigned v = (unsigned)(x & 63) | (unsigned)(y & 63) << 6 | (unsigned)level << 12;
+                                p[0] = (unsigned char)(v >> 8);
+                                p[1] = (unsigned char)v;
+                            } else
+                                p[0] = (unsigned char)(x + 7 * y + 50 * level);
+                        }
+                    glTexImage2D(GL_TEXTURE_2D, level, f[i].internal, w, h, 0, f[i].format, f[i].type, t);
+                }
+                if (w == 1 && h == 1)
+                    break;
             }
-            if (w == 1 && h == 1) break;
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glEnable(GL_TEXTURE_2D);
+            textured_quad(0, 0, 64, 64, 0, 0, 1, 1);
+            glDisable(GL_TEXTURE_2D);
+            glFinish();
+            printf("layout %d x %d format %d drawn\n", size[j][0], size[j][1], i);
+            glDeleteTextures(1, &id);
         }
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glEnable(GL_TEXTURE_2D); textured_quad(0, 0, 64, 64, 0, 0, 1, 1); glDisable(GL_TEXTURE_2D); glFinish();
-        printf("layout %d x %d format %d drawn\n", size[j][0], size[j][1], i);
-        glDeleteTextures(1, &id);
-    }
 }
 
 /* One case: drawn into both contexts (or into the accelerated one, against its expected image), read back, compared and
  * printed; 1 if it failed. */
-static int run_case(const Case *c, const char *out)
-{
-    int missing = 0, maxd = 0, k, r; unsigned bad; GLenum error[2];
-    for (r = 0; r < (c->expect ? 1 : 2); r++) { CGLSetCurrentContext(ctx[r]); if (c->needs && !has_extension(c->needs)) missing |= 1 << r; }
-    if (missing) { printf("%s skip %s missing in%s%s\n", c->id, c->needs, missing & 1 ? " accelerated" : "", missing & 2 ? " software" : ""); return 0; }
-    error[1] = 0; if (c->expect) c->expect(img[1]);
+static int run_case(const Case *c, const char *out) {
+    int missing = 0, maxd = 0, k, r;
+    unsigned bad;
+    GLenum error[2];
     for (r = 0; r < (c->expect ? 1 : 2); r++) {
-        renderer = r; CGLSetCurrentContext(ctx[r]);
-        c->draw(); glFinish();
+        CGLSetCurrentContext(ctx[r]);
+        if (c->needs && !has_extension(c->needs))
+            missing |= 1 << r;
+    }
+    if (missing) {
+        printf("%s skip %s missing in%s%s\n", c->id, c->needs, missing & 1 ? " accelerated" : "",
+               missing & 2 ? " software" : "");
+        return 0;
+    }
+    error[1] = 0;
+    if (c->expect)
+        c->expect(img[1]);
+    for (r = 0; r < (c->expect ? 1 : 2); r++) {
+        CGLSetCurrentContext(ctx[r]);
+        c->draw();
+        glFinish();
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, img[r]);
-        if (c->depth) glReadPixels(0, 0, W, H, GL_DEPTH_COMPONENT, GL_FLOAT, depth[r]);
+        if (c->depth)
+            glReadPixels(0, 0, W, H, GL_DEPTH_COMPONENT, GL_FLOAT, depth[r]);
         error[r] = glGetError();
     }
-    if (c->fixup) c->fixup(img[1]);
+    if (c->fixup)
+        c->fixup(img[1]);
     bad = unmatched(img[0], img[1], c->tol, &maxd) + unmatched(img[1], img[0], c->tol, &maxd);
-    if (c->depth) bad += depth_unmatched(depth[0], depth[1]) + depth_unmatched(depth[1], depth[0]);
-    if (c->depth && bad) printf("%s depth ATI/SW at (2,2) %g/%g (64,64) %g/%g (110,110) %g/%g\n", c->id, depth[0][2 * W + 2], depth[1][2 * W + 2],
-        depth[0][64 * W + 64], depth[1][64 * W + 64], depth[0][110 * W + 110], depth[1][110 * W + 110]);
+    if (c->depth)
+        bad += depth_unmatched(depth[0], depth[1]) + depth_unmatched(depth[1], depth[0]);
+    if (c->depth && bad)
+        printf("%s depth ATI/SW at (2,2) %g/%g (64,64) %g/%g (110,110) %g/%g\n", c->id, depth[0][2 * W + 2],
+               depth[1][2 * W + 2], depth[0][64 * W + 64], depth[1][64 * W + 64], depth[0][110 * W + 110],
+               depth[1][110 * W + 110]);
     k = bad > c->allow || error[0] || error[1];
     printf("%s %s unmatched=%u maxdiff=%d lit=%u/%u", c->id, k ? "FAIL" : "pass", bad, maxd, lit(img[0]), lit(img[1]));
-    if (error[0] || error[1]) printf(" glerror=0x%x/0x%x", (unsigned)error[0], (unsigned)error[1]);
-    if (k) { int m[4] = { 0, 0, 0, 0 }, j, ch;
-        for (j = 0; j < W * H; j++) for (ch = 0; ch < 4; ch++) { int e = abs(img[0][j * 4 + ch] - img[1][j * 4 + ch]); if (e > m[ch]) m[ch] = e; }
-        printf(" channels=%d/%d/%d/%d", m[0], m[1], m[2], m[3]); }
-    putchar('\n'); fflush(stdout);
-    if (out) { ppm(out, c->id, "ati", img[0]); ppm(out, c->id, "sw", img[1]); }
+    if (error[0] || error[1])
+        printf(" glerror=0x%x/0x%x", (unsigned)error[0], (unsigned)error[1]);
+    if (k) {
+        int m[4] = {0, 0, 0, 0}, j, ch;
+        for (j = 0; j < W * H; j++)
+            for (ch = 0; ch < 4; ch++) {
+                int e = abs(img[0][j * 4 + ch] - img[1][j * 4 + ch]);
+                if (e > m[ch])
+                    m[ch] = e;
+            }
+        printf(" channels=%d/%d/%d/%d", m[0], m[1], m[2], m[3]);
+    }
+    putchar('\n');
+    fflush(stdout);
+    if (out) {
+        ppm(out, c->id, "ati", img[0]);
+        ppm(out, c->id, "sw", img[1]);
+    }
     return k;
 }
 
-int main(int argc, char **argv)
-{
-    const char *out = NULL; int first = 1, failures = 0, nc = (int)(sizeof cases / sizeof cases[0]), i, k, r;
+int main(int argc, char **argv) {
+    const char *out = NULL;
+    int first = 1, failures = 0, nc = (int)(sizeof cases / sizeof cases[0]), i, k, r;
     int nf = (int)(sizeof fmts / sizeof fmts[0]), nm = (int)(sizeof mips / sizeof mips[0]);
-    if (argc > 2 && !strcmp(argv[1], "--out")) { out = argv[2]; first = 3; }
-    if (!make_contexts()) return 2;
-    if (argc > first && !strcmp(argv[first], "--gpu-state")) { gpu_state(); return 0; }
-    if (argc > first && !strcmp(argv[first], "--msaa")) { msaa(); return 0; }
-    if (argc > first + 2 && !strcmp(argv[first], "--upload")) { upload_loop(argv[first + 1], atoi(argv[first + 2])); return 0; }
-    if (argc > first && !strcmp(argv[first], "--alpha")) { alpha_check(); return 0; }
-    if (argc > first && !strcmp(argv[first], "--layout")) { layout_textures(); return 0; }
-    for (r = 0; r < 2; r++) { CGLSetCurrentContext(ctx[r]); printf("renderer %d: %s | %s\n", r, (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION)); }
-    CGLSetCurrentContext(ctx[0]); printf("extensions 0: %s\n", (const char *)glGetString(GL_EXTENSIONS));
+    if (argc > 2 && !strcmp(argv[1], "--out")) {
+        out = argv[2];
+        first = 3;
+    }
+    if (!make_contexts())
+        return 2;
+    if (argc > first && !strcmp(argv[first], "--gpu-state")) {
+        gpu_state();
+        return 0;
+    }
+    if (argc > first && !strcmp(argv[first], "--msaa")) {
+        msaa();
+        return 0;
+    }
+    if (argc > first + 2 && !strcmp(argv[first], "--upload")) {
+        upload_loop(argv[first + 1], atoi(argv[first + 2]));
+        return 0;
+    }
+    if (argc > first && !strcmp(argv[first], "--alpha")) {
+        alpha_check();
+        return 0;
+    }
+    if (argc > first && !strcmp(argv[first], "--layout")) {
+        layout_textures();
+        return 0;
+    }
+    for (r = 0; r < 2; r++) {
+        CGLSetCurrentContext(ctx[r]);
+        printf("renderer %d: %s | %s\n", r, (const char *)glGetString(GL_RENDERER),
+               (const char *)glGetString(GL_VERSION));
+    }
+    CGLSetCurrentContext(ctx[0]);
+    printf("extensions 0: %s\n", (const char *)glGetString(GL_EXTENSIONS));
     for (i = 0; i < nc + nf + nm; i++) {
-        Case f; const Case *c = &f; int selected = first >= argc;
+        Case f;
+        const Case *c = &f;
+        int selected = first >= argc;
         memset(&f, 0, sizeof f);
-        if (i < nc) c = &cases[i];
-        else if (i < nc + nf) { f.id = fmts[i - nc].id; f.draw = s_format; f.tol = fmts[i - nc].tol; f.needs = fmts[i - nc].needs; f.fixup = fmts[i - nc].pairs ? pair_alpha : NULL; arg = i - nc; }
-        else { f.id = mips[i - nc - nf].id; f.draw = s_mip; f.tol = mips[i - nc - nf].tol; mip_arg = i - nc - nf; }
-        for (k = first; k < argc; k++) if (!strncmp(c->id, argv[k], strlen(argv[k]))) selected = 1;
-        if (selected && run_case(c, out)) { failures++; if (i >= nc && i < nc + nf) explain_format(i - nc, c->tol); }
+        if (i < nc)
+            c = &cases[i];
+        else if (i < nc + nf) {
+            f.id = fmts[i - nc].id;
+            f.draw = s_format;
+            f.tol = fmts[i - nc].tol;
+            f.needs = fmts[i - nc].needs;
+            f.fixup = fmts[i - nc].pairs ? pair_alpha : NULL;
+            arg = i - nc;
+        } else {
+            f.id = mips[i - nc - nf].id;
+            f.draw = s_mip;
+            f.tol = mips[i - nc - nf].tol;
+            mip_arg = i - nc - nf;
+        }
+        for (k = first; k < argc; k++)
+            if (!strncmp(c->id, argv[k], strlen(argv[k])))
+                selected = 1;
+        if (selected && run_case(c, out)) {
+            failures++;
+            if (i >= nc && i < nc + nf)
+                explain_format(i - nc, c->tol);
+        }
     }
     printf("failures %d\n", failures);
     return failures > 100 ? 100 : failures;

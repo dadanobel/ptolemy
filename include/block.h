@@ -3,7 +3,11 @@
 #define PT_BLOCK_H
 #include "platform.h"
 typedef struct PtBlock PtBlock;
-enum { PT_BLOCK_READ, PT_BLOCK_WRITE, PT_BLOCK_FLUSH };
+enum {
+    PT_BLOCK_READ,
+    PT_BLOCK_WRITE,
+    PT_BLOCK_FLUSH
+};
 typedef struct {
     uint64_t id, generation, offset;
     void *buffer;
@@ -24,7 +28,9 @@ PtBlock *pt_block_open(const char *path, int writable, PtEvent *completion);
  * never reach the file; FLUSH is a no-op. All overlays of a process share
  * PT_OVERLAY_MAX_MB (default 1024) of distinct written pages; a write that
  * would exceed it fails whole with EIO before any data changes. */
-enum { PT_BLOCK_OVERLAY = 2 };
+enum {
+    PT_BLOCK_OVERLAY = 2
+};
 /* Overlay only, before the first submit. On close: clonefile() the source to
  * a unique temporary name, write every page the guest wrote, then publish it
  * as path with RENAME_EXCL; an existing path is never replaced. */
@@ -36,7 +42,7 @@ int pt_block_set_save(PtBlock *, const char *path);
 PtBlock *pt_block_open_optical(const char *path, PtEvent *completion);
 uint64_t pt_block_size(const PtBlock *);
 /* Install before the first submit. Cell must outlive close(). */
-void pt_block_set_kick(PtBlock *,_Atomic uint32_t *);
+void pt_block_set_kick(PtBlock *, _Atomic uint32_t *);
 /* Returns errno: 0, EAGAIN (bounded queue/contended short mutex), EINVAL... */
 int pt_block_submit(PtBlock *, const PtBlockRequest *);
 /* 1 = completed, 0 = none, negative errno = retry/error.

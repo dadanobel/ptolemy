@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Explicit offline disk preparation. Never opens the source for writing."""
+
 import argparse
 import ctypes
 import json
 import os
 import pathlib
-import sys
 
 
 def clone(source, dest):
-    if sys.platform != "darwin":
-        raise RuntimeError("clonefile requires macOS")
     lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
     fn = lib.clonefile
     fn.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
@@ -40,11 +38,15 @@ def main():
     out = a.destination / "disk.raw"
     clone(source, out)
     after = source.stat()
-    stable = (before.st_size, before.st_mtime_ns, before.st_ino) == (
-        after.st_size, after.st_mtime_ns, after.st_ino)
-    result = {"action": a.action, "source": str(source), "output": str(out),
-              "source_metadata_unchanged": stable, "virtual_bytes": out.stat().st_size,
-              "allocated_bytes": out.stat().st_blocks * 512}
+    stable = (before.st_size, before.st_mtime_ns, before.st_ino) == (after.st_size, after.st_mtime_ns, after.st_ino)
+    result = {
+        "action": a.action,
+        "source": str(source),
+        "output": str(out),
+        "source_metadata_unchanged": stable,
+        "virtual_bytes": out.stat().st_size,
+        "allocated_bytes": out.stat().st_blocks * 512,
+    }
     (a.destination / "receipt.json").write_text(json.dumps(result, indent=2) + "\n")
     if not stable:
         raise RuntimeError("source changed during operation; output is not a verified snapshot")

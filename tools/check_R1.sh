@@ -5,7 +5,13 @@ cd "$(dirname "$0")/.."
 mkdir -p build/r1
 clang -std=c11 -D_DARWIN_C_SOURCE -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/r1-export.c src/export.c -pthread -o build/r1/test-export
 ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/r1/test-export
-sh tools/build-product.sh --test
+# The product self-test, from a copy of build-product.sh rooted in build/r1/product: build/Ptolemy.app stays as it is.
+p=build/r1/product
+mkdir -p "$p/tools"
+cp tools/build-product.sh "$p/tools/"
+ln -sfn "$PWD/product" "$p/product"
+ln -sfn "$PWD/assets" "$p/assets"
+PT_PRODUCT_ENGINE= PT_PRODUCT_ROM= PT_PRODUCT_TOOLS= sh "$p/tools/build-product.sh" --test
 CF='-std=c11 -D_DARWIN_C_SOURCE -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined'
 clang $CF -Iinclude tests/r1-input.c -framework CoreFoundation -o build/r1/test-input
 ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/r1/test-input

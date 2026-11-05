@@ -12,7 +12,7 @@ system_profiler SPDisplaysDataType > "$D/native-display.txt"
 } > "$D/valve/bench_native.cfg"
 "$D/Half-Life.app/Contents/MacOS/xash3d" -nomsgbox -nosound -ref gl -width 800 -height 600 -fullscreen +map c0a0 +exec bench_native.cfg > "$D/native-stdout.txt" 2>&1
 L="$D/last-run.log"
-if [ -n "$L" ]; then
+if [ -f "$L" ]; then
   cp "$L" "$D/native-game.log"
   tr -d '\033' < "$L" | grep 'timerefresh:' > "$D/native-fps.txt"
 fi

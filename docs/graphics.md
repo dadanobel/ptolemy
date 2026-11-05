@@ -1,6 +1,6 @@
 # Graphics
 
-Optics models an ATI Radeon 9700 (R300) for Tiger's own ATI driver and renders with Metal
+Optics models an ATI Radeon 9700 (R300) for Mac OS X's own ATI driver (Tiger and Leopard) and renders with Metal
 ([metal.md](metal.md) describes how). This page lists what it covers, what it does not cover yet, and how it is
 checked.
 
@@ -41,7 +41,7 @@ checked.
 | Feature | Effect |
 |---|---|
 | The R300's 3- and 6-sample modes and its sample positions | Drawn with 4 samples; Metal's own sample positions where the R300's cannot be set exactly |
-| CPU reads of a multisampled depth buffer | Not exported; the CPU sees the bytes in video memory |
+| CPU reads of a multisampled depth buffer | Exported only for 2 samples (the tiled D24S8 layout Leopard's driver reads, as in Chess); other sample counts are not exported and the CPU sees the bytes in video memory |
 
 Signed texture components (`TX_FORMAT1` SIGNED bits) are read as unsigned. Tiger's OpenGL on this card offers no
 signed texture format: no extension in its list provides one (`gl-features` prints the list), so a program cannot

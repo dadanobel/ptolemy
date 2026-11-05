@@ -6,8 +6,8 @@ the engine opens its own window.
 ## The machine
 
 A PowerBook5,8 (2005 PowerBook G4): G4 7447A at 1.67 GHz on a 167 MHz bus, 512 KiB L2, 2 GB of memory and a
-25 MHz time base. A G3 750 and a G4 7400 can be chosen instead (`--cpu`). Tiger sees this machine in System
-Profiler and `sysctl`.
+25 MHz time base. A G3 750 and a G4 7400 can be chosen instead (`--cpu`; Leopard needs a G4). Mac OS X sees this
+machine in System Profiler and `sysctl`.
 
 | Part | Model | Source |
 |---|---|---|
@@ -17,7 +17,7 @@ Profiler and `sysctl`.
 | Storage | ATA disk, ATAPI CD/DVD-RW combo drive (SCSI/MMC commands), USB mass storage | `src/ata.c`, `src/atapi.c`, `src/scsi.c`, `src/usb_msc.c` |
 | USB | OHCI with HID keyboard, absolute tablet and relative mouse | `src/ohci.c`, `src/hid.c`, `src/input.c` |
 | Network | RTL8139 with user-mode NAT (no privileges) or vmnet | `src/net_rtl.c`, `src/net_user.c`, `src/net_macos.m` |
-| NVRAM | Open Firmware and Mac OS partitions, saved next to the disk | `src/nvram.c` |
+| NVRAM | Core99 flash (two banks) with the Open Firmware and Mac OS partitions, saved next to the disk | `src/nvram.c` |
 | Graphics | Optics (below) | `src/optics/` |
 
 Disks are sparse bundles, so copies are APFS clones that cost almost no space. `--overlay` keeps the guest's writes
@@ -58,11 +58,12 @@ built from `guest/ndrv/`) in the screen node and boots Tiger's BootX from the di
 The display driver gives Tiger display modes up to the window's size at 8, 16 and 32 bits, a colour table, a
 64 × 64 hardware cursor and gamma; it reaches the engine through a private instruction.
 
-## Inside Tiger: Ptolemy Tools
+## Inside Mac OS X: Ptolemy Tools
 
-Ptolemy Agent (`guest/agent/`) runs in Tiger's menu bar and talks to the engine through an authenticated hypercall
-channel. It carries the clipboard, file transfers in both directions, the window's Restart and Shut Down (Tiger
-shuts down as if from its Apple menu) and diagnostics. Ptolemy.app installs it into every new machine.
+Ptolemy Agent (`guest/agent/`) runs in the menu bar of Tiger and Leopard and talks to the engine through an
+authenticated hypercall channel. It carries the clipboard, file transfers in both directions, the window's Restart
+and Shut Down (Tiger shuts down as if from its Apple menu) and diagnostics; in Leopard it also keeps the system from
+sleeping on its own. Ptolemy.app installs it into every new machine.
 
 ## The window
 

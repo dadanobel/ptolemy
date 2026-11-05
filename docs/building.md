@@ -1,7 +1,7 @@
 # Building
 
 Ptolemy has four parts that are built separately: the engine, the firmware ROM, Ptolemy Tools (which run inside
-Tiger) and the app.
+Tiger and Leopard) and the app.
 
 ## The engine
 
@@ -59,5 +59,22 @@ It needs macOS 15 Sequoia or later.
 
 ## Tests
 
-`sh build.sh --test` runs the device, CPU and Optics tests that need no guest. `tests/` also holds tests that need a
-running Tiger or a Linux AArch64 host; [epicycle/README.md](../epicycle/README.md) describes the CPU engine's.
+`sh build.sh` already runs the checks in `tools/build-optics.sh`: `tools/check_R1.sh` (export, input, YUV, network,
+TCP and web tests, the product self-test, mutation controls), `tools/check_S4.py` (device contracts), the pointer tests,
+`tools/build-network.sh` and the Optics draw-decode, fence, CP-thread, draw-defer and HVF guard tests
+(`OPTICS_NO_TESTS=1` skips these), then the link audit. `sh build.sh --test` also runs `tools/test-optics-contracts.py`
+(the native Optics and Metal contracts, `tests/fp-range-oracle.py`, `tools/check_VAP.py`), the NVRAM, Classic and
+Leopard checks (`tools/check-nvram.sh`, `tests/classic-soak.py`, `tools/check-leopard-closeout.sh`), the unit tests
+that `build.sh` builds and `tests/g4-coverage.py`. With `PT_BUILD_970=1 PT_G5_TESTS=1` it also builds the experimental
+G5 core and runs its checks (`experimental/g5/`).
+
+Neither runs `tools/build-perf.sh --run-unit` (the JIT and FPSCR fixtures) or `tests/altivec-compare.py`, although
+`build.sh` builds its runner. `tests/` also holds tests that need a running Tiger or a Linux AArch64 host;
+[epicycle/README.md](../epicycle/README.md) describes the CPU engine's.
+
+## Code style
+
+C and Objective-C follow `.clang-format` (`clang-format -i FILE`), and the Metal source inside their strings is
+written in the same style. The app's Swift follows `.swift-format` (`xcrun swift-format format -i product/*.swift`),
+the Python tools follow black as configured in `pyproject.toml`; the two Python 2.3 scripts that run inside Tiger
+(`guest/tools/`) are formatted by hand. `firmware/openbios/` and `tests/epicycle/coremark/` keep their upstream style.

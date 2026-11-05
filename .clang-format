@@ -1,0 +1,26 @@
+# The C, Objective-C and Metal source style (clang-format 18). Not for firmware/openbios (upstream code).
+BasedOnStyle: LLVM
+IndentWidth: 4
+ContinuationIndentWidth: 8
+ColumnLimit: 120
+SortIncludes: Never
+ReflowComments: false
+BreakStringLiterals: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+IndentCaseLabels: false
+PointerAlignment: Right
+MaxEmptyLinesToKeep: 1
+AlignTrailingComments: false
+SpaceAfterCStyleCast: false
+AlignConsecutiveMacros: false
+AlignEscapedNewlines: Left
+KeepEmptyLinesAtTheStartOfBlocks: false
+InsertBraces: false
+ObjCBlockIndentWidth: 4
+Cpp11BracedListStyle: true
+FixNamespaceComments: false

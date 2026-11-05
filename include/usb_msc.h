@@ -5,10 +5,11 @@
 #include "scsi.h"
 typedef struct {
     PtScsi scsi;
-    unsigned native_recovery,native_zlp;
-    uint8_t address,configuration,halt,setup[8],control[256];
-    unsigned control_phase,control_position,control_length,stage,phase_error;
-    uint32_t tag,host_length,transferred;int input;
+    unsigned native_recovery;
+    uint8_t address, configuration, halt, setup[8], control[256];
+    unsigned control_phase, control_position, control_length, stage, phase_error;
+    uint32_t tag, host_length, transferred;
+    int input;
 } PtUsbMsc;
 void pt_usb_msc_init(PtUsbMsc *);
 PtUsbDevice pt_usb_msc_device(PtUsbMsc *);

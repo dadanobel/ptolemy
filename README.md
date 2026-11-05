@@ -2,12 +2,12 @@
 
 # Ptolemy
 
-Ptolemy is a PowerPC Mac emulator for Apple silicon. It runs Mac OS X Tiger 10.4.11 for PowerPC, unmodified (its own
-kernel, drivers, Finder and applications), in a window or full screen on a current Mac. Tiger's PowerPC code is
-translated to ARM64 and runs on the Mac's CPU cores under Hypervisor.framework; Tiger's own ATI driver drives an
-emulated Radeon 9700 whose 2D and 3D work runs on the Mac's GPU through Metal.
+Ptolemy is a PowerPC Mac emulator for Apple silicon. It runs Mac OS X Tiger 10.4.11 and Leopard 10.5 for PowerPC,
+unmodified (their own kernel, drivers, Finder and applications), in a window or full screen on a current Mac. The
+PowerPC code is translated to ARM64 and runs on the Mac's CPU cores under Hypervisor.framework; Mac OS X's own ATI
+driver drives an emulated Radeon 9700 whose 2D and 3D work runs on the Mac's GPU through Metal.
 
-**1.0 beta 2.** A hobby project, made for fun. Expect rough edges: most applications and games have never been tried.
+**1.0 beta 3.** A hobby project, made for fun. Expect rough edges: most applications and games have never been tried.
 [Download it](#download) or [build it](#building).
 
 ## Emulated, translated, native
@@ -53,7 +53,7 @@ and [UTM 3.2.4 on an M1 Pro MacBook Pro](https://browser.geekbench.com/geekbench
 are older, so the comparison is approximate.
 
 QEMU runs on almost any computer and starts many more systems: Mac OS 9, other versions of Mac OS X, Linux. Ptolemy
-needs a Mac with Apple silicon and so far runs Tiger only.
+needs a Mac with Apple silicon and so far runs Tiger and Leopard only.
 
 [ppcosxkvm](https://github.com/linuxkid473/ppcosxkvm), a QEMU fork, also emulates the Radeon 9700 for Tiger's ATI
 driver, starts Jaguar and Leopard as well and runs on Linux and Intel computers too. We recommend trying it as well.
@@ -93,13 +93,13 @@ The firmware is the only third-party code in the machine; everything else was wr
 
 ## Download
 
-`Ptolemy-1.0b2.zip` on the [Releases](https://github.com/dadanobel/ptolemy/releases) page holds Ptolemy.app with the
+`Ptolemy-1.0b3.zip` on the [Releases](https://github.com/dadanobel/ptolemy/releases) page holds Ptolemy.app with the
 engine, the firmware and Ptolemy Tools. You need:
 
 - A Mac with Apple silicon and macOS 15 Sequoia or later (tried on macOS 15 with an M1 Max and on macOS 27 with
   an M4).
-- An image of your own Mac OS X Tiger 10.4 PowerPC install DVD (see below). Ptolemy does not include or download
-  Apple software.
+- An image of your own Mac OS X Tiger 10.4 or Leopard 10.5 PowerPC install DVD (see below). Ptolemy does not
+  include or download Apple software.
 
 Unzip it and move Ptolemy.app to Applications. Ptolemy is signed ad hoc, not notarized by Apple, so macOS refuses to
 open it the first time. Open System Settings → Privacy & Security and click Open Anyway next to the message about
@@ -109,36 +109,38 @@ Ptolemy, or remove the quarantine in Terminal:
 xattr -dr com.apple.quarantine /Applications/Ptolemy.app
 ```
 
-Then choose your Tiger DVD image in Ptolemy (or drop it onto the window), set the disk size and start. Tiger's
-installer runs in the window; when it restarts, Ptolemy copies Ptolemy Tools onto the new disk and starts Tiger from
-it. To update Tiger to 10.4.11, drop Apple's Mac OS X 10.4.11 Combo Update (PPC) onto the window: it arrives on
+Then choose your Tiger or Leopard DVD image in Ptolemy (or drop it onto the window), set the disk size and start.
+The installer runs in the window; when it restarts, Ptolemy copies Ptolemy Tools onto the new disk and starts the new
+system from it. To update Tiger to 10.4.11, drop Apple's Mac OS X 10.4.11 Combo Update (PPC) onto the window: it arrives on
 Tiger's desktop.
 
-### An image of your Tiger DVD
+### An image of your install DVD
 
 You need the disc and a DVD drive, such as Apple's USB SuperDrive.
 
 1. Insert the DVD and open Disk Utility (Applications → Utilities).
-2. Select the disc in the sidebar and choose File → New Image → Image from "Mac OS X Install DVD" (the disc's name).
+2. Select the disc in the sidebar and choose File → New Image → Image from the disc (for example "Mac OS X Install DVD").
 3. Choose the format DVD/CD master, no encryption, and save.
 
 Ptolemy takes the resulting `.cdr` file, as well as `.dmg` and `.iso` images.
 
 ## What has been tried
 
-On a 13.6-inch MacBook Air with the M4 (10-core CPU and GPU, 24 GB), macOS 27, with Tiger 10.4.11 on the G4 7447A.
-Classic was tried with this release; SimCity 4, Cinebench, Geekbench and Xbench with development builds of it, Halo
-with beta 1, Doom 3 with a build of the same day as beta 1, the others with builds of the weeks before.
+On a 13.6-inch MacBook Air with the M4 (10-core CPU and GPU, 24 GB), macOS 27, with Tiger 10.4.11 and Leopard 10.5 on
+the G4 7447A. Leopard and Classic were tried with this release; SimCity 4, Cinebench, Geekbench and Xbench with
+development builds of it, Halo with beta 1, Doom 3 with a build of the same day as beta 1, the others with builds of
+the weeks before.
 
 | Software | Result |
 |---|---|
 | Mac OS X Tiger 10.4 | Installs from the retail DVD image; updates to 10.4.11 with the Combo update; Finder and Dock with Quartz Extreme |
+| Mac OS X Leopard 10.5 | Installs from the DVD image; desktop with Quartz Extreme; System Preferences, Chess, Software Update |
 | Halo (Universal) | Campaign plays. Built-in time demo at 800 × 600 with 2× FSAA and lens flares: 87–95 fps (two runs) |
 | Doom 3 1.3.1 | Renders completely (ARB2 path). `timedemo demo1` at 640 × 480: 55 fps |
 | Half-Life (Xash3D) | 1024 × 768: 430–650 fps, depending on the run |
 | SimCity 4 | Starts from its disc image; tutorial cities render with their trees and buildings |
 | Fallout 2 | 640 × 480 in 256 colours |
-| Classic (Mac OS 9.2.2) | Starts in Tiger (15 starts in a row while testing beta 2); Age of Empires plays |
+| Classic (Mac OS 9.2.2) | Starts in Tiger; Age of Empires plays |
 | Cinebench R10 | CPU 2880, OpenGL 5700 |
 | Geekbench 2.2 | 4561 |
 | Xbench 1.3 | 263.82 |
@@ -159,23 +161,29 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
 
 ## Known limitations
 
+- **Speed.** Most code runs faster than on a real G4, but some floating-point library code is slower: in Leopard,
+  Xbench's vecLib FFT scores about 35, where a 1.33 GHz iBook G4 scores about 71 (FP Basic: about 63 against 37).
 - **Graphics.** Every case of the OpenGL comparison test matches Apple's software renderer, but some details are
   approximate: edge flags in wireframe mode (every edge is drawn), the R300's 3- and 6-sample FSAA modes (drawn with
   4 samples) and its exact sample positions. See [docs/graphics.md](docs/graphics.md).
-- **Sleep.** When Tiger goes to sleep, the machine stops. Set Energy Saver to never put the computer to sleep.
-- **NVRAM.** Settings that Mac OS X keeps in NVRAM (for example Startup Disk) are not saved.
+- **Sleep.** Mac OS X cannot sleep in Ptolemy: Tiger stops, Leopard hangs. In Tiger, set Energy Saver to never put
+  the computer to sleep; in Leopard, Ptolemy Tools keep the system from sleeping on its own.
+- **NVRAM.** Mac OS X's NVRAM is emulated as the Core99 flash it expects. The first start of a machine made with an
+  earlier beta converts its NVRAM file once and keeps the original next to it as `nvram.bin.legacy`. Ptolemy chooses
+  the startup disk itself, so Startup Disk has no effect.
 - **Classic.** Classic (Mac OS 9 inside Tiger) needs a Mac OS 9.2.2 System Folder that you bring into Tiger yourself,
   in a disk image or a StuffIt archive (files dropped one by one lose their resource forks); Ptolemy does not include
   one. The first start takes about two minutes. As on real Macs, Classic has no 3D. Mac OS 9 itself does not start:
   the firmware cannot start a disk that Tiger marked for Mac OS 9.
-- **Files.** Files dropped onto the window arrive without resource forks, type and creator.
-- **Not available:** more than one CPU, CD audio, game controllers, sound input, incoming network connections.
+- **Files.** Files dropped onto the window arrive without resource forks, type and creator. One file can be up to 4 GB.
+- **Not available:** more than one CPU, a G5, CD audio, game controllers, sound input, a camera, incoming network
+  connections.
 - **Mouse in games.** When a game switches the display mode, Ptolemy captures the mouse: Ctrl+Option or Cmd+Tab
   releases it, a click captures it again. A captured mouse can feel fast; lower the game's own mouse sensitivity.
 
 ## Plans
 
-Dual G4, Power Mac G5 and Mac OS X Leopard are planned, without dates.
+Dual G4 and Power Mac G5 are planned, without dates.
 
 ## Building
 

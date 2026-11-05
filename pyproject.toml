@@ -1,0 +1,5 @@
+# Formatting of the Python tools (black). guest/tools/ is Python 2.3 for Tiger and is formatted by hand.
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+extend-exclude = "^/(guest/tools|firmware/openbios)/"

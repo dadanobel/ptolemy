@@ -266,17 +266,18 @@ ob_unin_init(void)
 {
         phandle_t dnode;
         int props[2];
+        int g5 = fw_cfg_read_i16(FW_CFG_MACHINE_ID) == 3;
 
         fword("new-device");
-        push_str("uni-n");
+        push_str(g5 ? "u3" : "uni-n");
         fword("device-name");
 
-        dnode = find_dev("/uni-n");
+        dnode = get_cur_dev();
         set_property(dnode, "device_type", "memory-controller", 18);
-        set_property(dnode, "compatible", "uni-north", 10);
-        set_int_property(dnode, "device-rev", 7);
+        set_property(dnode, "compatible", g5 ? "u3" : "uni-north", g5 ? 3 : 10);
+        set_int_property(dnode, "device-rev", g5 ? 0x30 : 7);
         props[0] = __cpu_to_be32(0xf8000000);
-        props[1] = __cpu_to_be32(0x1000000);
+        props[1] = __cpu_to_be32(g5 ? 0x80000 : 0x1000000);
         set_property(dnode, "reg", (char *)&props, sizeof(props));
 
         fword("finish-device");

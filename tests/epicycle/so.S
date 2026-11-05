@@ -6,11 +6,7 @@
 # of block (jump cache keys), a direct jump into another page, mcrxr, an SO switch onto a target the jump cache also
 # holds for the other SO. CR and XER are folded into r26 after each step; r26 goes to stdout (4 bytes), the exit code is
 # the xor of its bytes.
-    .macro FOLD r
-    add 26, 26, \r
-    rotlwi 26, 26, 5
-    xor 26, 26, \r
-    .endm
+    .include "fold.inc"
     .macro STATE
     mfcr 9
     FOLD 9

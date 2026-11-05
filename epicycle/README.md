@@ -31,6 +31,7 @@ Tests live in `../tests/epicycle/`:
 | `lab.py` | counterexample lab: random programs against Unicorn (750 model) with Book I corrections, ddmin minimization |
 | `sys1.S` .. `sys9.S`, `sys.ld` | bare metal: exceptions (sys1), MMU (sys2), DEC, POW, icbi, devices, EA wrap, string instructions (sys3), SR switches in real mode (sys4), one VSID in two SRs (sys5), the jump cache across a segment alias (sys6); twi in the VM: every TO bit, the 0xFFF00700 vector, from user mode (sys7); icbi at DR=1, supervisor and user, through an alias no ARM entry holds (sys8); FP and VMX unavailable in the VM, also after an mtmsr in the block (sys9, 7447A) |
 | `ref/sys1.bin` .. `ref/sys3.bin`, `ref/sys7.bin` .. `ref/sys9.bin` | reference journals of sys1-sys3 and sys7-sys9 |
+| `sys.inc`, `fold.inc` | shared macros: the journal and handler of sys1-sys9; the r26 hash (FOLD, VFOLD) of brl, so, vmsum and vmxops |
 | `loop.S`, `atom.S`, `ops2.S`, `fp.S`, `str.S`, `fpa.S` | JIT against the interpreter (PT_CHECK=1): a side exit in a loop; lwarx/stwcx., dcbz; CR logic, sraw, lswi; FP loads, fmr...; lswx/stswx, mffs/mtfsf; FP arithmetic (also with FPSCR[NI]=1) |
 | `vmsum.S` | vmsumshm/vmsumshs, JIT against the interpreter (`PT_G4=1 PT_VMX_NEON=1 PT_VMX_MHADD=1`, with PT_CHECK=1) |
 | `vmxops.S` | the other multiply-sums, vsum*, vrl*, vpkpx, vctuxs/vctsxs (threshold lanes, VSCR.NJ), JIT against the interpreter (`PT_G4=1 PT_VMX_NEON=1 PT_VMX_INT2=1`, with PT_CHECK=1) |
@@ -52,7 +53,7 @@ HVF stand `ptv` (macOS on Apple silicon), from `epicycle/`:
     clang -O2 -DPT_HVF -o ptv hvf.c linux.c interp.c mmu.c jit.c altivec.c -framework Hypervisor
     codesign -s - -f --entitlements hv.entitlements ptv
 
-The product links the same sources with `-DPT_HVF -DPT_OPTICS -DPT_NO_MAIN` (`tools/build-optics.sh`); `build.sh` also builds
+The product links the same sources with `-DPT_HVF -DPT_NO_MAIN` (`tools/build-optics.sh`); `build.sh` also builds
 CPU unit tests from `interp.c`, `mmu.c` and `altivec.c`.
 
 PowerPC test programs:
@@ -60,6 +61,7 @@ PowerPC test programs:
 - C (Linux ABI): `python3 -m ziglang cc -target powerpc-linux-musleabihf -O2 -mcpu=750 -static`.
 - User-mode assembly tests (`_start`, exit through `sc`): `powerpc-linux-gnu-gcc -nostdlib -static -mcpu=750 -o atom atom.S`.
 - Bare metal: see the header of `sys1.S` (zig `cc` and `ld.lld -N -e reset -T sys.ld`; GNU as and ld work too).
+- Assemble in `tests/epicycle`: `.include "sys.inc"` and `.include "fold.inc"` are looked up in the working directory.
 
 ## Running
 
@@ -85,8 +87,9 @@ PowerPC test programs:
   the sys tests exercise these paths).
 - Fast paths that are off by default in the engine: `PT_FPR_CACHE`, `PT_FP_HOIST`, `PT_FP_LAZY`, `PT_FP_ROUND_FAST`,
   `PT_FMA_FAST`, `PT_FMA_DIRECT_S`, `PT_FP_MIXED`, `PT_FP_MORE`, `PT_CR_FUSE`, `PT_VMX_NEON`, `PT_VMX_INT2`,
-  `PT_VMX_MHADD`, `PT_VMX_FP2` (`=1` enables). A window launch of the product without `--cpu` enables most of them
-  (`src/firmware.c`). `PT_FP_FR`, `PT_FP_SGL`, `PT_VMX_MEM`, `PT_VMX_VSCR`, `PT_VMX_FP` are on unless set to 0.
+  `PT_VMX_MHADD`, `PT_VMX_FP2` (`=1` enables). A window launch enables the accepted FP paths for every CPU model and VMX paths for G4
+  (`include/pt_cpu_profile.h`). `PT_CPU_FAST=0` disables these defaults for fixtures; `=1` also enables them
+  headlessly. Explicit per-feature values win. `PT_FP_FR`, `PT_FP_SGL`, `PT_VMX_MEM`, `PT_VMX_VSCR`, `PT_VMX_FP` are on unless set to 0.
 
 ## Testing
 
@@ -159,3 +162,85 @@ the lab cannot check it because Unicorn has no FR.
 - An EA past 2^32 (base + positive offset, formed in 64 bits by the JIT) wraps in the VM, where VA 4-8 GiB aliases
   EA 0-4 GiB in every root (the engine lives from 8 GiB); the Linux stand does not wrap it.
 - x18 belongs to the register cache: fine on Linux and in the VM, not for a macOS user-mode host.
+
+`PT_FP_MOVES=1` is an experimental bit-preserving FP-register path for fmr/fneg/fabs/fnabs.
+It preserves the existing write-through recovery contract and does not extend the single-format cache.
+
+`PT_FP_DIRECTED=1` adds a guarded native path for finite RN=1/2/3 arithmetic and `frsp`.
+RN=0 keeps the existing backend. NI, enabled exceptions, exceptional results and record forms
+retain the interpreter. The path restores ARM FPCR before publishing results or leaving the block;
+each directed operation ends its block and may continue through the native jump cache.
+Both new FP flags default to zero pending application-level acceptance; `=0` disables them.
+
+With `PT_STATS=1`, `FP_SITE` reports up to twelve PC/opcode/FPSCR groups per snapshot,
+with a separate count for omitted groups. `tools/fp-window.py` requires explicit benchmark
+start/end markers; exit counts alone are not a time profile. `PT_POWER_TRACE=1` records
+bounded HID0/POW/PMU diagnostics; unset or `=0` disables them.
+
+## Experimental PPC970 interpreter
+
+`PT_BUILD_970=1 sh build.sh --test` also links `interp970.c` and `mmu970.c` into
+the engine. Unset or `PT_BUILD_970=0` keeps the existing product selection. This
+does not select a G5 board or make the application boot Leopard. `jit_run`
+deliberately rejects a 970 CPU; use `interp_step` with an attached CPU for
+firmware and instruction bring-up. The ordinary build tests include the focused
+970 test even when the product does not link the experimental interpreter.
+
+The bridge preserves every existing G4 field offset. Its appended high halves
+are an interpreter compatibility layout, not a proposed native JIT layout.
+It shares this project's integer, HPT and reservation implementation with
+`experimental/g5`, and reuses the existing FP and AltiVec arithmetic.
+
+Integration contract:
+
+1. Allocate zero-initialized `CPU` objects and nonoverlapping RAM/ROM banks.
+   Create one `Pt970Bus` with `ppc970_bus_create` for all CPUs and DMA writers.
+   Banks use full-width physical addresses and remain alive until bus destruction.
+2. Set each CPU's `env_ticks970` before `ppc970_attach`. It returns a monotonic
+   virtual oscillator in timebase ticks, before the writable TB offset. Pausing
+   the machine must pause this oscillator. DEC must not come from `env_irq`:
+   the 970 path uses that callback only for `PEND_EXT`.
+3. Call `ppc970_attach(cpu, bus, pir, boot_hior)` before starting threads; PIR is
+   unique and below four. `boot_hior` is a board decision, aligned to 1 MiB and
+   within the implemented 42-bit physical address range. Reset starts at
+   `boot_hior + 0x100`, with SF and the nonpartitioned MSR bit 3 set.
+4. Route every RAM write, including DMA, through `ppc970_bus_write`. A direct
+   host pointer store bypasses reservation invalidation and is not supported.
+   Canonicalize board aliases before this bus. ROM banks are read-only.
+5. Supply `env_mmio970` for devices; zero means success, nonzero means bus error.
+   Bytes are in guest memory order. The legacy MMIO callback is a compatibility
+   fallback only below 4 GiB. Existing 32-bit translation callers refuse a
+   high physical result rather than truncate it; those callers still need a
+   full-width platform ABI before high RAM can be used by the entire product.
+6. One host owner mutates each CPU. Attach all owners before execution; join
+   them before destroying the bus, then free CPUs and bank storage. This API
+   does not implement CPU hotplug or a whole-machine warm reset.
+7. `ppc970_execute` holds a shared instruction gate; global `tlbie`, `tlbsync`
+   and `icbi` take it exclusively to drain older accesses, including accesses
+   that have already translated their address. Fetch is also protected.
+   Platform code performing an extra CPU-side translation/access outside the
+   interpreter must bracket that entire operation with `ppc970_bus_enter(bus, 0)`
+   and `ppc970_bus_leave(bus)`. Do not nest either entry around `interp_step`
+   or `ppc970_execute`, and do not reenter a CPU from an MMIO callback. Direct
+   physical DMA uses the bus API without taking this instruction gate.
+
+`sh tools/check-g5-core.sh` runs ASan/UBSan instruction, MMU, FP and 1/2/4-owner
+tests without a guest OS. Use `PT_970_SANITIZER=thread` for the concurrency test,
+and `python3 tools/check-g5-core-negative.py` for deliberate semantic faults.
+
+The interpreter reports an unsupported operation with halt status 78 and the
+exact PC/instruction; it does not silently continue. Unimplemented table state
+stops with status 70, and a machine check with ME clear stops with status 71.
+NI arithmetic, enabled precise FP traps, tracing, SCOM, performance monitoring,
+active data watchpoints, deep nap and some instruction forms remain unsupported.
+All FP opcodes currently stop when NI is set, including FPSCR control forms;
+this conservative restriction must be narrowed when the NI contract is added.
+The HPT walk is uncached and the shared RAM bus serializes accesses. These are
+correctness tools, not a performance backend or evidence of Leopard compatibility.
+
+The 970 alignment paths preserve DSISR except its store bit, handle cache-inhibited
+multiple/string operations, and distinguish the HID5 illegal-dcbz mode from an
+alignment fault. Cache flush instructions still validate their data translation;
+cache timing and most HID implementation modes are not modeled. The mode-ring
+alternative that makes cache-inhibited dcbz a no-op is not implemented.
+VMX diagnostic counters are per host owner; collect them before each owner exits.

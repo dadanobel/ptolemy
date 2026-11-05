@@ -5,6 +5,7 @@
 The result runs IN Tiger PPC, not on the Apple Silicon host. Apple binaries
 and headers are local build products, not part of this source distribution.
 """
+
 import argparse
 import gzip
 import hashlib
@@ -13,7 +14,6 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
-import tarfile
 
 SDK = 'Developer/SDKs/MacOSX10.4.0.sdk'
 TOOLS = {'ld', 'ar', 'nm', 'ranlib', 'libtool', 'otool', 'strip'}
@@ -32,9 +32,9 @@ def members(f):
         h = take(f, 76)
         if h[:6] != b'070707':
             raise ValueError('expected 070707 odc cpio header')
-        dev, ino, mode, uid, gid, nlink, rdev = (int(h[i:i+6], 8) for i in range(6, 48, 6))
+        dev, ino, mode, uid, gid, nlink, rdev = (int(h[i : i + 6], 8) for i in range(6, 48, 6))
         nname, size = int(h[59:65], 8), int(h[65:76], 8)
-        if not 1 <= nname <= 4096 or size > 512*1024*1024:
+        if not 1 <= nname <= 4096 or size > 512 * 1024 * 1024:
             raise ValueError('oversized cpio member')
         raw = take(f, nname)
         if raw[-1:] != b'\0' or b'\0' in raw[:-1]:
@@ -54,7 +54,7 @@ def wanted(pkg, name):
     if pkg == 'gcc4.0':
         return name.startswith(('usr/bin/', 'usr/lib/', 'usr/libexec/', 'usr/include/'))
     if pkg == 'DeveloperTools':
-        return name in {'usr/bin/'+n for n in TOOLS} or name == 'usr/libexec/gcc/darwin/ppc/as'
+        return name in {'usr/bin/' + n for n in TOOLS} or name == 'usr/libexec/gcc/darwin/ppc/as'
     return name == SDK or name.startswith(SDK + '/')
 
 
@@ -113,7 +113,7 @@ def write_file(path, data, mode):
 def sha(path):
     h = hashlib.sha256()
     with path.open('rb') as f:
-        for b in iter(lambda: f.read(1024*1024), b''):
+        for b in iter(lambda: f.read(1024 * 1024), b''):
             h.update(b)
     return h.hexdigest()
 
@@ -122,16 +122,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('xcode_tools', type=Path)
     ap.add_argument('output', type=Path, help='NEW directory; never merged into an existing tree')
-    ap.add_argument('--tar', type=Path, help='NEW uncompressed guest-readable tar file')
     a = ap.parse_args()
     packages = a.xcode_tools / 'Packages'
-    archives = {n: packages/(n+'.pkg/Contents/Archive.pax.gz')
-                for n in ('gcc4.0', 'DeveloperTools', 'MacOSX10.4')}
+    archives = {n: packages / (n + '.pkg/Contents/Archive.pax.gz') for n in ('gcc4.0', 'DeveloperTools', 'MacOSX10.4')}
     for p in archives.values():
         if not p.is_file():
             ap.error('missing package payload: ' + str(p))
-    if a.tar and a.tar.exists():
-        ap.error('--tar output already exists')
     a.output.mkdir(parents=True, exist_ok=False)
     root = a.output.resolve()
     # On failure preserve the incomplete NEW tree for diagnosis; no user files
@@ -143,32 +139,34 @@ def main():
         extract(p, n, root)
     bindir = root / 'bin'
     bindir.mkdir()
-    shutil.copyfile(Path(__file__).resolve().parents[1]/'guest/toolchain/ppc-cc', bindir/'ppc-cc')
-    (bindir/'ppc-cc').chmod(0o755)
+    shutil.copyfile(Path(__file__).resolve().parents[1] / 'guest/toolchain/ppc-cc', bindir / 'ppc-cc')
+    (bindir / 'ppc-cc').chmod(0o755)
     # GCC must use the actual PPC assembler, not Apple's /usr/bin/as dispatcher
     # whose search for /usr/libexec/... is not relocatable.
-    (bindir/'as').symlink_to('../usr/libexec/gcc/darwin/ppc/as')
+    (bindir / 'as').symlink_to('../usr/libexec/gcc/darwin/ppc/as')
     for n in TOOLS:
-        (bindir/n).symlink_to('../usr/bin/'+n)
-    required = ['usr/bin/powerpc-apple-darwin8-gcc-4.0.0',
-                'usr/libexec/gcc/powerpc-apple-darwin8/4.0.0/cc1',
-                'usr/libexec/gcc/powerpc-apple-darwin8/4.0.0/collect2',
-                'usr/lib/gcc/powerpc-apple-darwin8/4.0.0/crt2.o',
-                SDK+'/usr/lib/libSystem.dylib', SDK+'/usr/lib/bundle1.o']
+        (bindir / n).symlink_to('../usr/bin/' + n)
+    required = [
+        'usr/bin/powerpc-apple-darwin8-gcc-4.0.0',
+        'usr/libexec/gcc/powerpc-apple-darwin8/4.0.0/cc1',
+        'usr/libexec/gcc/powerpc-apple-darwin8/4.0.0/collect2',
+        'usr/lib/gcc/powerpc-apple-darwin8/4.0.0/crt2.o',
+        SDK + '/usr/lib/libSystem.dylib',
+        SDK + '/usr/lib/bundle1.o',
+    ]
     for rel in required:
-        if not (root/rel).is_file():
+        if not (root / rel).is_file():
             raise ValueError('missing required toolchain file: ' + rel)
-    files = {str(p.relative_to(root)): sha(p) for p in sorted(root.rglob('*'))
-             if p.is_file() and not p.is_symlink()}
-    manifest = {'format': 1, 'runs_on': 'Darwin 8 PPC32', 'sdk': 'MacOSX10.4.0.sdk',
-                'source_archives': sources, 'files_sha256': files}
-    (root/'toolchain-manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
-    if a.tar:
-        # GNU long-link records are understood by Tiger tar; SDK framework
-        # symlinks can exceed ustar's 100-byte linkname limit.
-        with a.tar.open('xb') as f, tarfile.open(fileobj=f, mode='w', format=tarfile.GNU_FORMAT) as t:
-            t.add(root, arcname=root.name, recursive=True)
-    print('Ready: '+str(root/'bin/ppc-cc'))
+    files = {str(p.relative_to(root)): sha(p) for p in sorted(root.rglob('*')) if p.is_file() and not p.is_symlink()}
+    manifest = {
+        'format': 1,
+        'runs_on': 'Darwin 8 PPC32',
+        'sdk': 'MacOSX10.4.0.sdk',
+        'source_archives': sources,
+        'files_sha256': files,
+    }
+    (root / 'toolchain-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print('Ready: ' + str(root / 'bin/ppc-cc'))
 
 
 if __name__ == '__main__':

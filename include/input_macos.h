@@ -8,8 +8,6 @@
 @interface PTHidInputView : NSView
 /* Preferred product path. Detach before stopping/destroying the backend. */
 - (instancetype)initWithFrame:(NSRect)frame eventSink:(PtInputSink)sink;
-- (instancetype)initWithFrame:(NSRect)frame keyboard:(PtHid *)keyboard
-                       mouse:(PtHid *)mouse tablet:(PtHid *)tablet;
 /* Invoke from an explicit UI action. Under PT_INPUT_UX, Ctrl+Cmd+G toggles
  * capture even without a guest hardware cursor. Ctrl+Cmd+Escape and Ctrl+Option
  * release it. Automatic capture still requires an observed visible cursor. */
@@ -19,9 +17,9 @@
  * PT_INPUT_UX=1 enables the staged input policy, which is off by default.
  * PT_INPUT_AUTO_CAPTURE=0 keeps manual capture with the new keyboard policy.
  * Capture changes, including focus loss, are delivered on the AppKit thread. */
-@property(nonatomic,readonly) BOOL inputPolicyEnabled;
-@property(nonatomic,readonly,getter=isRelativeCaptured) BOOL relativeCaptured;
-@property(nonatomic,copy) void (^captureChanged)(BOOL captured);
+@property(nonatomic, readonly) BOOL inputPolicyEnabled;
+@property(nonatomic, readonly, getter=isRelativeCaptured) BOOL relativeCaptured;
+@property(nonatomic, copy) void (^captureChanged)(BOOL captured);
 /* Guest image in view points (flipped); empty = whole view. The absolute pointer maps through it, and
  * inside it the host cursor is hidden: the guest draws its own. Set by the presenter, main thread. */
 @property(nonatomic) NSRect guestRect;
@@ -39,6 +37,8 @@
 /* Once per presenter frame: host cursor and Tiger's position after the pointer returns from the Mac menu bar or Dock. */
 - (void)pollPointer;
 - (void)observeGuestPointerX:(int)x y:(int)y width:(unsigned)width height:(unsigned)height at:(uint64_t)at;
-@property(nonatomic,readonly) BOOL captureSuggested;
+@property(nonatomic, readonly) BOOL captureSuggested;
+/* Presses the keys (USB usages) in order and releases them in reverse: a chord the Mac keeps for itself. */
+- (void)sendChord:(const unsigned *)usages count:(unsigned)count;
 - (void)detach;
 @end

@@ -12,7 +12,7 @@ the machine and [docs/graphics.md](../../docs/graphics.md) lists what it covers.
 | `executor.h`, `frontend_metal.mm` | The Metal executor: surfaces, depth storage, texture caches, programs, batches |
 | `renderer.mm`, `renderer.h` | The Metal renderer underneath: targets, shaders from R300 programs, samplers, command buffers |
 | `io.c`, `guard.c`, `timeline.c`, `address.c` | Ownership of VRAM pages between CPU and GPU, completion ledger, GPU addresses |
-| `cpu_access.c`, `cpu_guard.c`, `hvf_access.c` | The CPU's direct view of VRAM and its fault route |
+| `cpu_access.c`, `cpu_guard.c` | The CPU's direct view of VRAM and its fault route |
 | `foundation/` | PM4 parsing, R300 shader decoding and evaluation, Metal shader generation, MSAA and resolve helpers |
 | `diagnostics.c`, `guest/agent_builtin.h` | Status for Ptolemy Agent (`/Ptolemy/optics status` in Tiger) |
 
