@@ -161,8 +161,6 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
 
 ## Known limitations
 
-- **Speed.** Most code runs faster than on a real G4, but some floating-point library code is slower: in Leopard,
-  Xbench's vecLib FFT scores about 35, where a 1.33 GHz iBook G4 scores about 71 (FP Basic: about 63 against 37).
 - **Graphics.** Every case of the OpenGL comparison test matches Apple's software renderer, but some details are
   approximate: edge flags in wireframe mode (every edge is drawn), the R300's 3- and 6-sample FSAA modes (drawn with
   4 samples) and its exact sample positions. See [docs/graphics.md](docs/graphics.md).
@@ -176,6 +174,8 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
   one. The first start takes about two minutes. As on real Macs, Classic has no 3D. Mac OS 9 itself does not start:
   the firmware cannot start a disk that Tiger marked for Mac OS 9.
 - **Files.** Files dropped onto the window arrive without resource forks, type and creator. One file can be up to 4 GB.
+- **Benchmarks.** Most code runs much faster than on a real G4, but some floating-point library code is slower: in Leopard,
+  Xbench's vecLib FFT scores about 35, where a 1.33 GHz iBook G4 scores about 71 (FP Basic: about 63 against 37).
 - **Not available:** more than one CPU, a G5, CD audio, game controllers, sound input, a camera, incoming network
   connections.
 - **Mouse in games.** When a game switches the display mode, Ptolemy captures the mouse: Ctrl+Option or Cmd+Tab
