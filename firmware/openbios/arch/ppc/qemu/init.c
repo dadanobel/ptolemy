@@ -165,11 +165,11 @@ static const pci_arch_t known_arch[] = {
         .host_pci_base = 0x0,
         .pci_mem_base = 0x80000000,
         .mem_len = 0x10000000,
-        .io_base = 0xf2000000,
+        .io_base = 0xf0000000,
         .io_len = 0x00800000,
         .host_ranges = {
-            { .type = IO_SPACE, .parentaddr = 0, .childaddr = 0xf2000000, .len = 0x00800000 },
-            { .type = MEMORY_SPACE_32, .parentaddr = 0x80000000, .childaddr = 0x80000000, .len = 0x10000000 },
+            { .type = IO_SPACE, .parentaddr = 0, .childaddr = 0xf0000000, .len = 0x00800000 },
+            { .type = MEMORY_SPACE_32, .parentaddr = 0x80000000, .childaddr = 0x80000000, .len = 0x50000000 },
             { .type = 0, .parentaddr = 0, .childaddr = 0, .len = 0 }
          },
         .irqs = { 0x1b, 0x1c, 0x1d, 0x1e }
@@ -339,7 +339,7 @@ cpu_generic_init(const struct cpudef *cpu)
     push_str("state");
     fword("property");
 
-    PUSH(0x20);
+    PUSH(cpu->dcache_block_size);
     fword("encode-int");
     push_str("reservation-granule-size");
     fword("property");
@@ -383,7 +383,7 @@ cpu_750_init(const struct cpudef *cpu)
 /* Ptolemy fork: the 7447A's on-chip L2 as a PowerPC-binding cache node (512 KiB unified, 8-way,
  * 64-byte lines of two 32-byte sectors), referenced by the cpu node's "l2-cache" property. */
 static void
-cpu_add_l2_cache(void)
+cpu_add_l2_cache(uint32_t size, uint32_t block, uint32_t line)
 {
     phandle_t cpu = get_cur_dev(), l2;
 
@@ -394,14 +394,14 @@ cpu_add_l2_cache(void)
     fword("device-type");
     l2 = get_cur_dev();
     set_property(l2, "cache-unified", NULL, 0);
-    set_int_property(l2, "d-cache-size", 0x80000);
-    set_int_property(l2, "i-cache-size", 0x80000);
+    set_int_property(l2, "d-cache-size", size);
+    set_int_property(l2, "i-cache-size", size);
     set_int_property(l2, "d-cache-sets", 0x400);
     set_int_property(l2, "i-cache-sets", 0x400);
-    set_int_property(l2, "d-cache-block-size", 0x20);
-    set_int_property(l2, "i-cache-block-size", 0x20);
-    set_int_property(l2, "d-cache-line-size", 0x40);
-    set_int_property(l2, "i-cache-line-size", 0x40);
+    set_int_property(l2, "d-cache-block-size", block);
+    set_int_property(l2, "i-cache-block-size", block);
+    set_int_property(l2, "d-cache-line-size", line);
+    set_int_property(l2, "i-cache-line-size", line);
     fword("finish-device");
     set_int_property(cpu, "l2-cache", l2);
 }
@@ -416,7 +416,7 @@ cpu_g4_init(const struct cpudef *cpu)
     set_property(get_cur_dev(), "altivec", NULL, 0);
     set_property(get_cur_dev(), "data-streams", NULL, 0);
     if (cpu->iu_version == 0x80030000)
-        cpu_add_l2_cache();
+        cpu_add_l2_cache(0x80000, 0x20, 0x40);
 
     fword("finish-device");
 }
@@ -459,6 +459,18 @@ static void
 cpu_970_init(const struct cpudef *cpu)
 {
     cpu_generic_init(cpu);
+    phandle_t node = get_cur_dev();
+    phandle_t pic = find_dev("/pci/mac-io/interrupt-controller");
+    set_property(node, "altivec", NULL, 0);
+    set_property(node, "data-streams", NULL, 0);
+    set_property(node, "flush-on-lock", NULL, 0);
+    set_int_property(node, "l2cr", 0); /* No G4 L2CR access on the 970. */
+    if (cpu->iu_version == 0x00440000)
+        cpu_add_l2_cache(0x100000, 0x80, 0x80);
+    if (pic)
+        set_int_property(node, "AAPL,parentIC", pic);
+    else
+        printk("970: no interrupt controller found for CPU node\n");
 
     PUSH(0);
     fword("encode-int");
@@ -486,6 +498,20 @@ cpu_970_init(const struct cpudef *cpu)
 }
 
 static const struct cpudef ppc_defs[] = {
+    {
+        /* 970MP UM: each core has 64 KiB I / 32 KiB D, 128-byte lines. */
+        .iu_version = 0x00440000,
+        .name = "PowerPC,970MP",
+        .icache_size = 0x10000,
+        .dcache_size = 0x8000,
+        .icache_sets = 0x200,
+        .dcache_sets = 0x80,
+        .icache_block_size = 0x80,
+        .dcache_block_size = 0x80,
+        .tlb_sets = 0x100,
+        .tlb_size = 0x1000,
+        .initfn = cpu_970_init,
+    },
     {
         .iu_version = 0x00040000,
         .name = "PowerPC,604",
@@ -1046,8 +1072,26 @@ arch_of_init(void)
         fword("property");
         break;
 
-    case ARCH_MAC99:
     case ARCH_MAC99_U3:
+        /* Ptolemy's single-CPU bring-up board, not a claimed factory G5. */
+        push_str("PowerMacPtolemy,1");
+        fword("model");
+        push_str("MacRISC4");
+        fword("encode-string");
+        push_str("Power Macintosh");
+        fword("encode-string");
+        fword("encode+");
+        push_str("compatible");
+        fword("property");
+        push_str("bootrom");
+        fword("device-type");
+        PUSH(fw_cfg_read_i32(FW_CFG_PPC_BUSFREQ));
+        fword("encode-int");
+        push_str("clock-frequency");
+        fword("property");
+        break;
+
+    case ARCH_MAC99:
     case ARCH_PREP:
     default:
 

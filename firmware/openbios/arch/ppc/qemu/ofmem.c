@@ -561,6 +561,20 @@ setup_mmu(unsigned long ramsize)
 
     patch_rfi();
 
+#ifdef CONFIG_PPC_64BITSUPPORT
+    /* 970MP UM 2.1.2.13: leave the reset-vector relocation before the first
+     * translated access. The RAM vectors are now copied and patched to rfid. */
+    if (is_ppc64()) {
+        unsigned long hid5;
+        /* 970MP UM 2.1.2.2, HID5[56]: Apple's 32-bit kernel preserves this
+         * firmware choice and uses plain dcbz for 32-byte structure fragments.
+         * dcbzl still clears 128 bytes. SPR 1014 is not the legacy S_HID5 alias. */
+        asm volatile("mfspr %0,1014; ori %0,%0,0x80; mtspr 1014,%0; isync"
+                     : "=&r" (hid5) : : "memory");
+        mtspr(S_HIOR, 0);
+    }
+#endif
+
     /* Enable MMU */
 
     mtmsr(mfmsr() | MSR_IR | MSR_DR);

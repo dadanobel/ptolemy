@@ -7,35 +7,17 @@
 # its bytes.
     .set N, 12
     .set M, 52
-    .macro FOLD vr, keep
-    stvx \vr, 0, 30
-    lwz 9, 0(30)
-    add 26, 26, 9
-    rotlwi 26, 26, 5
-    lwz 9, 4(30)
-    xor 26, 26, 9
-    lwz 9, 8(30)
-    add 26, 26, 9
-    rotlwi 26, 26, 3
-    lwz 9, 12(30)
-    xor 26, 26, 9
-    mfvscr 5
-    stvx 5, 0, 30
-    lwz 9, 12(30)
-    add 26, 26, 9
-    rotlwi 26, 26, 7
-    mtvscr \keep
-    .endm
+    .include "fold.inc"
     .macro CVT k
     vctuxs 4, 1, \k
-    FOLD 4, 7
+    VFOLD 4, 7
     vctsxs 4, 1, \k
-    FOLD 4, 7
+    VFOLD 4, 7
     mtvscr 8
     vctuxs 4, 1, \k
-    FOLD 4, 8
+    VFOLD 4, 8
     vctsxs 4, 1, \k
-    FOLD 4, 7
+    VFOLD 4, 7
     .endm
     .macro LOAD vr, idx
     slwi 3, \idx, 4
@@ -62,31 +44,31 @@ li_:
     CVT 16
     CVT 31
     vctuxs 1, 1, 3
-    FOLD 1, 7
+    VFOLD 1, 7
     li 27, 0
 lj:
     LOAD 1, 28
     LOAD 2, 27
     vsum4ubs 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vsum4sbs 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vsum4shs 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vsum2sws 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vsumsws 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vrlb 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vrlh 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vrlw 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vpkpx 4, 1, 2
-    FOLD 4, 7
+    VFOLD 4, 7
     vpkpx 2, 2, 1
-    FOLD 2, 7
+    VFOLD 2, 7
     LOAD 2, 27
     li 25, 0
 lk:
@@ -94,24 +76,24 @@ lk:
     LOAD 2, 27
     LOAD 3, 25
     vmsumubm 4, 1, 2, 3
-    FOLD 4, 7
+    VFOLD 4, 7
     vmsummbm 4, 1, 2, 3
-    FOLD 4, 7
+    VFOLD 4, 7
     vmsumuhm 4, 1, 2, 3
-    FOLD 4, 7
+    VFOLD 4, 7
     vmsumuhs 4, 1, 2, 3
-    FOLD 4, 7
+    VFOLD 4, 7
     vmsumubm 3, 3, 3, 3
-    FOLD 3, 7
+    VFOLD 3, 7
     addi 25, 25, 1
     cmpwi 25, N
     blt lk
     vsum2sws 2, 2, 2
-    FOLD 2, 7
+    VFOLD 2, 7
     vrlh 1, 1, 1
-    FOLD 1, 7
+    VFOLD 1, 7
     vsumsws 1, 2, 1
-    FOLD 1, 7
+    VFOLD 1, 7
     addi 27, 27, 1
     cmpwi 27, N
     blt lj

@@ -5,41 +5,7 @@
 # the new code. The failure it guards against: a jump-cache cell that checks the generation of the full EA page
 # (0x30000), which a tlbie of 0x20000000 does not move, keeps jumping to the old translation. The interpreter
 # (ptv -i -s) is the oracle; the JIT in the VM (PT_VMRFI=2 PT_VMMSR=2) must give the same journal word for word.
-        .set RES, 0x10000
-        .macro LOG r
-        stw \r, 0(%r31)
-        addi %r31, %r31, 4
-        .endm
-        .macro MARK n
-        lis %r3, 0x7e57
-        ori %r3, %r3, \n
-        LOG %r3
-        .endm
-        .macro LI32 r, v
-        lis \r, (\v)@h
-        ori \r, \r, (\v)@l
-        .endm
-        .macro RESUME lbl, msr
-        LI32 %r29, \lbl
-        LI32 %r28, \msr
-        .endm
-        .macro VEC off
-        .org \off
-        li %r3, \off
-        ba common
-        .endm
-        .macro RFITO lbl, msr
-        LI32 %r3, \lbl
-        mtsrr0 %r3
-        LI32 %r3, \msr
-        mtsrr1 %r3
-        rfi
-        .endm
-        .macro REAL                      # back to DR=0 from supervisor code
-        li %r3, 0
-        mtmsr %r3
-        isync
-        .endm
+        .include "sys.inc"
         .set DR, 0x10
         .set PR, 0x4000
         .set SRA, 0x20000102             # Kp=1, VSID 0x102
@@ -47,21 +13,8 @@
         .set EA3, 0x30000000
         .set IR, 0x20
 
-        .globl reset
         .section .rom, "ax"
-        .org 0x100
-reset:  LI32 %r3, 0xfff04000
-        li %r4, 0
-        LI32 %r5, ram_end
-0:      lwz %r6, 0(%r3)
-        stw %r6, 0(%r4)
-        addi %r3, %r3, 4
-        addi %r4, %r4, 4
-        cmplw %r4, %r5
-        blt 0b
-        sync
-        isync
-        lis %r31, RES@h
+        RESET
         LI32 %r4, start
         mtctr %r4
         bctr
@@ -81,46 +34,9 @@ reset:  LI32 %r3, 0xfff04000
         VEC 0x1300
 
         .text
-common: srwi %r30, %r31, 12
-        cmplwi %r30, RES >> 12
-        bgt die
-        LOG %r3
-        mfsrr0 %r30
-        LOG %r30
-        mfsrr1 %r30
-        LOG %r30
-        mfspr %r30, 19
-        LOG %r30
-        mfspr %r30, 18
-        LOG %r30
-        mtsrr0 %r29
-        mtsrr1 %r28
-        rfi
-die:    b die
+        COMMON msr=0
 
-# pte_set: %r4 = EA, %r5 = word 1, %r6 = H, %r7 = slot -> %r11 = PTE address (as sys2.S). Clobbers %r8-%r12.
-pte_set:
-        mfsrin %r9, %r4
-        rlwinm %r9, %r9, 0, 8, 31
-        rlwinm %r10, %r4, 20, 16, 31
-        rlwinm %r11, %r9, 0, 13, 31
-        xor %r11, %r11, %r10
-        cmpwi %r6, 0
-        beq 1f
-        not %r11, %r11
-1:      rlwinm %r11, %r11, 6, 16, 25
-        oris %r11, %r11, 0x0010
-        rlwinm %r12, %r7, 3, 26, 28
-        add %r11, %r11, %r12
-        rlwinm %r12, %r9, 7, 1, 24
-        oris %r12, %r12, 0x8000
-        rlwimi %r12, %r6, 6, 25, 25
-        rlwimi %r12, %r4, 10, 26, 31
-        stw %r5, 4(%r11)
-        sync
-        stw %r12, 0(%r11)
-        sync
-        blr
+        PTE_SET
 
 start:  li %r4, 0
         mtmsr %r4

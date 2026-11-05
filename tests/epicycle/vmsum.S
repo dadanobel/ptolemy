@@ -2,26 +2,7 @@
 # triples of 6 vectors (halfword extremes -32768/32767, mixed signs, words near the 32-bit limits). After each
 # operation the result and VSCR (SAT) are folded into r26, and SAT is cleared; the exit code is the xor of its bytes.
     .set N, 6
-    .macro FOLD vr
-    stvx \vr, 0, 30
-    lwz 9, 0(30)
-    add 26, 26, 9
-    rotlwi 26, 26, 5
-    lwz 9, 4(30)
-    xor 26, 26, 9
-    lwz 9, 8(30)
-    add 26, 26, 9
-    rotlwi 26, 26, 3
-    lwz 9, 12(30)
-    xor 26, 26, 9
-    mfvscr 5
-    stvx 5, 0, 30
-    lwz 9, 12(30)
-    add 26, 26, 9
-    rotlwi 26, 26, 7
-    vxor 5, 5, 5
-    mtvscr 5
-    .endm
+    .include "fold.inc"
     .globl _start
 _start:
     lis 31, vals@ha
@@ -44,11 +25,11 @@ lk:
     slwi 5, 25, 4
     lvx 3, 31, 5
     vmsumshm 4, 1, 2, 3
-    FOLD 4
+    VFOLD 4
     vmsumshs 4, 1, 2, 3
-    FOLD 4
+    VFOLD 4
     vmsumshs 3, 3, 3, 3
-    FOLD 3
+    VFOLD 3
     addi 25, 25, 1
     cmpwi 25, N
     blt lk

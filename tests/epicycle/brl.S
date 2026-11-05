@@ -2,11 +2,7 @@
 # instruction either way, a taken one calls its target, which returns there. JIT against the interpreter (-i, and
 # PT_CHECK=1). 8 rounds compare the round number with 3 into cr2; LR, the calls and the round fold into r26; r26 goes to
 # stdout (4 bytes), the exit code is the xor of its bytes.
-    .macro FOLD r
-    add 26, 26, \r
-    rotlwi 26, 26, 5
-    xor 26, 26, \r
-    .endm
+    .include "fold.inc"
     .globl _start
 _start:
     li 26, 0

@@ -4,77 +4,10 @@
 # block and must check again after the mtmsr. G4 (PT_G4=1, VMX). Bare metal; the reference is the journal
 # tests/epicycle/ref/sys9.bin (the interpreter, ptv -i -s); the JIT (pt; ptv with PT_VMSC=2) must give it word for word.
 # Journal and handler as in sys7.S (the handler logs the vector, SRR0, SRR1, the MSR in the handler, DAR, DSISR).
-        .set RES, 0x10000
-        .macro LOG r
-        stw \r, 0(%r31)
-        addi %r31, %r31, 4
-        .endm
-        .macro MARK n
-        lis %r3, 0x7e57
-        ori %r3, %r3, \n
-        LOG %r3
-        .endm
-        .macro LI32 r, v
-        lis \r, (\v)@h
-        ori \r, \r, (\v)@l
-        .endm
-        .macro RESUME lbl, msr
-        LI32 %r29, \lbl
-        LI32 %r28, \msr
-        .endm
-        .macro VEC off, hi
-        .org \off
-        li %r3, \off + \hi
-        ba common
-        .endm
-        .macro TABLE hi
-        VEC 0x200, \hi
-        VEC 0x300, \hi
-        VEC 0x400, \hi
-        VEC 0x500, \hi
-        VEC 0x600, \hi
-        VEC 0x700, \hi
-        VEC 0x800, \hi
-        VEC 0x900, \hi
-        VEC 0xa00, \hi
-        VEC 0xb00, \hi
-        VEC 0xc00, \hi
-        VEC 0xd00, \hi
-        VEC 0xe00, \hi
-        VEC 0xf00, \hi
-        VEC 0xf20, \hi                 # VMX unavailable
-        VEC 0x1000, \hi
-        VEC 0x1100, \hi
-        VEC 0x1200, \hi
-        VEC 0x1300, \hi
-        VEC 0x1400, \hi
-        VEC 0x1500, \hi
-        VEC 0x1600, \hi
-        VEC 0x1700, \hi
-        .endm
-        .macro USER lbl                 # enter user mode (PR=1, IR=DR=0) at lbl
-        LI32 %r4, \lbl
-        mtsrr0 %r4
-        li %r4, 0x4000
-        mtsrr1 %r4
-        rfi
-        .endm
+        .include "sys.inc"
 
-        .globl reset
         .section .rom, "ax"              # 0xFFF00000: reset and the vectors for MSR.IP=1
-        .org 0x100
-reset:  LI32 %r3, 0xfff04000              # copy .vec and .text from ROM to RAM at 0
-        li %r4, 0
-        LI32 %r5, ram_end
-0:      lwz %r6, 0(%r3)
-        stw %r6, 0(%r4)
-        addi %r3, %r3, 4
-        addi %r4, %r4, 4
-        cmplw %r4, %r5
-        blt 0b
-        sync
-        isync
-        lis %r31, RES@h
+        RESET
         MARK 0
         mfmsr %r4
         LOG %r4                           # MSR after reset
@@ -84,30 +17,13 @@ reset:  LI32 %r3, 0xfff04000              # copy .vec and .text from ROM to RAM 
 t1:     LI32 %r4, start
         mtctr %r4
         bctr
-        TABLE 1
+        TABLE 1, vmx=1
 
         .section .vec, "ax"              # 0x00000000: the vectors for MSR.IP=0
-        TABLE 0
+        TABLE 0, vmx=1
 
         .text
-common: srwi %r30, %r31, 12                # loop guard: the journal stops at RES+4K
-        cmplwi %r30, RES >> 12
-        bgt die
-        LOG %r3
-        mfsrr0 %r30
-        LOG %r30
-        mfsrr1 %r30
-        LOG %r30
-        mfmsr %r30
-        LOG %r30
-        mfspr %r30, 19
-        LOG %r30
-        mfspr %r30, 18
-        LOG %r30
-        mtsrr0 %r29
-        mtsrr1 %r28
-        rfi
-die:    b die
+        COMMON
 
 start:  MARK 2                           # clear IP
         li %r4, 0

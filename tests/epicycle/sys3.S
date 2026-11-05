@@ -2,29 +2,7 @@
 # Bare metal; the reference is tests/epicycle/ref/sys3.bin. Journal as in sys1.S. The DEC handler does not log SRR0 (where
 # the interrupt lands depends on timing) but sets %r27 = 1. The window at 0x00F00000 (16 KB) behaves as RAM, but the stands
 # serve it as a device (env_mmio): JIT-code accesses to it go through a trap, and the journal must still match.
-        .set RES, 0x10000
-        .macro LOG r
-        stw \r, 0(%r31)
-        addi %r31, %r31, 4
-        .endm
-        .macro MARK n
-        lis %r3, 0x7e57
-        ori %r3, %r3, \n
-        LOG %r3
-        .endm
-        .macro LI32 r, v
-        lis \r, (\v)@h
-        ori \r, \r, (\v)@l
-        .endm
-        .macro RESUME lbl, msr
-        LI32 %r29, \lbl
-        LI32 %r28, \msr
-        .endm
-        .macro VEC off
-        .org \off
-        li %r3, \off
-        ba common
-        .endm
+        .include "sys.inc"
         .macro SPIN                      # wait for %r27 != 0, at most 2^26 iterations; log whether it happened
         lis %r5, 0x400
         mtctr %r5
@@ -42,21 +20,8 @@
         .set POW, 0x40000
         .set DR, 0x10
 
-        .globl reset
         .section .rom, "ax"
-        .org 0x100
-reset:  LI32 %r3, 0xfff04000
-        li %r4, 0
-        LI32 %r5, ram_end
-0:      lwz %r6, 0(%r3)
-        stw %r6, 0(%r4)
-        addi %r3, %r3, 4
-        addi %r4, %r4, 4
-        cmplw %r4, %r5
-        blt 0b
-        sync
-        isync
-        lis %r31, RES@h
+        RESET
         LI32 %r4, start
         mtctr %r4
         bctr

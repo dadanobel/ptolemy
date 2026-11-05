@@ -15,6 +15,7 @@ IEEE 1275 Open Firmware, licensed GPL-2.0. The fork starts from upstream commit
 | `drivers/pci.c`, `drivers/pci_database.c` | The Radeon 9700 (`1002:4e44`, `ATY,R300`) gets the boot display FCode below |
 | `drivers/ptolemy-radeon.fs`, `drivers/build.xml`, `arch/ppc/build.xml`, `arch/ppc/ppc.fs` | Boot display FCode for the Radeon model: a linear 32-bit framebuffer set up by the host, and the ATI identity properties Tiger's Radeon driver reads |
 | `forth/admin/banner.fs` | The banner names the fork |
+| `arch/ppc/qemu/init.c`, `arch/ppc/qemu/ofmem.c`, `drivers/macio.c`, `drivers/pci.c`, `libopenbios/bindings.c` | An experimental PowerPC 970MP/U3 board description for future G5 work; unused by Ptolemy 1.0 beta 3, which runs G3/G4 Macs only |
 
 ## Building the ROM
 
@@ -29,6 +30,7 @@ SOURCE_DATE_EPOCH=1792972800 make
 ```
 
 The ROM is `obj-ppc/openbios-qemu.elf`. With that epoch and toolchain its SHA-256 is
-`288c1874bc849d5cad6c19ccc7ef4671582a79a1c26e445a44cecccd4f1c95a8`, the ROM of Ptolemy 1.0 beta 2; beta 1 carried
+`6fd4f3bf753324de355a465c87a9435548585be373b0d6f10d475d79cccaea91`, the ROM of Ptolemy 1.0 beta 3. Beta 2 carried
+`288c1874bc849d5cad6c19ccc7ef4671582a79a1c26e445a44cecccd4f1c95a8`; beta 1 carried
 `cf9e57a70b6c9df10a4019d5d5df64e537fa157fa88bd26fb041b6db73229bda`, before the cpu node's AltiVec properties.
 The engine loads it with `--rom`; Ptolemy.app carries it as `openbios-ppc`.

@@ -6,11 +6,25 @@
 #include "frontend.h"
 #include "cpu_access.h"
 
-static int fault(void *device,uint64_t offset,uint64_t far,int write,uint64_t pc,uint32_t in) {
-    (void)far; OpticsA64Memory m;
-    if(in && optics_a64_memory_decode(in,&m)) write=!m.load;   /* else the syndrome's WnR */
-    static uint64_t last_pc,last_offset; static unsigned repeat;   /* a fault a grant cannot clear is a bug: stop */
-    if(pc==last_pc && offset==last_offset){ if(++repeat>64) return -1; } else { last_pc=pc; last_offset=offset; repeat=0; }
-    return optics_frontend_cpu_grant(device,offset,write);
+/* Stage-2 fault on guarded VRAM: decodes the access and asks the frontend to grant CPU ownership of the page; a
+ * fault a grant cannot clear stops the engine. */
+static int fault(void *device, uint64_t offset, uint64_t far, int write, uint64_t pc, uint32_t in) {
+    (void)far;
+    OpticsA64Memory m;
+    if (in && optics_a64_memory_decode(in, &m))
+        write = !m.load; /* else the syndrome's WnR */
+    static uint64_t last_pc, last_offset;
+    static unsigned repeat; /* a fault a grant cannot clear is a bug: stop */
+    if (pc == last_pc && offset == last_offset) {
+        if (++repeat > 64)
+            return -1;
+    } else {
+        last_pc = pc;
+        last_offset = offset;
+        repeat = 0;
+    }
+    return optics_frontend_cpu_grant(device, offset, write);
 }
-__attribute__((constructor)) static void install(void) { optics_frontend_set_cpu_fault(fault); }
+__attribute__((constructor)) static void install(void) {
+    optics_frontend_set_cpu_fault(fault);
+}

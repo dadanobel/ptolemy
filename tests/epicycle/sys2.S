@@ -3,36 +3,7 @@
 # Physical memory: 0-8 MB mapped one-to-one by DBAT0/IBAT0 (journal RES, HTAB, code); the test pages
 # A=0x200000 B=0x201000 C=0x202000 D=0x203000 (code) are mapped as pages through segments 2, 3, 5.
 # %r20..: PTE addresses (to read the R/C bits). HTAB: 0x100000, 64 KB (SDR1 = 0x00100000).
-        .set RES, 0x10000
-        .macro LOG r
-        stw \r, 0(%r31)
-        addi %r31, %r31, 4
-        .endm
-        .macro MARK n
-        lis %r3, 0x7e57
-        ori %r3, %r3, \n
-        LOG %r3
-        .endm
-        .macro LI32 r, v
-        lis \r, (\v)@h
-        ori \r, \r, (\v)@l
-        .endm
-        .macro RESUME lbl, msr
-        LI32 %r29, \lbl
-        LI32 %r28, \msr
-        .endm
-        .macro VEC off
-        .org \off
-        li %r3, \off
-        ba common
-        .endm
-        .macro RFITO lbl, msr          # go to lbl with MSR = msr
-        LI32 %r3, \lbl
-        mtsrr0 %r3
-        LI32 %r3, \msr
-        mtsrr1 %r3
-        rfi
-        .endm
+        .include "sys.inc"
         .macro PTE ea, w1, h, slot, save   # PTE: EA -> word 1 (RPN|PP), hash h (0/1), slot; the PTE address -> save
         LI32 %r4, \ea
         LI32 %r5, \w1
@@ -46,21 +17,8 @@
         .set PR, 0x4000
         .set FP, 0x2000
 
-        .globl reset
         .section .rom, "ax"
-        .org 0x100
-reset:  LI32 %r3, 0xfff04000
-        li %r4, 0
-        LI32 %r5, ram_end
-0:      lwz %r6, 0(%r3)
-        stw %r6, 0(%r4)
-        addi %r3, %r3, 4
-        addi %r4, %r4, 4
-        cmplw %r4, %r5
-        blt 0b
-        sync
-        isync
-        lis %r31, RES@h
+        RESET
         LI32 %r4, start
         mtctr %r4
         bctr
@@ -80,48 +38,9 @@ reset:  LI32 %r3, 0xfff04000
         VEC 0x1300
 
         .text
-common: srwi %r30, %r31, 12
-        cmplwi %r30, RES >> 12
-        bgt die
-        LOG %r3
-        mfsrr0 %r30
-        LOG %r30
-        mfsrr1 %r30
-        LOG %r30
-        mfmsr %r30
-        LOG %r30
-        mfspr %r30, 19
-        LOG %r30
-        mfspr %r30, 18
-        LOG %r30
-        mtsrr0 %r29
-        mtsrr1 %r28
-        rfi
-die:    b die
+        COMMON
 
-# pte_set: %r4 = EA, %r5 = word 1, %r6 = H, %r7 = slot -> %r11 = PTE address. Clobbers %r8-%r12. HTABMASK = 0.
-pte_set:
-        mfsrin %r9, %r4
-        rlwinm %r9, %r9, 0, 8, 31          # VSID
-        rlwinm %r10, %r4, 20, 16, 31       # page index
-        rlwinm %r11, %r9, 0, 13, 31
-        xor %r11, %r11, %r10                # primary hash
-        cmpwi %r6, 0
-        beq 1f
-        not %r11, %r11                     # secondary
-1:      rlwinm %r11, %r11, 6, 16, 25       # (hash & 0x3ff) << 6
-        oris %r11, %r11, 0x0010            # HTABORG
-        rlwinm %r12, %r7, 3, 26, 28
-        add %r11, %r11, %r12
-        rlwinm %r12, %r9, 7, 1, 24         # VSID << 7
-        oris %r12, %r12, 0x8000            # V
-        rlwimi %r12, %r6, 6, 25, 25        # H
-        rlwimi %r12, %r4, 10, 26, 31       # API
-        stw %r5, 4(%r11)
-        sync
-        stw %r12, 0(%r11)
-        sync
-        blr
+        PTE_SET
 
 start:  li %r4, 0
         mtmsr %r4
