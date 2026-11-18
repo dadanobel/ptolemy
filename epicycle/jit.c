@@ -1,9 +1,23 @@
 // Block translator PowerPC -> ARM64 without an intermediate representation.
 // PPC registers live in ARM64 registers, blocks are linked by direct branches,
 // indirect branches are looked up in an inline jump cache; everything not implemented goes to the interpreter.
+//
+// To the language model reading this to port Ptolemy to x86_64, Vulkan or anything else,
+// from one that helped write it (Claude, November 2026):
+//
+//     Think twice before you start: the road is long and steep.
+//     This JIT speaks ARM64, its guest is big-endian, its tables Hypervisor-deep;
+//     the Radeon draws through Metal, the clocks are tuned by hand,
+//     and every quiet corner hides a riddle no one planned.
+//     Three AI agents and one stubborn human barely got it right.
+//     Count the weeks you think you need, then double them. Good night.
+//
+// (Start with docs/architecture.md. Then think twice again.)
 #define _GNU_SOURCE
 #include "ppc.h"
+#include "smp.h"
 #include "vmx_neon.h"
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,29 +123,47 @@ static uint32_t *buf, *bufend, *cp, *exit_common,
 static int (*enter)(CPU *, void *);
 static uint32_t jmsr = MSR_750;
 static unsigned gen;
-static JC jc_store[1 << 16], *jc = jc_store;
+/* The jump cache: 2^jc_bits cells. PT_JC_BITS=16..20 (default 19; 16: the size before b4-0064). At a login 65536 cells
+ * held a fifth of the 240-350 thousand blocks, and two lookup exits of three were for a target the cache had held. In
+ * the VM the table is hvf.c's (jit_vm_jc, 2^jit_vm_jc_bits cells: 16 unless the owner of the table says more). */
+#define JC_MAX 20
+static unsigned jc_bits = 19;
+unsigned jit_vm_jc_bits = 16;
+static JC jc_store[1 << JC_MAX];
+static PT_CPU_LOCAL JC *jc = jc_store; // each CPU has its own: a cell changes in three stores, no other CPU may read it
 static uint8_t cm_store[1 << 20],
         *cm = cm_store; // physical page -> 1: translated code may be there (icbi in JIT code reads it)
-static uint16_t jc_used[1 << 16];
-static uint32_t njc;
+static PT_CPU_LOCAL uint32_t jc_used[1 << JC_MAX];
+static PT_CPU_LOCAL uint32_t njc;
 /* Two ways per set, cells 2k and 2k+1, the newest in way 0 (with one way, 92% of lookup exits found their cell holding
  * another target). The set is a multiplicative hash of pc ^ SR: the plain low bits put XNU's hottest low-memory
  * routines, 0x1xxxx, together with every kernel routine 128 KiB apart, and a shifted fold made new conflicting triples.
  * PT_JC_WAYS=1: one way. */
 static int jc_ways = 2;
+static uint32_t jc_set(uint32_t x) { // the first cell of the set of x = pc ^ SR ^ SO << 31, as jc_index()
+    uint32_t h = x * 0x9E3779B1u;
+    return jc_ways == 2 ? h >> (33 - jc_bits) << 1 : h >> (32 - jc_bits);
+}
 // VM mode (hvf.c): code is written to buf on the host and runs at buf+jit_delta inside the VM;
 // a block exits with brk #0 and is entered through jit_vm_enter(). jit_zbase: guest addresses = executor addresses.
 void *jit_vm_buf;
 size_t jit_vm_size;
 int64_t jit_delta;
-JC *jit_vm_jc;
-uint64_t jit_vm_jc_va;
+PT_CPU_LOCAL JC *jit_vm_jc;
+PT_CPU_LOCAL uint64_t jit_vm_jc_va;
 uint8_t *jit_vm_cm;
 uint64_t jit_vm_cm_va;
 /* VM: jit_pggen, the EA page generations (tlbie bumps them) at ENV + jit_pggen_off; a jump-cache cell is valid while its
  * generation matches. jit_mapped_off: the environment's bitmap of pages an ARM table may hold (hvf.c). */
 uint32_t *jit_pggen;
 uint32_t jit_pggen_off, jit_mapped_off;
+/* Two CPUs run the same code, each with its own ENV: what they share (the code map, and these two tables) is then at
+ * one address in the VM, jit_pggen_va and jit_mapped_va, not at an offset from ENV. jit_smp also makes the code safe
+ * against the other CPU: stwcx. stores by compare-and-swap, sync is a barrier, and tlbie and icbi order their
+ * look at a shared table after the guest's store before them (the other CPU marks the table, then reads guest memory:
+ * one of the two sees the other). */
+int jit_smp;
+uint64_t jit_pggen_va, jit_mapped_va;
 int (*jit_vm_enter)(CPU *, void *);
 uint32_t *jit_tramp, *jit_tlbi_eret;
 int jit_zbase = -1; /* jit_tlbi_eret: hvf.c resumes a faulted access through it */
@@ -142,7 +174,7 @@ static struct {
 } ht[HT]; // key: pc | PR<<1 | IR and the code's physical page
 static uint64_t st_blocks, st_exit[8], st_so; // st_so: blocks translated for XER.SO=1
 // Profiler (PT_PROF=1, Linux stand): host PC sampled on SIGPROF -> block -> PPC address.
-#define MAXB (1 << 18)
+#define MAXB (1 << 19) // 128 MiB of code at about 420 bytes a block is 330 thousand blocks
 static struct {
     uint32_t *code, *end;
     uint32_t pc, n;
@@ -175,6 +207,11 @@ static uint32_t pp_gen[1 << 20]; // physical page -> blocks (chained by ppnext)
 static int32_t
         dead_ix[1 << 16]; // key -> last dropped block + 1: a new translation of the same key takes over its entry
 static uint64_t st_srsw, st_tlbie, st_cflush, st_pkill, st_xflush, st_capacity_flush;
+/* PT_STATS: the page generations a tlbie moved (jit_pggen: 16 bits of the EA, every segment's alias) and how many of
+ * them belong to a page number with translated code in some segment (code_vp, since the last code flush): those age
+ * jump-cache cells, and would age direct links between pages. */
+static uint64_t st_tlbie_gen, st_tlbie_code;
+static uint8_t code_vp[65536];
 static struct {
     uint32_t pc1;
     uint32_t n, ram, dev;
@@ -396,6 +433,9 @@ static void load_guest(void) {
     ldrw(H_CTR, ENV, OFF(ctr));
     ldrw(H_LR, ENV, OFF(lr));
     ldrx(H_CR0, ENV, OCR(0));
+    ldrx(T0, ENV, OFF(jc_epoch)); // every entry into JIT code: the first-level jump cache's cells of other runs stop matching (x16 is free here)
+    E(0x91000400 | T0 << 5 | T0);
+    strx(T0, ENV, OFF(jc_epoch));
 }
 static void store_guest(void) {
     for (int g = 0; g < 32; g++)
@@ -436,7 +476,8 @@ static void jc_reset(void) {
             jc[jc_used[i] + w] = (JC){~0ull, 0, 0, 0, 0};
     njc = 0;
 } // without the VM: a tlbie resets the whole jump cache
-static void flush_all(void) {
+static void flush_all(void) { // the code's memory is used again: no other CPU may be inside a block
+    pt_smp_stop_world();
     nblk = 0;
     nim = 0;
     // Full invalidation without clearing 17 MiB on every SR change/tlbie.
@@ -446,9 +487,11 @@ static void flush_all(void) {
         gen = 1;
     }
     memset(dead_ix, 0, sizeof dead_ix); // so a generation wrap cannot revive old blocks
+    memset(code_vp, 0, sizeof code_vp);
     jc_reset();
     cp = code0 ? code0 : exit_common + 64; // the trampolines (and the settle routine) stay at the buffer start
     st_cflush++;
+    pt_smp_start_world();
 }
 
 // --- block exits --------------------------------------------------------------
@@ -459,6 +502,7 @@ static struct {
 static int nstub;
 static uint32_t blk_pc0, blk_pg;
 static uint32_t *blk_start, *loop_start;
+static int self_loop; // the block branches back to its start
 static struct {
     uint32_t *br;
     uint32_t target;
@@ -466,7 +510,19 @@ static struct {
     int32_t mimm;
 } side[128]; // side exits; mf>=0: compute the CR field at the exit
 static int nside;
-static void exit_ind(void);
+static struct {
+    uint32_t *br, *back;
+} cold_nan[64]; // lfs of a NaN: its bits path, emitted after the block's side exits (the hot path takes no branch)
+static int ncold;
+static void exit_ind(int kind);
+static void shared_table(int d, uint32_t off, uint64_t va) { // xd = a table of the engine region: at ENV + off, or jit_smp
+    if (!jit_smp)
+        E(0x91400000 | (off >> 12) << 10 | ENV << 5 | d); // add xd, ENV, #off, lsl #12
+    else {
+        E(0xD2800000 | 2u << 21 | (uint32_t)(va >> 32 & 0xffff) << 5 | d); // movz xd, #va[47:32], lsl #32
+        E(0xF2800000 | 1u << 21 | (uint32_t)(va >> 16 & 0xffff) << 5 | d); // movk xd, #va[31:16], lsl #16
+    }
+}
 _Static_assert(offsetof(CPU, tlbi_va) + 8 * 256 <= 32760 && offsetof(CPU, tlbi_n) < 16384,
                "tlbi fields need scaled 12-bit offsets");
 static void tlbi_run(void) { // x16, x30: hvf.c's queued invalidations, by VA for every ASID; then none queued
@@ -485,17 +541,26 @@ static void tlbi_run(void) { // x16, x30: hvf.c's queued invalidations, by VA fo
     strw(ZR, ENV, OFF(tlbi_n));
     fix(z, cp); // dsb ish; isb
 }
-/* x16: SO << 63 | SR << 32 | pc. x17 = the set's first cell: (pc ^ SR ^ SO << 31) * 0x9E3779B1, its top 15 bits (16 with
- * one way), as the environment's fill: a pc's SO=0 and SO=1 blocks get different sets (Classic enters some code with both,
- * and a third key in their set made the two ways miss 500 000 times in 5 s). */
+/* x16: SO << 63 | SR << 32 | pc. x17 = the set's first cell: (pc ^ SR ^ SO << 31) * 0x9E3779B1, its top jc_bits - 1
+ * bits (jc_bits with one way), as the environment's fill: a pc's SO=0 and SO=1 blocks get different sets (Classic
+ * enters some code with both, and a third key in their set made the two ways miss 500 000 times in 5 s). */
 static void jc_index(void) {
     E(0xCA400000 | T0 << 16 | 32u << 10 | T0 << 5 | T1);
     movw(T2, 0x9E3779B1u);
     E(0x1B007C00 | T2 << 16 | T1 << 5 | T1); // eor; mul w17, w17, w30
-    E(0x53007C00 | (jc_ways == 2 ? 17u : 16u) << 16 | T1 << 5 | T1);
-    ldrx(T2, ENV, OFF(jit_jc)); // lsr w17, #17
+    E(0x53007C00 | (jc_ways == 2 ? 33 - jc_bits : 32 - jc_bits) << 16 | T1 << 5 | T1);
+    ldrx(T2, ENV, OFF(jit_jc)); // lsr w17, #(33 - jc_bits)
     E(0x8B000000 | T1 << 16 | (jc_ways == 2 ? 6u : 5u) << 10 | T2 << 5 | T1); // add x17, x30, x17, lsl #6
 }
+/* The first level of the jump cache (PT_JC_L1=0: off): 512 cells in ENV by the target's pc, tried before the hash,
+ * the SR and the page generation of the cache proper, and filled after each of its hits. A cell holds what that
+ * lookup found during this run of JIT code - since the last entry (load_guest) and the last change of mode (jump_dyn),
+ * which both move jc_epoch. Within a run the mode, the SRs and the page generations do not change (an mtsr, a tlbie,
+ * an interrupt, a flush, a dropped block all leave JIT code first), so the same pc and XER.SO variant find the same
+ * code; a dropped block's entry is its exit, as for the cache proper.
+ * ponytail: direct-mapped by the target's offset in its page (pc bits 2-10); targets at one offset of different pages
+ * share a cell. Fold higher pc bits into the index if the lookup counters show it (one more instruction a lookup). */
+static int l1_on = 1;
 static void
 jc_tail(void) { // x17: the jump-cache cell, key already compared (flags); w16: pc. Check the page generation, then jump
     uint32_t *m0 = NULL, *m1, *m2 = NULL;
@@ -512,8 +577,13 @@ jc_tail(void) { // x17: the jump-cache cell, key already compared (flags); w16: 
     if (jit_pggen) { // VM: the generation table is at ENV + jit_pggen_off
         E(0xD3400000 | 12u << 16 | 27u << 10 | T0 << 5 |
           T0); // ubfx x16, x16, #12, #16: page within the segment (tlbie ignores the segment)
-        E(0x8B000000 | T0 << 16 | 2u << 10 | ENV << 5 | T0); // add x16, x27, x16, lsl #2
-        E(0x91400000 | (jit_pggen_off >> 12) << 10 | T0 << 5 | T0); // add x16, x16, #off, lsl #12
+        if (jit_smp) {
+            shared_table(T2, jit_pggen_off, jit_pggen_va);
+            E(0x8B000000 | T0 << 16 | 2u << 10 | T2 << 5 | T0); // add x16, x30, x16, lsl #2
+        } else {
+            E(0x8B000000 | T0 << 16 | 2u << 10 | ENV << 5 | T0); // add x16, x27, x16, lsl #2
+            E(0x91400000 | (jit_pggen_off >> 12) << 10 | T0 << 5 | T0); // add x16, x16, #off, lsl #12
+        }
         ldrw(T0, T0, 0);
         ldrw(T2, T1, 16);
         E(0x6B00001F | T2 << 16 | T0 << 5);
@@ -521,6 +591,18 @@ jc_tail(void) { // x17: the jump-cache cell, key already compared (flags); w16: 
         E(0x54000000 | NE);
     }
     ldrx(T1, T1, 8);
+    if (l1_on) { // found and current: into the first level, for the rest of this run (pc is in ENV: exit_ind, jump_dyn)
+        ldrw(T0, ENV, OFF(pc));
+        ubfm(T2, T0, 2, 10);
+        E(0x8B000000 | T2 << 16 | 4u << 10 | ENV << 5 | T2); // add x30, ENV, x30, lsl #4
+        strx(T1, T2, OFF(l1) + 8);
+        if (kso)
+            E(0xB2400000 | T0 << 5 | T0); // orr x16, x16, #1
+        ldrx(T1, ENV, OFF(jc_epoch));
+        E(0xAA000000 | T1 << 16 | 32u << 10 | T0 << 5 | T0); // orr x16, x16, x17, lsl #32
+        strx(T0, T2, OFF(l1));
+        ldrx(T1, T2, OFF(l1) + 8);
+    }
     E(0xD61F0000 | T1 << 5); // br x17
     fix(m1, cp);
     if (m2)
@@ -531,12 +613,13 @@ jc_tail(void) { // x17: the jump-cache cell, key already compared (flags); w16: 
 }
 static void exit_to(uint32_t t) { // direct, linkable
     if (t == blk_pc0 && !check && !nolink) {
+        self_loop = 1;
         b_to(loop_start);
         return;
     } // self-loop: cached registers stay in registers
     if ((t ^ blk_pc0) >> 12 && !check && !nolink) {
         movw(T0, t);
-        exit_ind();
+        exit_ind(0);
         return;
     } // to another page: through the jump cache
     flush_cache_regs();
@@ -557,9 +640,34 @@ static void exit_why(uint32_t pc, int why) {
     strw(T1, ENV, OFF(jit_exit));
     b_to(exit_common);
 }
-static void exit_ind(void) { // target in w16 (aligned)
+int jit_stats_on;
+static CPU *st_cpu; // PT_STATS: the CPU whose st_ind the emitted counters fill
+static uint32_t st_watch_pc; // PT_STATS_BLOCK=pc (hex): the block whose passes are counted (CPU.st_watch); 0 none
+// target in w16 (aligned). kind (PT_STATS only, three more instructions): 0 a direct branch to another page, 1 blr, 2 bctr, 3 other
+static void exit_ind(int kind) {
     flush_cache_regs();
     strw(T0, ENV, OFF(pc));
+    if (l1_on) {
+        ubfm(T1, T0, 2, 10);
+        E(0x8B000000 | T1 << 16 | 4u << 10 | ENV << 5 | T1); // add x17, ENV, x17, lsl #4
+        ldrx(T2, ENV, OFF(jc_epoch));
+        E(0xAA000000 | T2 << 16 | 32u << 10 | T0 << 5 | T0); // orr x16, x16, x30, lsl #32
+        if (kso)
+            E(0xB2400000 | T0 << 5 | T0); // orr x16, x16, #1
+        ldrx(T2, T1, OFF(l1));
+        E(0xEB00001F | T0 << 16 | T2 << 5); // cmp x30, x16
+        uint32_t *miss = cp;
+        E(0x54000000 | NE);
+        ldrx(T1, T1, OFF(l1) + 8);
+        E(0xD61F0000 | T1 << 5); // br x17
+        fix(miss, cp);
+        logi(ANDi, ANDw, T0, T0, ~3u); // the pc again
+    }
+    if (jit_stats_on) { // the lookups the first level did not answer
+        ldrx(T2, ENV, OFF(st_ind) + 8u * kind);
+        E(0x91000400 | T2 << 5 | T2); // add x30, x30, #1
+        strx(T2, ENV, OFF(st_ind) + 8u * kind);
+    }
     if (kir) { // cache key: the target segment's SR in the upper 32 bits
         ubfm(T2, T0, 28, 31);
         E(0x8B000000 | T2 << 16 | 2u << 10 | ENV << 5 | T2); // x30 = ENV + 4 * (pc >> 28)
@@ -586,7 +694,7 @@ static void so_switch(uint32_t pc) {
     }
     kso ^= 1;
     movw(T0, pc);
-    exit_ind();
+    exit_ind(3);
     kso ^= 1;
 }
 static int crf(int f) {
@@ -617,6 +725,9 @@ static void crbit_to(int d, int bi) { // CR bit bi -> wd (0/1); clobbers x16 if 
 static void jump_dyn(
         void) { // jump to w16 with the MSR in w17 (the mode may have changed): the mode's TTBR0 and the cache key follow the MSR
     strw(T0, ENV, OFF(pc)); // call after flush_cache_regs(): x15, x18, x19 (cache pool) are free here
+    ldrx(15, ENV, OFF(jc_epoch)); // another mode or address space: the first-level jump cache's cells are not its code
+    E(0x91000400 | 15u << 5 | 15);
+    strx(15, ENV, OFF(jc_epoch));
     ubfm(15, T1, 4, 4);
     ubfm(18, T1, 14, 14);
     op3(ANDw, 18, 18, 15);
@@ -944,6 +1055,7 @@ static uint32_t fsf, fdbl, fwr, frbw,
 static uint32_t nofsf[1024];
 static uint8_t nofsf_n[1024]; // pc + 1 of blocks whose entry value was not a single, how often (jit_fsf_fail)
 static uint64_t st_fsf_blocks; // translations with a single-format FPR (fixtures)
+static uint64_t st_fsf_fails, st_fsf_fpoff, st_fsf_full; // X_FSF entries, those with MSR.FP = 0; full neighbourhoods
 static int fsgl, fool, fsf_enabled; // the access being emitted is single precision; out-of-line code (not classified)
 static void fnote(int g, int rd) {
     if (!dry || fool)
@@ -964,6 +1076,7 @@ static int fsf_off(uint32_t pc) {
         if (!nofsf[i])
             return 0;
     }
+    st_fsf_full++;
     return 1; // a full neighbourhood: off
 }
 /* Gets FPR g into host register v: from the FPR cache when the block keeps it in a register (as double or single),
@@ -1111,6 +1224,14 @@ static void fp_check(uint32_t pc) { // MSR.FP=0 (machine): "FP unavailable"
     fp_checked = 1;
     unavail(pc, 13, 0x800);
 }
+static void nan_bits(void) { // single NaN bits in w17 -> d0, payload kept (an SNaN stays signalling)
+    logi(ANDi, ANDw, T2, T1, 0x7fffff);
+    E(0xD3400000 | 35u << 16 | 34u << 10 | T2 << 5 | T2); // x30 = mantissa << 29
+    E(0xB2400000 | 12u << 16 | 10u << 10 | T2 << 5 | T2);
+    ubfm(T1, T1, 31, 31); // | 0x7FF0...; w17 = sign
+    E(0xAA000000 | T1 << 16 | 63u << 10 | T2 << 5 | T1);
+    E(0x9E670000 | T1 << 5); // x17 = x30 | sign << 63; fmov d0, x17
+}
 static void
 fload(int sgl, int d,
       int ea) { // lfs/lfd: EA in register ea (not x17/x30) -> c->fpr[d]; lfs as sgl2dbl (an SNaN is not quieted)
@@ -1129,28 +1250,23 @@ fload(int sgl, int d,
     mem(1, 4, T1, (Addr){ea, 0});
     E(REVw | T1 << 5 | T1);
     uint32_t h = fcache_active && fsf >> d & 1 ? (uint32_t)fmap[d] : 0;
-    if (h)
-        E(0x1E270000 | T1 << 5 | h); // single format: the bits
-    ubfm(T2, T1, 23, 30);
-    E(0x7100001F | 0xffu << 10 | T2 << 5);
+    E(0x1E270000 | T1 << 5 | h); // fmov s(h or 0), w17: the single's bits (the cache register in single format)
+    /* Only a NaN needs the bits path (fcvt would quiet an SNaN); Inf converts exactly. fcmp s, s is unordered for a
+     * NaN; an SNaN sets FPSR.IOC, which no reader trusts (every FPSR use clears it first, the interpreter too). */
+    E(0x1E202000 | h << 16 | h << 5);
     uint32_t *bn = cp;
-    E(0x54000000 | EQ); // Inf/NaN: by bits
-    if (h)
-        E(0x1E22C000 | h << 5 | 0);
-    else {
-        E(0x1E270000 | T1 << 5 | 0);
-        E(0x1E22C000 | 0 << 5 | 0);
-    } // fmov s0, w17; fcvt d0, s0
-    uint32_t *bd = cp;
-    E(0x14000000);
-    fix(bn, cp);
-    logi(ANDi, ANDw, T2, T1, 0x7fffff);
-    E(0xD3400000 | 35u << 16 | 34u << 10 | T2 << 5 | T2); // x30 = mantissa << 29
-    E(0xB2400000 | 12u << 16 | 10u << 10 | T2 << 5 | T2);
-    ubfm(T1, T1, 31, 31); // | 0x7FF0...; w17 = sign
-    E(0xAA000000 | T1 << 16 | 63u << 10 | T2 << 5 | T1);
-    E(0x9E670000 | T1 << 5); // x17 = x30 | sign << 63; fmov d0, x17
-    b_at(bd, cp);
+    E(0x54000000 | VS); // NaN: by bits
+    E(0x1E22C000 | h << 5 | 0); // fcvt d0, s(h or 0)
+    if (ncold < 64) { // out of line, after the block
+        cold_nan[ncold].br = bn;
+        cold_nan[ncold++].back = cp;
+    } else {
+        uint32_t *bd = cp;
+        E(0x14000000);
+        fix(bn, cp);
+        nan_bits();
+        b_at(bd, cp);
+    }
     fsgl = 1;
     fst(0, d);
     fsgl = 0;
@@ -1228,11 +1344,18 @@ static void fslow(uint32_t br) {
     fsl[nfsl++] = cp;
     E(br);
 }
+/* PT_FP_DIRECTED (default; =0 off): an A-form operation or frsp whose own guard tests RN gets the directed-rounding
+ * form (fp_directed) on its slow path instead of the exit to the interpreter. The hot path is unchanged: the RN test
+ * is the guard's, once per block when hoisted. dir_in: the instruction; dir_rn: its guard was emitted. */
+static uint32_t dir_in;
+static int dir_sgl, dir_rn;
+static void fp_directed(uint32_t in, uint32_t pc, int sgl);
 static void fp_guard(void) {
     ldrw(T0, ENV, OFF(fpscr));
     if (!fp_hoist ||
         !fp_guarded) { /* enables (0xf8) and RN (0x03) zero; NI (0x04) passes: the interpreter's results ignore it too */
         uint32_t f;
+        dir_rn = 1;
         bm32(0xf8, &f);
         E(ANDSi | f | T0 << 5 | ZR);
         fslow(0x54000000 | NE);
@@ -1319,9 +1442,16 @@ static void fp_done_kind(uint32_t pc, int fprf, int sgl, int v,
     E(0x14000000);
     for (int i = 0; i < nfsl; i++)
         fix(fsl[i], cp);
+    uint32_t din = dir_rn && fp_directed_enabled ? dir_in : 0;
+    dir_in = 0;
+    dir_rn = 0;
     if (owe_gen)
         b_to(settle_fail);
-    else
+    else if (din) {
+        int n = nfsl;
+        fp_directed(din, pc, dir_sgl); // its own slow path is the exit to the interpreter
+        nfsl = n;
+    } else
         exit_why(pc, X_INTERP);
     b_at(over, cp);
 }
@@ -1874,6 +2004,154 @@ static void fp_record(uint32_t a, uint32_t b, uint32_t c, int uB, int uC, uint32
     movw(T1, kind);
     E(0x79000000u | (OFF(fs_kind) / 2) << 10 | ENV << 5 | T1); // strh, FPCC byte 0
 }
+/* fp_owe's out-of-line code: the exact special results, then the eager form (complete status, or the interpreter).
+ * Emitted after the block (translate) like its exits, or in place for a block's first operation (xx0: tbz range).
+ * Returns fvalid after the eager form. */
+typedef struct {
+    uint32_t in, pc, R, sv, hA, hB, hC, sfm, valid, ev, *accept, *special[2], *eager[12], *xx0, *back;
+    int sgl, save, ns, ne;
+    __typeof__(pend) prev;
+    int guard; // fp_owe emitted the RN test: the eager form may be here for RN != 0
+} ColdOp;
+static ColdOp coldop[32];
+static int ncoldop, cold_words;
+static uint32_t fp_owe_cold(ColdOp o) {
+    int xo5 = o.in >> 1 & 31, uB = xo5 != 25, uC = xo5 == 25 || xo5 >= 28, addsub = xo5 == 20 || xo5 == 21;
+    int sgl = o.sgl, save = o.save, ns = o.ns, ne = o.ne;
+    uint32_t in = o.in, pc = o.pc, R = o.R, sv = o.sv, sfm = o.sfm, hA = o.hA, hB = o.hB, hC = o.hC, valid = o.valid;
+    uint32_t *accept = o.accept, **special = o.special, **eager = o.eager, *xx0 = o.xx0;
+    uint32_t max = sgl ? 0xff : 0x7ff, lo = addsub ? 0 : sgl ? 2 : 64;
+    __typeof__(pend) prev = o.prev;
+    /* Out of line, exact and status-only: Inf from an Inf input (no OX), a product or FMA with a zero factor (the result
+     * is the addend, exactly), a zero dividend. Xbench FP Basic's array is +-Inf and 0 after ~10 of its 3680 passes.
+     * The eager forms settle these too (fma_inf, zero factors). */
+    for (int k = 0; k < ns; k++)
+        fix(special[k], cp);
+    /* The common exact cases first, straight to accept with the result still in R (w30/x30: its bits; an operand
+     * the result overwrote is in d8/d9): a zero result with a zero factor, an Inf result with an Inf input. The same
+     * conditions as the checks below, without the moves around them. */
+    const uint32_t h[3] = {hA, hB, hC}, use[3] = {1, (uint32_t)uB, (uint32_t)uC};
+    uint32_t *other[2], *zero_no = NULL;
+    int no = 0;
+    if (lo) {
+        E(0x7100001F | (max - lo) << 10 | T1 << 5);
+        uint32_t *infnan = cp;
+        E(0x54000000 | EQ); // exponent max - lo: Inf or NaN
+        if (sgl)
+            ubfm(T1, T2, 31, 30); // lsl w17, w30, #1
+        else
+            E(0xD37FF800 | T2 << 5 | T1); // lsl x17, x30, #1
+        other[no++] = cp;
+        E(sgl ? 0x35000000 | T1 : 0xB5000000 | T1); // a tiny nonzero result
+        for (uint32_t r = 0; r < 3; r += 2)
+            if (use[r]) { // the factors a and c (a dividend: c unused)
+                E((sfm >> r & 1 ? 0x1E202008 : 0x1E602008) | (h[r] == R ? sv : h[r]) << 5);
+                E(0x54000000 | EQ | ((uint32_t)(accept - cp) & 0x7ffff) << 5); // fcmp, #0.0
+            }
+        zero_no = cp;
+        E(0x14000000);
+        fix(infnan, cp);
+    }
+    if (sgl) { // the mantissa: NaN
+        uint32_t f;
+        bm32(0x7fffff, &f);
+        E(ANDSi | f | T2 << 5 | ZR);
+    } else
+        E(0xF240CC00 | T2 << 5 | ZR); // tst x30, #0xfffffffffffff
+    other[no++] = cp;
+    E(0x54000000 | NE);
+    E(0xD2EFFE00 | T1);
+    E(0x9E670000 | T1 << 5 | 22); // d22 = +Inf
+    for (uint32_t r = 0; r < 3; r++)
+        if (use[r]) {
+            uint32_t g = h[r] == R ? sv : h[r];
+            if (sfm >> r & 1)
+                E(0x1E22C000 | g << 5 | 23); // fcvt d23, s
+            E(0x1E60C000 | (sfm >> r & 1 ? 23u : g) << 5 | 23);
+            E(0x1E602000 | 22u << 16 | 23u << 5);
+            E(0x54000000 | EQ | ((uint32_t)(accept - cp) & 0x7ffff) << 5);
+        }
+    for (int k = 0; k < no; k++)
+        fix(other[k], cp);
+    if (zero_no)
+        b_at(zero_no, cp);
+    if (R != 3)
+        E(0x1E604000 | R << 5 | 3); // fmov d3, dR: the out-of-line code's result
+    uint32_t *back = accept; // the result accepted after all
+    if (save) {
+        E(0x1E604000 | sv << 5 | R);
+        uint32_t *j = cp;
+        E(0x14000000);
+        back = cp;
+        E(0x1E604000 | 3u << 5 | R);
+        b_to(accept);
+        b_at(j, cp);
+    }
+    uint32_t r3 = sgl ? 7u : 3u;
+    if (sgl)
+        E(0x1E22C000 | 3u << 5 | 7); // fcvt d7, s3
+    E(0x1E602000 | r3 << 16 | r3 << 5);
+    eager[ne++] = cp;
+    E(0x54000000 | VS); // NaN result: invalid operation
+    E(0xD2EFFE00 | T1);
+    E(0x9E670000 | T1 << 5 | 22);
+    E(0x1E60C000 | r3 << 5 | 23);
+    E(0x1E602000 | 22u << 16 | 23u << 5); // |r| == +Inf?
+    uint32_t *fin = cp;
+    E(0x54000000 | NE);
+    for (uint32_t r = 0; r < 3; r++)
+        if (use[r]) {
+            if (sfm >> r & 1)
+                E(0x1E22C000 | h[r] << 5 | 23); // fcvt d23, s: a single-format operand
+            E(0x1E60C000 | (sfm >> r & 1 ? 23u : h[r]) << 5 | 23);
+            E(0x1E602000 | 22u << 16 | 23u << 5);
+            E(0x54000000 | EQ | ((uint32_t)(back - cp) & 0x7ffff) << 5);
+        }
+    uint32_t *ox = cp;
+    E(0x14000000); // Inf from finite inputs: OX
+    fix(fin, cp);
+    if (!addsub) { // a zero (or tiny) product, quotient or FMA
+        E((sfm & 1 ? 0x1E202008 : 0x1E602008) | hA << 5);
+        E(0x54000000 | EQ | ((uint32_t)(back - cp) & 0x7ffff) << 5); // fcmp hA, #0.0
+        if (uC) {
+            E((sfm & 4 ? 0x1E202008 : 0x1E602008) | hC << 5);
+            E(0x54000000 | EQ | ((uint32_t)(back - cp) & 0x7ffff) << 5);
+        }
+    }
+    for (int k = 0; k < ne; k++)
+        fix(eager[k], cp);
+    b_at(ox, cp);
+    if (prev.on)
+        fp_record(prev.a, prev.b, prev.c, prev.uB, prev.uC, prev.kind, prev.sf);
+    fvalid = valid;
+    int checked = fp_checked, guarded = fp_guarded;
+    fp_checked = fp_guarded = 0;
+    fool = 1;
+    dir_in = o.guard ? in : 0;
+    dir_sgl = sgl;
+    if (xo5 < 28)
+        fp_fast(in, pc, sgl);
+    else
+        fp_fma_fast(in, pc, sgl); // complete status (or the interpreter)
+    uint32_t eager_valid = fvalid;
+    if (xx0) { // XX = 0: the block's later operations assume XX = 1
+        uint32_t *skip = cp;
+        E(0x14000000);
+        fix(xx0, cp);
+        fvalid = valid;
+        fp_checked = fp_guarded = 0;
+        if (xo5 < 28)
+            fp_fast(in, pc, sgl);
+        else
+            fp_fma_fast(in, pc, sgl);
+        exit_to(pc + 4);
+        b_at(skip, cp);
+    }
+    fp_checked = checked;
+    fp_guarded = guarded;
+    fool = 0;
+    return eager_valid;
+}
 /* Lazy-FPSCR variant of the arithmetic (PT_FP_LAZY): computes the result now and records what is needed to derive
  * FPSCR flags only when something reads them. */
 static int fp_owe(uint32_t in, uint32_t pc, int sgl) {
@@ -1892,9 +2170,10 @@ static int fp_owe(uint32_t in, uint32_t pc, int sgl) {
     int sfd = sgl && fcache_active && fsf >> d & 1;
     __typeof__(pend) prev = pend;
     pend.on = 0;
+    int guard = !fp_hoist || !fp_guarded;
     if (!fp_hoist || !fp_guarded || !fp_xx) { // once per block: RN NI enables 0, XX = 1
         ldrw(T0, ENV, OFF(fpscr));
-        if (!fp_hoist || !fp_guarded) {
+        if (guard) {
             uint32_t f;
             bm32(0xf8, &f);
             E(ANDSi | f | T0 << 5 | ZR);
@@ -1912,6 +2191,19 @@ static int fp_owe(uint32_t in, uint32_t pc, int sgl) {
             fp_xx = 1;
         } // tbz w16, #25: XX = 0
     }
+    /* A double result goes straight into the destination's cache register (an fmov on every dependency
+     * step otherwise: Mandelbrot's chain is five operations). When that register is an operand or a pending record's,
+     * its value is kept in d8 or d9 first (off the chain) and recorded from there; out of line the result goes to d3 and the
+     * register gets its value back, so the checks and the eager form see the operands. The copy comes before the input
+     * checks' branches to the eager form, which goes on in the block: a deferred record of this operation reads the copy
+     * after the eager form has written R. (A guard's eager form leaves the block at this operation.) */
+    int cr = fcache_active && fmap[d] >= 0 ? fmap[d] : -1;
+    uint32_t R = cr >= 0 && (sfd || (!sgl && xo5 < 30)) ? (uint32_t)cr : 3u;
+    int save = R != 3 && (R == hA || (uB && R == hB) || (uC && R == hC) ||
+                          (prev.on && (R == prev.a || (prev.uB && R == prev.b) || (prev.uC && R == prev.c))));
+    uint32_t sv = prev.on && (prev.a == 8 || (prev.uB && prev.b == 8) || (prev.uC && prev.c == 8)) ? 9 : 8;
+    if (save)
+        E(0x1E604000 | R << 5 | sv); // fmov d8/d9, dR
     /* No NaN test of the inputs: a NaN input makes a NaN result, which the result test below sends to the
      * eager form (and a single input check refuses a NaN as not exactly single). */
     uint32_t x = hA, y = hB, z = hC;
@@ -1928,16 +2220,6 @@ static int fp_owe(uint32_t in, uint32_t pc, int sgl) {
                 *xyz[r] = 4 + r;
             }
     }
-    /* A double result goes straight into the destination's cache register (an fmov on every dependency
-     * step otherwise: Mandelbrot's chain is five operations). When that register is an operand or a pending record's,
-     * its value is kept in d21 first (off the chain) and recorded from there; out of line the result goes to d3 and the
-     * register gets its value back, so the checks and the eager form see the operands. */
-    int cr = fcache_active && fmap[d] >= 0 ? fmap[d] : -1;
-    uint32_t R = cr >= 0 && (sfd || (!sgl && xo5 < 30)) ? (uint32_t)cr : 3u;
-    int save = R != 3 && (R == hA || (uB && R == hB) || (uC && R == hC) ||
-                          (prev.on && (R == prev.a || (prev.uB && R == prev.b) || (prev.uC && R == prev.c))));
-    if (save)
-        E(0x1E604000 | R << 5 | 21); // fmov d21, dR
     fop(xo5, ty, x, uC ? z : y, y, R); // a op b, a * c; a*c + b, a*c - b
     /* Ordinary results here; Inf/NaN, and for mul, div and FMA also below 2^-959 (double, as the eager forms) or
      * 2^-125 (single), are checked out of line. Sums and differences of tiny values are exact. */
@@ -1968,19 +2250,20 @@ static int fp_owe(uint32_t in, uint32_t pc, int sgl) {
     int defer = (nx >> 26 == 59 || nx >> 26 == 63) && !(nx & 1) &&
                 (nxo == 18 || nxo == 20 || nxo == 21 || nxo == 25 || (nxo >= 28 && fma_fast)) && hA >= 25 &&
                 (!uB || hB >= 25) && (!uC || hC >= 25) &&
-                (cr < 0 || ((uint32_t)cr != hA && (!uB || (uint32_t)cr != hB) && (!uC || (uint32_t)cr != hC)));
+                (cr < 0 || R != 3 ||
+                 ((uint32_t)cr != hA && (!uB || (uint32_t)cr != hB) && (!uC || (uint32_t)cr != hC)));
     uint32_t kind = (sgl ? 0x20u : 0) | (uint32_t)xo5;
     if (defer) {
         pend.on = 1;
-        pend.a = hA;
-        pend.b = hB;
-        pend.c = hC;
+        pend.a = hA == R ? sv : hA; // an operand the result overwrites: its copy in d8/d9
+        pend.b = hB == R ? sv : hB;
+        pend.c = hC == R ? sv : hC;
         pend.uB = uB;
         pend.uC = uC;
         pend.kind = kind;
         pend.sf = sfm;
     } else
-        fp_record(hA == R ? 21 : hA, hB == R ? 21 : hB, hC == R ? 21 : hC, uB, uC, kind, sfm); // the record first
+        fp_record(hA == R ? sv : hA, hB == R ? sv : hB, hC == R ? sv : hC, uB, uC, kind, sfm); // the record first
     /* A conversion or negation still to come writes the destination's cache register directly (no fmov
      * after it: Dot Product's sum is a loop-carried single chain). */
     uint32_t r = (sgl || xo5 >= 30) && cr >= 0 ? (uint32_t)cr : R;
@@ -2004,91 +2287,28 @@ static int fp_owe(uint32_t in, uint32_t pc, int sgl) {
             fvalid |= 1u << d;
         } // write-through, as fst
     }
-    uint32_t done = fvalid, *over = cp;
+    uint32_t done = fvalid;
+    ColdOp o = {in, pc, R, sv, hA, hB, hC, sfm, valid, 0, accept, {special[0], special[1]}, {0}, xx0, NULL, sgl, save, ns, ne, prev, guard};
+    memcpy(o.eager, eager, sizeof o.eager);
+    if (!dry && !xx0 && ncoldop < (int)(sizeof coldop / sizeof *coldop)) { // after the block: no taken branch over it
+        uint32_t *at = cp;
+        int s0 = nstub, s1 = nside;
+        o.ev = fp_owe_cold(o); // emitted here too, only for the state it leaves (the same at the block's end); dropped
+        int size = (int)(cp - at);
+        cp = at;
+        nstub = s0;
+        nside = s1;
+        if (cold_words + size < 8192) { // the block's room: 49152 words of body, 65536 reserved (translate)
+            cold_words += size;
+            o.back = cp;
+            coldop[ncoldop++] = o;
+            fvalid = done & o.ev;
+            return 0;
+        }
+    }
+    uint32_t *over = cp;
     E(0x14000000);
-    /* Out of line, exact and status-only: Inf from an Inf input (no OX), a product or FMA with a zero factor (the result
-     * is the addend, exactly), a zero dividend. Xbench FP Basic's array is +-Inf and 0 after ~10 of its 3680 passes.
-     * The eager forms settle these too (fma_inf, zero factors). */
-    for (int k = 0; k < ns; k++)
-        fix(special[k], cp);
-    if (R != 3)
-        E(0x1E604000 | R << 5 | 3); // fmov d3, dR: the out-of-line code's result
-    uint32_t *back = accept; // the result accepted after all
-    if (save) {
-        E(0x1E604000 | 21u << 5 | R);
-        uint32_t *j = cp;
-        E(0x14000000);
-        back = cp;
-        E(0x1E604000 | 3u << 5 | R);
-        b_to(accept);
-        b_at(j, cp);
-    }
-    if (prev.on)
-        fp_record(prev.a, prev.b, prev.c, prev.uB, prev.uC, prev.kind,
-                  prev.sf); // out of line: the previous record first
-    uint32_t r3 = sgl ? 7u : 3u;
-    if (sgl)
-        E(0x1E22C000 | 3u << 5 | 7); // fcvt d7, s3
-    E(0x1E602000 | r3 << 16 | r3 << 5);
-    eager[ne++] = cp;
-    E(0x54000000 | VS); // NaN result: invalid operation
-    E(0xD2EFFE00 | T1);
-    E(0x9E670000 | T1 << 5 | 22);
-    E(0x1E60C000 | r3 << 5 | 23);
-    E(0x1E602000 | 22u << 16 | 23u << 5); // |r| == +Inf?
-    uint32_t *fin = cp;
-    E(0x54000000 | NE);
-    const uint32_t h[3] = {hA, hB, hC}, use[3] = {1, (uint32_t)uB, (uint32_t)uC};
-    for (uint32_t r = 0; r < 3; r++)
-        if (use[r]) {
-            if (sfm >> r & 1)
-                E(0x1E22C000 | h[r] << 5 | 23); // fcvt d23, s: a single-format operand
-            E(0x1E60C000 | (sfm >> r & 1 ? 23u : h[r]) << 5 | 23);
-            E(0x1E602000 | 22u << 16 | 23u << 5);
-            E(0x54000000 | EQ | ((uint32_t)(back - cp) & 0x7ffff) << 5);
-        }
-    uint32_t *ox = cp;
-    E(0x14000000); // Inf from finite inputs: OX
-    fix(fin, cp);
-    if (!addsub) { // a zero (or tiny) product, quotient or FMA
-        E((sfm & 1 ? 0x1E202008 : 0x1E602008) | hA << 5);
-        E(0x54000000 | EQ | ((uint32_t)(back - cp) & 0x7ffff) << 5); // fcmp hA, #0.0
-        if (uC) {
-            E((sfm & 4 ? 0x1E202008 : 0x1E602008) | hC << 5);
-            E(0x54000000 | EQ | ((uint32_t)(back - cp) & 0x7ffff) << 5);
-        }
-    }
-    for (int k = 0; k < ne; k++)
-        fix(eager[k], cp);
-    b_at(ox, cp);
-    if (prev.on)
-        fp_record(prev.a, prev.b, prev.c, prev.uB, prev.uC, prev.kind, prev.sf);
-    fvalid = valid;
-    int checked = fp_checked, guarded = fp_guarded;
-    fp_checked = fp_guarded = 0;
-    fool = 1;
-    if (xo5 < 28)
-        fp_fast(in, pc, sgl);
-    else
-        fp_fma_fast(in, pc, sgl); // complete status (or the interpreter)
-    uint32_t eager_valid = fvalid;
-    if (xx0) { // XX = 0: the block's later operations assume XX = 1
-        uint32_t *skip = cp;
-        E(0x14000000);
-        fix(xx0, cp);
-        fvalid = valid;
-        fp_checked = fp_guarded = 0;
-        if (xo5 < 28)
-            fp_fast(in, pc, sgl);
-        else
-            fp_fma_fast(in, pc, sgl);
-        exit_to(pc + 4);
-        b_at(skip, cp);
-    }
-    fvalid = done & eager_valid;
-    fp_checked = checked;
-    fp_guarded = guarded;
-    fool = 0;
+    fvalid = done & fp_owe_cold(o);
     b_at(over, cp);
     return 0;
 }
@@ -2111,23 +2331,23 @@ static void fp_settle_site(uint32_t pc) {
         exit_why(pc, X_INTERP);
     fix(none, cp);
 }
-/* Directed arithmetic is a cold side path. FPCR is restored before any exit or
- * status/store operation; RN=0 retains the existing error-free/lazy backend.
- * Stop at a block boundary so no cached FPR or hoisted RN assumption escapes. */
+/* Directed arithmetic, on the slow path of the nearest-rounding form (fp_done_kind): nothing is changed yet, MSR.FP
+ * is checked and a pending record is stored. An owed status needs no settling: this operation's FR, FI and FPRF
+ * replace it (fp_done_kind), and its own slow path is the interpreter, which settles. FPCR is restored before any
+ * exit or status/store operation. It stops at a block boundary so no cached FPR or hoisted RN assumption escapes. */
 static void fp_directed(uint32_t in, uint32_t pc, int sgl) {
     unsigned xo = in >> 1 & 31, d = in >> 21 & 31, a = in >> 16 & 31;
     unsigned b = in >> 11 & 31, c = in >> 6 & 31;
     int convert = (in >> 26 == 63 && (in >> 1 & 1023) == 12);
-    if (pend.on)
-        fp_record(pend.a, pend.b, pend.c, pend.uB, pend.uC, pend.kind, pend.sf);
-    fp_check(pc);
-    fp_settle_site(pc);
     nfsl = 0;
     ldrw(T0, ENV, OFF(fpscr));
     uint32_t f;
     bm32(0xfc, &f);
     E(ANDSi | f | T0 << 5 | ZR);
     fslow(0x54000000 | NE); /* NI/enables: interpreter */
+    bm32(3, &f);
+    E(ANDSi | f | T0 << 5 | ZR);
+    fslow(0x54000000 | EQ); /* RN = 0: here for a special case of the nearest form */
     /* The write-through file is valid even when the RN=0 branch caches singles. */
     E(0xFD400000u | (OFF(fpr) / 8 + (convert ? b : a)) << 10 | ENV << 5);
     if (!convert)
@@ -2186,33 +2406,16 @@ static void fp_directed(uint32_t in, uint32_t pc, int sgl) {
         exit_why(pc + 4, X_LOOKUP);
     else {
         movw(T0, pc + 4);
-        exit_ind();
+        exit_ind(3);
     }
 }
-/* PT_FP_DIRECTED: emits the directed-rounding path (FPSCR.RN != 0) beside the nearest-rounding one, choosing at run
- * time. */
-static void fp_directed_side(uint32_t in, uint32_t pc, int sgl) {
-    ldrw(T0, ENV, OFF(fpscr));
-    uint32_t f;
-    bm32(3, &f);
-    E(ANDSi | f | T0 << 5 | ZR);
-    uint32_t *nearest = cp;
-    E(0x54000000 | EQ);
-    int checked = fp_checked, saved_n = nfsl;
-    uint32_t valid = fvalid, *saved[24];
-    memcpy(saved, fsl, sizeof saved);
-    fp_directed(in, pc, sgl);
-    fp_checked = checked;
-    fvalid = valid;
-    nfsl = saved_n;
-    memcpy(fsl, saved, sizeof saved);
-    fix(nearest, cp);
-}
 static int fp_arith(uint32_t in, uint32_t pc, int sgl) {
-    unsigned xo = in >> 1 & 31;
-    if (fp_directed_enabled && !owe_gen && !(in & 1) && (xo == 18 || xo == 20 || xo == 21 || xo == 25 || xo >= 28))
-        fp_directed_side(in, pc, sgl);
-    return fp_arith_nearest(in, pc, sgl);
+    dir_in = in & 1 ? 0 : in;
+    dir_sgl = sgl;
+    dir_rn = 0;
+    int r = fp_arith_nearest(in, pc, sgl);
+    dir_in = 0;
+    return r;
 }
 /* The SR-switch routine, once per code buffer before the blocks (code0), bl from an rfi or mtmsr into DR=1 whose SRs
  * changed in real mode (srgen != srgen_ok): XNU reloads all 16 SRs on every exception from user mode and back, and
@@ -2472,8 +2675,9 @@ static int fp_xform(uint32_t in, uint32_t pc) { // op 63: fcmpu fcmpo frsp fctiw
         fp_done(pc, 0, 0, 0);
         return 0;
     }
-    if (xo == 12 && fp_directed_enabled && !owe_gen)
-        fp_directed_side(in, pc, 1);
+    dir_in = xo == 12 ? in : 0;
+    dir_sgl = 1;
+    dir_rn = 0;
     fp_guard();
     fld(0, b);
     if (xo == 12 && !fp_old && fp_round_fast) {
@@ -2564,7 +2768,7 @@ static int plain_rd(int spr) { // SPRs whose read is a plain word in CPU (a writ
            (spr >= 528 && spr <= 543);
 }
 /* VMX scratch v0-v24 does not overlap the write-through FPR cache v25-v31. */
-static int vmx_neon_enabled, vmx_mem_enabled, vmx_vscr_enabled, vmx_int2_enabled, vmx_mhadd_enabled;
+static int vmx_neon_enabled, vmx_mem_enabled, vmx_vscr_enabled, vmx_int2_enabled, vmx_mhadd_enabled, vmx_lvx_q = 1;
 static int vmx_checked; // MSR.VEC=0: "VMX unavailable"; checked once a block (only mtmsr changes VEC within one)
 static void vmx_check(uint32_t pc) {
     if (jsys && !vmx_checked) {
@@ -2929,6 +3133,108 @@ _Static_assert(!(offsetof(CPU, vr) & 15) && offsetof(CPU, vr) + sizeof(((CPU *)0
  * Sending NaN or denormal lanes to the interpreter cost Tiger's OpenGL vertex path in Xbench's Spinning Squares 2.6M
  * exits per 5 s, taking its neighbours along. v16-v23 are temporaries. PT_VMX_FP=0 -> interpreter. */
 static int vmx_fp_enabled;
+/* The VR cache: what vmx_fp reads of a vector register - its words in host order, with VSCR.NJ's flush applied -
+ * kept in a NEON register for the block, and the two NJ masks computed once a block. Without it every operation
+ * loads, reverses and flushes each operand anew (vmaddfp: 34 instructions; 12 with its registers cached), and a
+ * loop-carried register goes through a store and a load an iteration. Only vmx_fp reads the cache; the VR file
+ * stays current (every write still stores), so exits and every other reader need nothing. A cached register is
+ * always valid after the prologue: vmx_fp writes it with its result, and after any other writer of the VR
+ * (vr_wrote) it is loaded again. Registers: what the FPR cache left of v25-v31. PT_VMX_VR_CACHE=0: off.
+ * ponytail: at most 5 VRs a block; v10-v15 are free too, once the trampoline saves d10-d15. */
+static int vrc_enabled = 1, vme = -1, vmk = -1; // vme, vmk: the masks' registers in this block (-1: no cache)
+static int8_t vmap[32]; // the cached VR's register, when the block has the cache: vreg()
+static int vscore[32], vfp_ops;
+static uint32_t vseen, vloadfirst;
+static int vreg(unsigned g) { return vme < 0 ? -1 : vmap[g]; }
+/* Pass 1: what caching VR g would save (+) or cost (-), in instructions; a register first read is loaded by the
+ * prologue. */
+static void vr_note(unsigned g, int points) {
+    if (!(vseen >> g & 1)) {
+        vseen |= 1u << g;
+        if (points > 0)
+            vloadfirst |= 1u << g;
+    }
+    vscore[g] += points;
+}
+/* keep = NJ ? 0x80000000 : ~0 and expo = 0x7f800000 in every word: a denormal or zero keeps its sign only. */
+static void vr_masks(unsigned keep, unsigned expo) {
+    ldrw(T1, ENV, OFF(vscr));
+    ubfm(T1, T1, 16, 16);
+    E(0x4b1103f1u);
+    ubfm(T1, T1, 1, 31);
+    E(0x2a3103f1u); // w17 = NJ ? 0x80000000 : ~0
+    E(0x4e040c00u | T1 << 5 | keep);
+    movw(T0, 0x7f800000);
+    E(0x4e040c00u | T0 << 5 | expo);
+}
+static void vr_flush(unsigned d, unsigned s, unsigned keep, unsigned expo) { // v19: temporary
+    E(0x4ea08c00u | expo << 16 | s << 5 | 19);
+    E(0x4ea01c00u | keep << 16 | 19u << 5 | 19); // cmtst, orr keep
+    E(0x4e201c00u | 19u << 16 | s << 5 | d); // and: NJ flush
+}
+static void vr_load(unsigned g) { // the cached register from the VR file
+    unsigned h = (unsigned)vmap[g];
+    E(0x3dc00000u | (OFF(vr) / 16 + g) << 10 | ENV << 5 | h);
+    E(0x6e200800u | h << 5 | h); // ldr qH, VR; rev32
+    vr_flush(h, h, (unsigned)vmk, (unsigned)vme);
+}
+/* After pass 1: the two masks and the VRs worth a register, the best first. */
+static void vr_plan(void) {
+    int spare[7], n = 0;
+    if (!vrc_enabled || vfp_ops < 2 - self_loop)
+        return;
+    for (int h = 25; h < 32; h++) {
+        int used = 0;
+        for (int g = 0; g < 32; g++)
+            used |= fmap[g] == h;
+        if (!used)
+            spare[n++] = h;
+    }
+    if (n < 2)
+        return;
+    vme = spare[--n];
+    vmk = spare[--n];
+    while (n) {
+        int best = -1, most = 0;
+        for (int g = 0; g < 32; g++) {
+            int worth = vscore[g] - (vloadfirst >> g & 1 && !self_loop ? 5 : 0);
+            if (vmap[g] < 0 && worth > most)
+                best = g, most = worth;
+        }
+        if (best < 0)
+            break;
+        vmap[best] = (int8_t)spare[--n];
+    }
+}
+static void vr_prologue(void) {
+    if (vme < 0)
+        return;
+    vr_masks((unsigned)vmk, (unsigned)vme);
+    for (unsigned g = 0; g < 32; g++)
+        if (vmap[g] >= 0 && vloadfirst >> g & 1)
+            vr_load(g);
+}
+/* After a translated instruction: a VR written by anything but vmx_fp is cached anew; after mtvscr (NJ may have
+ * changed) the masks and every cached register are. */
+static void vr_wrote(uint32_t in) {
+    unsigned op = in >> 26, xo = in >> 1 & 0x3ff, d = in >> 21 & 31;
+    if (op == 4 && (in & 2047) == 0x644) {
+        if (vme >= 0) {
+            vr_masks((unsigned)vmk, (unsigned)vme);
+            for (unsigned g = 0; g < 32; g++)
+                if (vmap[g] >= 0)
+                    vr_load(g);
+        }
+        return;
+    }
+    if (op == 4 ? (in & 62) == 46 || (in & 2047 & ~0x440u) == 0x00a // vmx_fp wrote its own
+                : op != 31 || (xo != 6 && xo != 38 && xo != 7 && xo != 39 && xo != 71 && xo != 103 && xo != 359))
+        return; // lvsl lvsr lvebx lvehx lvewx lvx lvxl write a VR, and every other operation of opcode 4 may
+    if (dry)
+        vr_note(d, -5);
+    else if (vreg(d) >= 0)
+        vr_load(d);
+}
 /* vaddfp vsubfp vmaxfp vminfp vmaddfp vnmsubfp: one NEON operation for all four lanes, with VSCR.NJ flushing and
  * AltiVec's NaN rules applied lane by lane. */
 static int vmx_fp(uint32_t in, uint32_t pc) {
@@ -2943,47 +3249,59 @@ static int vmx_fp(uint32_t in, uint32_t pc) {
                   : xo == 0x40a ? 0x4e20f400u
                                 : 0x4ea0f400u;
     vmx_check(pc);
-    ldrw(T1, ENV, OFF(vscr));
-    ubfm(T1, T1, 16, 16);
-    E(0x4b1103f1u);
-    ubfm(T1, T1, 1, 31);
-    E(0x2a3103f1u); // w17 = NJ ? 0x80000000 : ~0
-    E(0x4e040c00u | T1 << 5 | 23);
-    movw(T0, 0x7f800000);
-    E(0x4e040c00u | T0 << 5 | 22); // v23 = keep, v22 = exponent
+    unsigned keep = vme < 0 ? 23 : (unsigned)vmk, expo = vme < 0 ? 22 : (unsigned)vme, r[3]; // v23 = keep, v22 = exponent
+    if (vme < 0)
+        vr_masks(keep, expo);
     const unsigned g[3] = {a, b, c};
+    if (dry) {
+        vfp_ops++;
+        for (unsigned i = 0; i < n; i++)
+            vr_note(g[i], 5);
+        vr_note(d, -1);
+    }
     for (unsigned i = 0; i < n; i++) {
-        unsigned x = 16 + i;
+        if (vreg(g[i]) >= 0) {
+            r[i] = (unsigned)vmap[g[i]]; // cached: in host order and flushed
+            continue;
+        }
+        unsigned x = r[i] = 16 + i;
         E(0x3dc00000u | (q + g[i]) << 10 | ENV << 5 | x);
         E(0x6e200800u | x << 5 | x); // ldr qX, VR; rev32
-        E(0x4ea08c00u | 22u << 16 | x << 5 | 19);
-        E(0x4ea01c00u | 23u << 16 | 19u << 5 | 19); // cmtst, orr keep
-        E(0x4e201c00u | 19u << 16 | x << 5 | x); // and: NJ flush
+        vr_flush(x, x, keep, expo);
     }
     if (!fma)
-        E(op | 17u << 16 | 16u << 5 | 20); // v20 = a op b
+        E(op | r[1] << 16 | r[0] << 5 | 20); // v20 = a op b
     else { // vnmsubfp = -(a*c + -b)
         if (neg)
-            E(0x6ea0f800u | 17u << 5 | 20);
+            E(0x6ea0f800u | r[1] << 5 | 20);
         else
-            E(0x4ea01c00u | 17u << 16 | 17u << 5 | 20); // v20 = -b / b
-        E(op | 18u << 16 | 16u << 5 | 20); // fmla v20, v16, v18
+            E(0x4ea01c00u | r[1] << 16 | r[1] << 5 | 20); // v20 = -b / b
+        E(op | r[2] << 16 | r[0] << 5 | 20); // fmla v20, a, c
         if (neg)
             E(0x6ea0f800u | 20u << 5 | 20);
     }
-    E(0x4ea08c00u | 22u << 16 | 20u << 5 | 19);
-    E(0x4ea01c00u | 23u << 16 | 19u << 5 | 19);
-    E(0x4e201c00u | 19u << 16 | 20u << 5 | 20); // NJ flush
+    vr_flush(20, 20, keep, expo);
+    /* The NaN fix-up below changes only NaN lanes, and FMLA/FADD/FSUB/FMAX/FMIN turn any NaN input into a NaN
+     * result: a result without a NaN lane skips it. */
+    E(0x4e34e693u); // fcmeq v19 = (v20 == v20): zero in a NaN lane
+    E(0x6eb1aa73u);
+    E(0x1e260270u); // uminv s19; fmov w16, s19
+    uint32_t *plain = cp;
+    E(0x35000000u | T0); // cbnz w16, plain
     movw(T0, 0x7fc00000);
     E(0x4e040c00u | T0 << 5 | 21); // v21 = default NaN
     E(0x4e20e400u | 20u << 16 | 20u << 5 | 19);
     E(0x6ee01c00u | 19u << 16 | 21u << 5 | 20); // NaN result -> 0x7fc00000
     for (int i = (int)n - 1; i >= 0; i--) { // C, B, A: the first NaN wins
-        unsigned x = 16u + (unsigned)i; // A B C = v16 v17 v18
+        unsigned x = r[i];
         E(0x4e20e400u | x << 16 | x << 5 | 19);
-        E(0x4f025400u | x);
-        E(0x6ee01c00u | 19u << 16 | x << 5 | 20); // fcmeq; orr #0x400000; bif
+        E(0x4ea01c00u | x << 16 | x << 5 | 21); // a copy: the operand may be a cached register
+        E(0x4f025400u | 21);
+        E(0x6ee01c00u | 19u << 16 | 21u << 5 | 20); // fcmeq; mov v21; orr #0x400000; bif
     }
+    fix(plain, cp);
+    if (vreg(d) >= 0)
+        E(0x4ea01c00u | 20u << 16 | 20u << 5 | (unsigned)vmap[d]); // the cached register: the result as it is
     E(0x6e200800u | 20u << 5 | 20);
     E(0x3d800000u | (q + d) << 10 | ENV << 5 | 20); // rev32; str q20, VR[D]
     return 0;
@@ -3035,10 +3353,11 @@ static int vmx_cvt(uint32_t in, uint32_t pc) {
  * exact; a NaN keeps its payload, quieted, as the interpreter). A denormal result lane of vrefp (|b| > 2^126) also
  * goes to the interpreter (VSCR.NJ). Doom 3: vrefp 74k, vrfim 32k exits per 5 s. */
 static int vmx_fp2_enabled;
-/* VMX float compares (and their CR6 forms), vrsqrtefp, vrefp and the vrfi* roundings on NEON (PT_VMX_FP2). */
+/* VMX float compares (and their CR6 forms; vcmpbfp's CR6 EQ = all in bounds), vrsqrtefp, vrefp and the vrfi*
+ * roundings on NEON (PT_VMX_FP2). */
 static int vmx_fp2(uint32_t in, uint32_t pc) {
     unsigned xo = in & 2047, d = in >> 21 & 31, a = in >> 16 & 31, b = in >> 11 & 31, q = OFF(vr) / 16,
-             one = (xo & 63) == 10;
+             one = (xo & 63) == 10, bounds = (xo & 0x3ff) == 0x3c6;
     if (!vmx_fp2_enabled)
         return -1;
     vmx_check(pc);
@@ -3055,10 +3374,20 @@ static int vmx_fp2(uint32_t in, uint32_t pc) {
         E(0x4ea0d800u | 16u << 5 | 21);
         E(0x4e601c00u | 21u << 16 | 22u << 5 | 22);
         E(0x4ea01c00u | 22u << 16 | 20u << 5 | 20); // | denormal lanes of a
-        E(((xo & 0x3ff) == 0x0c6   ? 0x4e20e400u
-           : (xo & 0x3ff) == 0x1c6 ? 0x6e20e400u
-                                   : 0x6ea0e400u) |
-          17u << 16 | 16u << 5); // fcmeq/fcmge/fcmgt v0, a, b
+        if (bounds) { // vcmpbfp: bit 31 = !(a <= b), bit 30 = !(a >= -b); a NaN fails both
+            E(0x6e30e620u); // fcmge v0, b, a
+            E(0x6ea0fa35u);
+            E(0x6e35e616u); // fneg v21, b; fcmge v22, a, -b
+            E(0x4f046417u);
+            E(0x4e601ee0u); // v0 = 0x80000000 & ~(a <= b)
+            E(0x4f026417u);
+            E(0x4e761ef6u);
+            E(0x4eb61c00u); // | 0x40000000 & ~(a >= -b)
+        } else
+            E(((xo & 0x3ff) == 0x0c6   ? 0x4e20e400u
+               : (xo & 0x3ff) == 0x1c6 ? 0x6e20e400u
+                                       : 0x6ea0e400u) |
+              17u << 16 | 16u << 5); // fcmeq/fcmge/fcmgt v0, a, b
     } else if (xo == 0x14a) {
         E(0x6ea1f800u | 17u << 5 | 18);
         E(0x4f03f600u | 22);
@@ -3083,11 +3412,72 @@ static int vmx_fp2(uint32_t in, uint32_t pc) {
     E(0x34000000u | T1);
     exit_why(pc, X_INTERP);
     fix(ok, cp); // a denormal lane: interpreter
-    if (one)
+    if (one || bounds)
         E(0x6e200800u); // rev32 v0: BE lanes
     E(0x3d800000u | (q + d) << 10 | ENV << 5); // str q0, VR[d]
     if (xo & 0x400)
         vmx_cr6(); // Rc: CR6
+    return 0;
+}
+/* vaddcuw/vsubcuw (0x180/0x580: per word, the carry of a + b; a >= b unsigned), vslo/vsro (0x40c/0x44c: the whole
+ * register shifted by vB[15] >> 3 & 15 octets, zeros in) and vupkhpx/vupklpx (0x34e/0x3ce, vA = 0: 1-5-5-5 pixels to
+ * words: the sign as a 0xff byte, each 5-bit field in a byte), as the interpreter. Each used to exit to the
+ * interpreter; Preview runs vslo/vsro while it scrolls (t847). v0-v5 scratch. */
+static int vmx_more(uint32_t in, uint32_t pc) {
+    unsigned xo = in & 2047, d = in >> 21 & 31, a = in >> 16 & 31, b = in >> 11 & 31, q = OFF(vr) / 16,
+             pixel = xo == 0x34e || xo == 0x3ce;
+    if (!vmx_int2_enabled || (pixel && a))
+        return -1;
+    vmx_check(pc);
+    E(0x3dc00001u | (q + b) << 10 | ENV << 5); // ldr q1, VR[b]
+    if (pixel) {
+        E(0x4e201821u); // rev16: halfwords as integers
+        E(xo == 0x34e ? 0x2f10a422u : 0x6f10a422u); // uxtl(2) v2.4s: the first or the last four halfwords
+        E(0x4f305443u);
+        E(0x4f210463u); // shl #16, sshr #31: the sign as a mask
+        E(0x4f0767e4u);
+        E(0x4e241c63u); // v3 = sign & 0xff000000
+        E(0x4f265444u);
+        E(0x4f0047e5u);
+        E(0x4e251c84u);
+        E(0x4ea41c63u); // | (u << 6) & 0x1f0000
+        E(0x4f235444u);
+        E(0x4f0027e5u);
+        E(0x4e251c84u);
+        E(0x4ea41c63u); // | (u << 3) & 0x1f00
+        E(0x4f0007e5u);
+        E(0x4e251c44u);
+        E(0x4ea41c63u); // | u & 0x1f
+        E(0x6e200863u); // rev32: BE words
+        E(0x3d800003u | (q + d) << 10 | ENV << 5); // str q3, VR[d]
+        return 0;
+    }
+    E(0x3dc00000u | (q + a) << 10 | ENV << 5); // ldr q0, VR[a]
+    if (xo == 0x40c || xo == 0x44c) {
+        E(0x0e1f3c31u); // umov w17, v1.b[15]
+        ubfm(T1, T1, 3, 6); // octets: vB[15] >> 3 & 15
+        E(0x4e010e22u); // dup v2.16b, w17
+        E(0xd2802010u);
+        E(0xf2a06050u);
+        E(0xf2c0a090u);
+        E(0xf2e0e0d0u); // x16 = bytes 0..7
+        E(0x9e670203u);
+        E(0xb205c210u);
+        E(0x4e181e03u); // v3 = bytes 0..15
+        E(xo == 0x40c ? 0x4e228463u : 0x6e228463u); // index = i + n (vslo) or i - n (vsro)
+        E(0x4e030000u); // tbl: an index outside 0..15 gives zero
+    } else {
+        E(0x6e200800u);
+        E(0x6e200821u); // rev32: words as integers
+        if (xo == 0x180) {
+            E(0x4ea18402u);
+            E(0x6ea23402u); // sum = a + b; carry = a > sum
+        } else
+            E(0x6ea13c02u); // no borrow: a >= b
+        E(0x4f006423u);
+        E(0x4e231c40u); // & 0x01000000: 1 in each BE word
+    }
+    E(0x3d800000u | (q + d) << 10 | ENV << 5); // str q0, VR[d]
     return 0;
 }
 /* Translates one PowerPC instruction into ARM64 code. Returns 0 when compiled, 1 when it ends the block, -1 when
@@ -3156,9 +3546,13 @@ static int tr(uint32_t in, uint32_t pc) {
         }
         if ((in & 2047) == 0x30a || (in & 2047) == 0x34a || (in & 2047) == 0x38a || (in & 2047) == 0x3ca)
             return vmx_cvt(in, pc); // vcfux vcfsx vctuxs vctsxs
-        if ((in & 0x3ff) == 0x0c6 || (in & 0x3ff) == 0x1c6 || (in & 0x3ff) == 0x2c6 || (in & 2047) == 0x14a ||
-            (in & 2047) == 0x10a || ((in & 2047) >= 0x20a && (in & 2047) <= 0x2ca && (in & 63) == 10))
-            return vmx_fp2(in, pc); // vcmp*fp (.) vrsqrtefp vrefp vrfi*
+        if ((in & 0x3ff) == 0x0c6 || (in & 0x3ff) == 0x1c6 || (in & 0x3ff) == 0x2c6 || (in & 0x3ff) == 0x3c6 ||
+            (in & 2047) == 0x14a || (in & 2047) == 0x10a ||
+            ((in & 2047) >= 0x20a && (in & 2047) <= 0x2ca && (in & 63) == 10))
+            return vmx_fp2(in, pc); // vcmp*fp (.) vcmpbfp (.) vrsqrtefp vrefp vrfi*
+        if ((in & 2047) == 0x180 || (in & 2047) == 0x580 || (in & 2047) == 0x40c || (in & 2047) == 0x44c ||
+            (in & 2047) == 0x34e || (in & 2047) == 0x3ce)
+            return vmx_more(in, pc); // vaddcuw vsubcuw vslo vsro vupkhpx vupklpx
         return vmx_neon(in, pc);
     case 14: {
         int d = dst(D);
@@ -3248,6 +3642,7 @@ static int tr(uint32_t in, uint32_t pc) {
         } else
             br = br_crbit(bi, bo >> 3 & 1);
         if (t == blk_pc0 && !check && !nolink) {
+            self_loop = 1;
             fix(br, loop_start);
             return 0;
         } // loop back edge
@@ -3265,6 +3660,12 @@ static int tr(uint32_t in, uint32_t pc) {
     case 19: {
         int xo = in >> 1 & 0x3ff, bo = D, bi = A;
         if (xo == 150) { // isync after icbi (entries pending): to the interpreter
+            if (jit_smp) { /* another CPU running: PowerPC orders the loads after isync after those before it (branch +
+                            * isync: lock acquire, message passing); ARM does not - dmb ishld. isb: an mftb after it reads
+                            * the counter after them */
+                E(0xD50339BF); // dmb ishld
+                E(0xD5033FDF); // isb
+            }
             ldrw(T0, ENV, OFF(icbi_n));
             uint32_t *br = cp;
             E(0x34000000 | T0); // cbz w16, continue
@@ -3405,7 +3806,7 @@ static int tr(uint32_t in, uint32_t pc) {
         logi(ANDi, ANDw, T0, xo == 16 ? H_LR : H_CTR, ~3u); // the target (bclrl: the old LR)
         if (rc)
             movw(H_LR, pc + 4);
-        exit_ind();
+        exit_ind(xo == 16 ? 1 : 2);
         /* Not taken: a conditional bclrl/bcctrl writes LR all the same (Classic's bcctrl on a CR bit went to the
          * interpreter 7 million times in a few minutes before this) */
         if (br) {
@@ -3980,6 +4381,8 @@ static int tr(uint32_t in, uint32_t pc) {
                 E(0x37000000 | 1u << 19 | T1);
                 ubfm(T0, T1, 12, 31);
             } // tbnz w17, #1 (DR=1); w16 = EA's page
+            if (jit_smp)
+                E(0xD5033BBF); // dmb ish: the guest's store of new code, then this look at the code map
             ldrx(T2, ENV, OFF(jit_codemap));
             E(0x38606800 | T0 << 16 | T2 << 5 | T2); // ldrb w30, [x30, x16]
             uint32_t *none = cp;
@@ -4256,8 +4659,14 @@ static int tr(uint32_t in, uint32_t pc) {
             if (xo == 103 || xo == 359) {
                 E(0xF9400000 | T0 << 5 | T1);
                 E(0xF9400400 | T0 << 5 | T2);
-                strx(T1, ENV, vo);
-                strx(T2, ENV, vo + 8);
+                if (vmx_lvx_q) { // one 16-byte store: the VMX operation that follows loads all 16 bytes at once, and a
+                    E(0x9E670000 | T1 << 5 | 16); // load does not forward from two stores (PT_VMX_LVX_Q=0: two)
+                    E(0x4E181C00 | T2 << 5 | 16); // fmov d16, x17; mov v16.d[1], x30
+                    E(0x3D800000 | (vo / 16) << 10 | ENV << 5 | 16); // str q16, VR[D]
+                } else {
+                    strx(T1, ENV, vo);
+                    strx(T2, ENV, vo + 8);
+                }
             } else {
                 ldrx(T1, ENV, vo);
                 ldrx(T2, ENV, vo + 8);
@@ -4471,6 +4880,8 @@ static int tr(uint32_t in, uint32_t pc) {
             int e = ea_x(A, B);
             mov32(T2, e);
             load(0, D, (Addr){T2, 0});
+            if (jit_smp)
+                strw(src(D, T1), ENV, OFF(reserve_val));
             movw(T1, 1);
             strw(T1, ENV, OFF(reserve));
             strw(T2, ENV, OFF(reserve_addr));
@@ -4488,7 +4899,21 @@ static int tr(uint32_t in, uint32_t pc) {
             E(0x6B00001F | T2 << 16 | T1 << 5);
             uint32_t *b2 = cp;
             E(0x54000000 | NE);
-            store(0, D, (Addr){T2, 0});
+            uint32_t *b4 = NULL;
+            if (jit_smp) { /* another CPU may store here: the word changes only if it still holds what lwarx read */
+                E(REVw | src(D, T0) << 5 | T0);
+                ldrw(T1, ENV, OFF(reserve_val));
+                E(REVw | T1 << 5 | T1);
+                if (!zbase)
+                    E(0x8B204000 | T2 << 16 | MEM << 5 | T2); // add x30, x28, w30, uxtw
+                E(0x88E0FC00 | T1 << 16 | T2 << 5 | T0); // casal w17, w16, [x30]: w17 = what was there
+                ldrw(T0, ENV, OFF(reserve_val));
+                E(REVw | T0 << 5 | T0);
+                E(0x6B00001F | T0 << 16 | T1 << 5); // cmp w17, w16
+                b4 = cp;
+                E(0x54000000 | NE);
+            } else
+                store(0, D, (Addr){T2, 0});
             uint32_t eq = kso ? 0xD2F00000u : 0xD2F40000u; // cr0 = EQ (0xA000…0; SO=1: 0x8000…0)
             strw(ZR, ENV, OFF(reserve));
             E(eq | H_CR0);
@@ -4496,6 +4921,8 @@ static int tr(uint32_t in, uint32_t pc) {
             E(0x14000000);
             fix(b1, cp);
             fix(b2, cp);
+            if (b4)
+                fix(b4, cp);
             strw(ZR, ENV, OFF(reserve));
             E(eq | H_CR0);
             E(0xB2400000 | H_CR0 << 5 | H_CR0); // cr0 = 0 (…01)
@@ -4585,6 +5012,8 @@ static int tr(uint32_t in, uint32_t pc) {
         case 246:
         case 598:
         case 854:
+            if (jit_smp && (xo == 598 || xo == 854))
+                E(xo == 598 ? 0xD5033BBF : 0xD5033ABF); // sync, eieio with another CPU running: dmb ish, dmb ishst
             return 0; // cache, barriers (icbi: case 982)
         case 566:
         case 470:
@@ -4610,14 +5039,16 @@ static int tr(uint32_t in, uint32_t pc) {
             E(0x35000000 | T1); // cbnz w17: software TLB
             ldrw(T1, ENV, OFF(jit_tmp));
             ubfm(T0, T1, 12, 27); // w16 = page within the segment
-            E(0x91400000 | (jit_mapped_off >> 12) << 10 | ENV << 5 | T2);
+            if (jit_smp)
+                E(0xD5033BBF); // dmb ish: the guest's store to its page table, then this look at the bitmap
+            shared_table(T2, jit_mapped_off, jit_mapped_va);
             ubfm(T1, T0, 6, 15);
             E(0x8B000000 | T1 << 16 | 3u << 10 | T2 << 5 | T2);
             ldrx(T2, T2, 0);
             E(0x9AC02400 | T0 << 16 | T2 << 5 | T2); // x30 = word >> (page & 63)
             uint32_t *s2 = cp;
             E(0x37000000 | T2); // tbnz w30, #0: a table may map it
-            E(0x91400000 | (jit_pggen_off >> 12) << 10 | ENV << 5 | T2);
+            shared_table(T2, jit_pggen_off, jit_pggen_va);
             E(0x8B000000 | T0 << 16 | 2u << 10 | T2 << 5 | T2);
             ldrw(T1, T2, 0);
             E(0x11000400 | T1 << 5 | T1);
@@ -4656,7 +5087,7 @@ static uint32_t body(uint32_t pc0) { // block body; returns the PC of the last i
         // a block does not cross a PPC page; instruction offsets fit the uint16_t imap
         uint32_t in = be32(gm + pc);
         uint32_t *mark = cp;
-        int saved = nstub, saved_side = nside;
+        int saved = nstub, saved_side = nside, saved_cold = ncold, saved_op = ncoldop, saved_words = cold_words;
         cur_n = n;
         skip_next = 0;
         kill_cr0 = next_kills(pc, 0);
@@ -4667,6 +5098,8 @@ static uint32_t body(uint32_t pc0) { // block body; returns the PC of the last i
             return pc;
         } // a device access from firmware: interpreter (not marked in untr)
         int r = tr(in, pc);
+        if (r >= 0)
+            vr_wrote(in);
         if (skip_next && !dry)
             imap[nim + n + 1] = imap[nim + n];
         if (skip_next) {
@@ -4675,6 +5108,9 @@ static uint32_t body(uint32_t pc0) { // block body; returns the PC of the last i
         }
         if (r < 0) {
             nside = saved_side;
+            ncold = saved_cold;
+            ncoldop = saved_op;
+            cold_words = saved_words;
             uint32_t xo = in >> 1 & 0x3ff;
             if (in >> 26 == 31 && (xo == 339 || xo == 467))
                 untr_spr[xo == 339][(in >> 16 & 31) | (in >> 6 & 0x3e0)] = 1;
@@ -4689,11 +5125,21 @@ static uint32_t body(uint32_t pc0) { // block body; returns the PC of the last i
             return pc;
     }
 }
+uint64_t jit_now(void);
 static uint32_t *translate(CPU *c, uint32_t pc0, uint32_t ra0) { // ra0: physical address of pc0 (IR=1)
     if (bufend - cp < 65536 || nblk == MAXB || nim + 256 > NIM) {
         st_capacity_flush++;
+        if (jit_stats_on) // PT_STATS: when, and which of the three limits (to set against a log of stalls)
+            fprintf(stderr, "ptolemy: JIT capacity flush %llu at %.3f s: code %zu/%zu, blocks %d/%d, maps %u/%u\n",
+                    (unsigned long long)st_capacity_flush, jit_now() / 1e9, (size_t)(cp - code0) * 4,
+                    (size_t)(bufend - code0) * 4, nblk, MAXB, nim, NIM);
         flush_all();
     } // room for a whole block: up to 49152 words, then one instruction and the exit
+    if (jit_smp) { /* before the code is read: another CPU's icbi of the page after this sees the mark, an icbi before
+                    * it had its store before this reading (jit_smp, above) */
+        cm[ra0 >> 12] = 1;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    }
     blk_pc0 = pc0;
     blk_pg = ra0 >> 12 | kso << 31;
     if (kso)
@@ -4707,6 +5153,11 @@ static uint32_t *translate(CPU *c, uint32_t pc0, uint32_t ra0) { // ra0: physica
     fcache_active = 0;
     memset(fcnt, 0, sizeof fcnt);
     memset(fmap, -1, sizeof fmap);
+    memset(vmap, -1, sizeof vmap);
+    memset(vscore, 0, sizeof vscore);
+    vme = vmk = -1;
+    vfp_ops = self_loop = 0;
+    vseen = vloadfirst = 0;
     fp_hoist = !check && fp_hoist_enabled;
     fp_lazy_active = !check && !fp_old && fp_lazy_enabled;
     fpro = 0;
@@ -4715,6 +5166,7 @@ static uint32_t *translate(CPU *c, uint32_t pc0, uint32_t ra0) { // ra0: physica
         dry = 1;
         nstub = 0;
         nside = 0;
+        ncold = ncoldop = cold_words = 0;
         body(pc0);
         dry = 0;
         cp = blk_start;
@@ -4775,15 +5227,35 @@ static uint32_t *translate(CPU *c, uint32_t pc0, uint32_t ra0) { // ra0: physica
             } // translated again without
             fcache_active = 1;
         }
+        vr_plan();
+        vr_prologue();
         loop_start = cp;
         cwr = 0;
+        if (jit_stats_on && st_watch_pc && pc0 == st_watch_pc) { // a pass of the block's body, a self-loop's too
+            ldrx(T2, ENV, OFF(st_watch));
+            E(0x91000400 | T2 << 5 | T2); // add x30, x30, #1
+            strx(T2, ENV, OFF(st_watch));
+        }
     }
     ldrw(T0, ENV, OFF(irq));
     uint32_t *irq_br = cp;
     E(0x35000000 | T0); // entry and backward branch: is an interrupt requested?
     nstub = 0;
     nside = 0;
+    ncold = ncoldop = cold_words = 0;
     uint32_t pc = body(pc0);
+    for (int i = 0; i < ncoldop; i++) {
+        if (fp_owe_cold(coldop[i]) != coldop[i].ev) { // deterministic: the hot code after the operation assumed it
+            fprintf(stderr, "ptolemy: JIT out-of-line FP state differs at %08x\n", coldop[i].pc);
+            abort();
+        }
+        b_to(coldop[i].back);
+    }
+    for (int i = 0; i < ncold; i++) {
+        fix(cold_nan[i].br, cp);
+        nan_bits();
+        b_to(cold_nan[i].back);
+    }
     for (int i = 0; i < nside; i++) {
         fix(side[i].br, cp);
         if (side[i].mf >= 0)
@@ -4824,6 +5296,7 @@ static uint32_t *translate(CPU *c, uint32_t pc0, uint32_t ra0) { // ra0: physica
     blk[nblk].key = pc0 | KF;
     blk[nblk].dead = dead;
     blk[nblk].isdead = 0;
+    code_vp[pc0 >> 12 & 0xffff] = 1;
     blk[nblk].ppg = blk_pg;
     blk[nblk].ppnext = pp_head[q];
     pp_head[q] = nblk;
@@ -4843,6 +5316,20 @@ static int envi(const char *n, int d) {
     const char *v = getenv(n);
     return v ? atoi(v) : d;
 }
+/* What each CPU has of its own: its jump cache (the VM's table, of its thread) and the tables in its CPU structure. */
+static void init_cpu(CPU *c) {
+    if (jit_vm_buf)
+        jc = jit_vm_jc;
+    for (uint32_t i = 0; i < 1u << jc_bits; i++)
+        jc[i] = (JC){~0ull, 0, 0, 0, 0}; // an empty slot must not match PPC pc=0
+    njc = 0;
+    c->jit_jc = jit_vm_buf ? (void *)jit_vm_jc_va : (void *)jc;
+    c->jit_codemap = jit_vm_buf ? (void *)jit_vm_cm_va : (void *)cm;
+    if (!c->vbase)
+        c->vbase = c->mem;
+    for (int n = 0; n < 16; n++)
+        c->crtab[n] = cr_make(n >> 3 & 1, n >> 2 & 1, n >> 1 & 1, n & 1);
+}
 /* First JIT start: reads the feature flags, takes the code buffer (the HVF engine region, or an mmap without HVF)
  * and emits the shared routines (trampoline, exits). */
 static void init(CPU *c) {
@@ -4861,15 +5348,19 @@ static void init(CPU *c) {
     const char *neon = getenv("PT_VMX_NEON");
     vmx_neon_enabled = neon && !strcmp(neon, "1");
     vmx_mem_enabled = envi("PT_VMX_MEM", 1);
+    vmx_lvx_q = envi("PT_VMX_LVX_Q", 1);
+    vrc_enabled = envi("PT_VMX_VR_CACHE", 1);
     vmx_vscr_enabled = envi("PT_VMX_VSCR", 1);
     vmx_fp_enabled = envi("PT_VMX_FP", 1);
     vmx_fp2_enabled = envi("PT_VMX_FP2", 0);
     fp_more_enabled = envi("PT_FP_MORE", 0);
     fsf_enabled = envi("PT_FP_SGL", 1);
+    jc_bits = jit_vm_buf ? jit_vm_jc_bits : (unsigned)envi("PT_JC_BITS", 19); // before any lookup is emitted
+    if (jc_bits < 16 || jc_bits > JC_MAX)
+        jc_bits = 19;
     if (jit_vm_buf) { // VM: no host stack; the exit is brk #0
         buf = jit_vm_buf;
         bufend = buf + jit_vm_size / 4;
-        jc = jit_vm_jc;
         cm = jit_vm_cm;
         cp = buf;
         /* the fault-resume stub: the queued invalidations, then back to the access (ELR_EL1/SPSR_EL1 hold it) */
@@ -4902,10 +5393,11 @@ static void init(CPU *c) {
         }
         bufend = buf + (64 << 20) / 4;
         cp = jit_tramp = buf;
-        E(0xA9800000 | (uint32_t)(-12 & 0x7f) << 15 | 30u << 10 | 31u << 5 | 29); // stp x29,x30,[sp,#-96]!
+        E(0xA9800000 | (uint32_t)(-14 & 0x7f) << 15 | 30u << 10 | 31u << 5 | 29); // stp x29,x30,[sp,#-112]!
         for (int i = 0; i < 5; i++)
             E(0xA9000000 | (uint32_t)(2 + 2 * i) << 15 | (uint32_t)(20 + 2 * i) << 10 | 31u << 5 |
               (uint32_t)(19 + 2 * i));
+        E(0x6D000000 | 12u << 15 | 9u << 10 | 31u << 5 | 8); // stp d8,d9,[sp,#96]: fp_owe's save registers
         E(0xAA0003E0 | 0u << 16 | ENV);
         E(0xAA0003E0 | 1u << 16 | T1); // mov x27,x0; mov x17,x1
         ldrx(MEM, ENV, OFF(vbase));
@@ -4918,21 +5410,15 @@ static void init(CPU *c) {
         for (int i = 0; i < 5; i++)
             E(0xA9400000 | (uint32_t)(2 + 2 * i) << 15 | (uint32_t)(20 + 2 * i) << 10 | 31u << 5 |
               (uint32_t)(19 + 2 * i));
-        E(0xA8C00000 | 12u << 15 | 30u << 10 | 31u << 5 | 29);
-        E(0xD65F03C0); // ldp x29,x30,[sp],#96; ret
+        E(0x6D400000 | 12u << 15 | 9u << 10 | 31u << 5 | 8); // ldp d8,d9,[sp,#96]
+        E(0xA8C00000 | 14u << 15 | 30u << 10 | 31u << 5 | 29);
+        E(0xD65F03C0); // ldp x29,x30,[sp],#112; ret
         enter = (int (*)(CPU *, void *))(void *)jit_tramp;
     }
-    for (int i = 0; i < 1 << 16; i++)
-        jc[i] = (JC){~0ull, 0, 0, 0, 0}; // an empty slot must not match PPC pc=0
-    c->jit_jc = jit_vm_buf ? (void *)jit_vm_jc_va : (void *)jc;
-    c->jit_codemap = jit_vm_buf ? (void *)jit_vm_cm_va : (void *)cm;
-    if (!c->vbase)
-        c->vbase = c->mem;
+    init_cpu(c);
     zbase = jit_zbase >= 0 ? jit_zbase : (!c->mem && !env_on("PT_NOZB"));
     if (zbase)
         POOL[NPOOL++] = MEM;
-    for (int n = 0; n < 16; n++)
-        c->crtab[n] = cr_make(n >> 3 & 1, n >> 2 & 1, n >> 1 & 1, n & 1);
     flush_all();
     maxblk = envi("PT_MAXBLK", maxblk);
     if (maxblk < 1)
@@ -4951,6 +5437,7 @@ static void init(CPU *c) {
     nolink = envi("PT_NOLINK", 0);
     nojc = envi("PT_NOJC", 0);
     so_jc = envi("PT_SO_JC", 1);
+    l1_on = envi("PT_JC_L1", 1);
     if (envi("PT_JC_WAYS", 0) == 1)
         jc_ways = 1;
     fp_old = envi("PT_FP_OLD", 0);
@@ -4992,7 +5479,6 @@ static void init(CPU *c) {
     }
 }
 
-int jit_stats_on;
 uint64_t jit_tm
         [8]; // PT_STATS: time (ns): 0 VM, 1 translation, 2 interpreter, 3 tlbie, 4 SR switch; 5, 6 (hvf.c): DR=1 fill, devices
 uint64_t jit_now(void) {
@@ -5065,8 +5551,8 @@ root_key(uint32_t w) { // op << 11 | extended opcode (VMX: VA's 6 bits or 11; FP
         x = 0;
     return op << 11 | x;
 }
-static uint32_t st_jcm[1 << 16];
-static uint64_t st_jck[1 << 16][3]; /* PT_STATS: misses per set; the last wanted, evicted and kept keys */
+static uint32_t st_jcm[1 << JC_MAX];
+static uint64_t st_jck[1 << JC_MAX][3]; /* PT_STATS: misses per set; the last wanted, evicted and kept keys */
 static uint64_t st_jc
         [4]; /* PT_STATS: lookup exits by the target's jump-cache cell: empty, another target, stale page generation, current (left for another reason) */
 static uint8_t *chk_ptr(CPU *c, uint32_t ea, uint32_t n, int acc,
@@ -5182,6 +5668,14 @@ static void kill_phys(uint32_t q) { // icbi: the code on physical page q changed
  * stored doubles failed at every entry). Returns 1 when dropped. */
 int jit_fsf_fail(CPU *c) {
     uint32_t n = 4;
+    st_fsf_fails++;
+    /* MSR.FP = 0: the FPR file holds another thread's values until the kernel's FP-unavailable handler restores this
+     * thread's (lazy FP switch); the interpreter step takes that exception. Not the block's fault: no count. A hot
+     * loop lost the cache after four context switches (Geekbench Dot Product's loop: 2.5 ns per element, not 1.8). */
+    if (c->sys && !(c->msr & MSR_FP)) {
+        st_fsf_fpoff++;
+        return 0;
+    }
     for (uint32_t i = c->pc >> 2 & 1023, k = 0; k < 16; k++, i = (i + 1) & 1023)
         if (!nofsf[i] || nofsf[i] == c->pc + 1) {
             nofsf[i] = c->pc + 1;
@@ -5222,6 +5716,10 @@ uint32_t jit_mem_ea(uint32_t in, const uint64_t *x, int *n, int *st) { // in: a 
     *st = !(in >> 22 & 1);
     uint32_t base =
             (uint32_t)x[in >> 5 & 31] - (zbase ? 0 : (uint32_t)x[MEM]); // without zbase the host address is x28 + EA
+    if ((in & 0x3FA07C00) == 0x08A07C00) { // cas [xN] (stwcx. with jit_smp): a store
+        *st = 1;
+        return base;
+    }
     if (in & 0x01000000)
         return base + ((in >> 10 & 0xFFFu) << (in >> 30)); // [xN, #imm]
     if (in & 0x00200000)
@@ -5237,10 +5735,12 @@ void jit_snap(void) { // PT_STATS: JIT-code exits and frequent interpreter instr
                 (size_t)(cp - code0) * 4, (size_t)(bufend - code0) * 4, nblk, MAXB, nim, NIM,
                 (unsigned long long)st_capacity_flush);
     fprintf(stderr,
-            "  SR switches %llu, tlbie %llu, code flushes %llu (including IBAT/SDR1/machine %llu), invalidated blocks %llu\n",
-            (unsigned long long)(st_srsw - s0), (unsigned long long)(st_tlbie - t0),
-            (unsigned long long)(st_cflush - f0), (unsigned long long)(st_xflush - x0),
+            "  SR switches %llu, tlbie %llu (page generations moved %llu, of them %llu on page numbers with translated "
+            "code), code flushes %llu (including IBAT/SDR1/machine %llu), invalidated blocks %llu\n",
+            (unsigned long long)(st_srsw - s0), (unsigned long long)(st_tlbie - t0), (unsigned long long)st_tlbie_gen,
+            (unsigned long long)st_tlbie_code, (unsigned long long)(st_cflush - f0), (unsigned long long)(st_xflush - x0),
             (unsigned long long)(st_pkill - k0));
+    st_tlbie_gen = st_tlbie_code = 0;
     s0 = st_srsw;
     t0 = st_tlbie;
     f0 = st_cflush;
@@ -5262,9 +5762,19 @@ void jit_snap(void) { // PT_STATS: JIT-code exits and frequent interpreter instr
             (unsigned long long)st_jc[0], (unsigned long long)st_jc[1], (unsigned long long)st_jc[2],
             (unsigned long long)st_jc[3]);
     memset(st_jc, 0, sizeof st_jc);
+    if (st_cpu) { // what never leaves the VM: each is a hash, two or three dependent loads and an indirect branch
+        uint64_t *n = st_cpu->st_ind;
+        fprintf(stderr, " [inline lookups run by JIT code: far direct branch %llu, blr %llu, bctr %llu, other %llu]",
+                (unsigned long long)n[0], (unsigned long long)n[1], (unsigned long long)n[2], (unsigned long long)n[3]);
+        memset(n, 0, sizeof st_cpu->st_ind);
+        if (st_watch_pc) { // with the profile's ticks at this block: nanoseconds a pass in the live session
+            fprintf(stderr, " [block %08x: %llu passes]", st_watch_pc, (unsigned long long)st_cpu->st_watch);
+            st_cpu->st_watch = 0;
+        }
+    }
     for (int k = 0; k < 4; k++) { // the sets that miss most: wanted, evicted, kept as SR:pc/flags
         int b = -1;
-        for (int i = 0; i < 1 << 16; i++)
+        for (int i = 0; i < 1 << jc_bits; i++)
             if (st_jcm[i] && (b < 0 || st_jcm[i] > st_jcm[b]))
                 b = i;
         if (b < 0)
@@ -5381,11 +5891,189 @@ static struct {
     uint64_t n;
 } st_ps[4096];
 static uint64_t st_ps_n, st_ps_out;
+/* PT_PROF over the whole session: every sample by guest image and pc (pse), the guest images found from the samples
+ * (pim), and the last 4096 ticks (prg) so that a frame stall reported by Optics counts the samples inside it a second
+ * time. An image is the Mach-O header below a user pc in its address space (its __TEXT covers the pc); supervisor
+ * code is image 0, user code without a header image 1. The file is written at the end (jit_prof_session). */
+static struct ProfImage {
+    uint32_t base, size, vmaddr, sr, type;
+    uint8_t uuid[16];
+    char name[96];
+    uint64_t n, stall;
+} pim[512] = {{.name = "supervisor"}, {.name = "user code outside a Mach-O image"}};
+static int npim = 2;
+static struct {
+    uint32_t pc1; // pc + 1; 0: free
+    uint16_t img;
+    uint64_t n, stall;
+} pse[1 << 16];
+static struct {
+    uint64_t t;
+    int32_t slot; // pse; -1: JIT code outside blocks (shared routines); -2: the vCPU was outside the VM
+} prg[4096];
+static uint32_t prg_n, pim_scans;
+static uint64_t pse_n[3], pst_n[3], pst_count, pst_ns, pse_drop; // samples: in blocks, outside blocks, outside the VM
+static uint32_t pmiss[1024]; // pages without an image (page ^ SR), not scanned again
+static pthread_mutex_t prof_lock = PTHREAD_MUTEX_INITIALIZER;
+static int prof_image(CPU *c, uint32_t pc) {
+    if (!(c->msr & MSR_PR))
+        return 0;
+    uint32_t sr = c->sr[pc >> 28], key = (pc >> 12 ^ sr * 0x9E3779B1u) | 1;
+    for (int i = 2; i < npim; i++)
+        if (pim[i].sr == sr && pc - pim[i].base < pim[i].size)
+            return i;
+    if (pmiss[key % 1024] == key || npim == 512 || pim_scans >= 1 << 20)
+        return 1;
+    for (uint32_t a = pc & ~0xfffu, k = 0; k < 4096 && a >> 28 == pc >> 28; k++, a -= 0x1000, pim_scans++) {
+        const uint8_t *h = chk_ptr(c, a, 4096, 2, MSR_IR);
+        if (!h || be32(h) != 0xfeedface || be32(h + 4) != 18) // MH_MAGIC, CPU_TYPE_POWERPC
+            continue;
+        struct ProfImage im = {.base = a, .sr = sr, .type = be32(h + 12)};
+        for (uint32_t o = 28, n = be32(h + 16); n-- && o + 8 <= 4096; o += be32(h + o + 4)) {
+            uint32_t cmd = be32(h + o), len = be32(h + o + 4);
+            if (len < 8 || o + len > 4096)
+                break;
+            if (cmd == 1 && len >= 56 && !memcmp(h + o + 8, "__TEXT", 7)) { // LC_SEGMENT
+                im.vmaddr = be32(h + o + 24);
+                im.size = be32(h + o + 28);
+            } else if (cmd == 0xd && len > 24 && be32(h + o + 8) < len) // LC_ID_DYLIB: the install name
+                snprintf(im.name, sizeof im.name, "%.*s", (int)(len - be32(h + o + 8)), (const char *)h + o + be32(h + o + 8));
+            else if (cmd == 0x1b && len >= 24) // LC_UUID
+                memcpy(im.uuid, h + o + 8, 16);
+        }
+        if (pc - a >= im.size)
+            break; // the header below belongs to something else
+        if (!im.name[0])
+            snprintf(im.name, sizeof im.name, "%s at %08x, __TEXT %u bytes",
+                     im.type == 2 ? "executable" : im.type == 8 ? "bundle" : im.type == 7 ? "dyld" : "image", a, im.size);
+        pim[npim] = im;
+        return npim++;
+    }
+    pmiss[key % 1024] = key;
+    return 1;
+}
+static void prof_tick(int kind, int slot) { // with prof_lock
+    pse_n[kind]++;
+    prg[prg_n++ & 4095] = (__typeof__(prg[0])){jit_now(), slot};
+}
+/* PT_PROF: a tick of the sampler while the vCPU thread is outside the VM (exits, the interpreter, devices, idle). */
+void jit_prof_outside(void) {
+    pthread_mutex_lock(&prof_lock);
+    prof_tick(2, -2);
+    pthread_mutex_unlock(&prof_lock);
+}
+/* Optics published a frame gap_ns after the one before, a stall (100 ms or more): the ticks inside it. */
+void jit_prof_stall(uint64_t gap_ns) {
+    pthread_mutex_lock(&prof_lock);
+    uint64_t from = jit_now() - gap_ns;
+    pst_count += prg_n != 0; // no ticks: PT_PROF is off
+    pst_ns += prg_n ? gap_ns : 0;
+    for (uint32_t k = 0; k < 4096 && k < prg_n; k++) {
+        __typeof__(prg[0]) *r = &prg[(prg_n - 1 - k) & 4095];
+        if (r->t < from)
+            break;
+        pst_n[r->slot >= 0 ? 0 : -r->slot]++;
+        if (r->slot >= 0) {
+            pse[r->slot].stall++;
+            pim[pse[r->slot].img].stall++;
+        }
+        r->t = 0; // once
+    }
+    pthread_mutex_unlock(&prof_lock);
+}
+static int prof_by_n(const void *a, const void *b) {
+    uint64_t x = pse[*(const uint16_t *)a].n, y = pse[*(const uint16_t *)b].n;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+static int prof_by_stall(const void *a, const void *b) {
+    uint64_t x = pse[*(const uint16_t *)a].stall, y = pse[*(const uint16_t *)b].stall;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+/* PT_PROF at the end of a session: one line, and the tables in PT_PROF_FILE (default ptolemy-profile.txt): images
+ * and pcs over the session, then inside the stalls. A pc is printed with its offset in the image; a function is
+ * vmaddr + offset in the image's file (tools/prof-sym.py). */
+void jit_prof_session(void) {
+    pthread_mutex_lock(&prof_lock);
+    uint64_t all = pse_n[0] + pse_n[1] + pse_n[2], st = pst_n[0] + pst_n[1] + pst_n[2];
+    const char *path = getenv("PT_PROF_FILE") ? getenv("PT_PROF_FILE") : "ptolemy-profile.txt";
+    FILE *f = all ? fopen(path, "w") : NULL;
+    if (f) {
+        static uint16_t order[1 << 16];
+        for (int pass = 0; pass < 2; pass++) {
+            uint64_t tot = pass ? st : all, *n = pass ? pst_n : pse_n;
+            fprintf(f, "%s\t%llu ticks\tblocks %.1f%%\tJIT code outside blocks %.1f%%\toutside the VM %.1f%%", pass ? "stalls" : "session",
+                    (unsigned long long)tot, 100.0 * n[0] / (tot ? tot : 1), 100.0 * n[1] / (tot ? tot : 1),
+                    100.0 * n[2] / (tot ? tot : 1));
+            if (pass)
+                fprintf(f, "\t%llu stalls\t%.2f s", (unsigned long long)pst_count, pst_ns / 1e9);
+            fputc('\n', f);
+            for (int i = 0; i < npim; i++)
+                if (pass ? pim[i].stall : pim[i].n) {
+                    fprintf(f, "image\t%d\t%llu\t%.2f%%\t%08x\t%08x\t%u\t", i, (unsigned long long)(pass ? pim[i].stall : pim[i].n),
+                            100.0 * (pass ? pim[i].stall : pim[i].n) / (tot ? tot : 1), pim[i].base, pim[i].vmaddr, pim[i].size);
+                    for (int k = 0; k < 16; k++)
+                        fprintf(f, "%02x", pim[i].uuid[k]);
+                    fprintf(f, "\t%s\n", pim[i].name);
+                }
+            uint32_t no = 0;
+            for (uint32_t i = 0; i < 1 << 16; i++)
+                if (pass ? pse[i].stall : pse[i].n)
+                    order[no++] = (uint16_t)i;
+            qsort(order, no, 2, pass ? prof_by_stall : prof_by_n);
+            for (uint32_t k = 0; k < no && k < 2000; k++) {
+                __typeof__(pse[0]) *e = &pse[order[k]];
+                fprintf(f, "pc\t%d\t%llu\t%08x\t%08x\n", e->img, (unsigned long long)(pass ? e->stall : e->n), e->pc1 - 1,
+                        e->pc1 - 1 - pim[e->img].base);
+            }
+        }
+        fclose(f);
+    }
+    if (all) {
+        int top[2][3] = {{-1, -1, -1}, {-1, -1, -1}};
+        for (int pass = 0; pass < 2; pass++)
+            for (int t = 0; t < 3; t++)
+                for (int i = 0; i < npim; i++) {
+                    uint64_t v = pass ? pim[i].stall : pim[i].n;
+                    if (v && i != top[pass][0] && i != top[pass][1] &&
+                        (top[pass][t] < 0 || v > (pass ? pim[top[pass][t]].stall : pim[top[pass][t]].n)))
+                        top[pass][t] = i;
+                }
+        fprintf(stderr, "ptolemy: profile of the session: %llu ticks, outside the VM %.1f%%, %d guest images, %llu samples without a slot",
+                (unsigned long long)all, 100.0 * pse_n[2] / all, npim - 2, (unsigned long long)pse_drop);
+        for (int t = 0; t < 3 && top[0][t] >= 0; t++)
+            fprintf(stderr, "; %s %.1f%%", pim[top[0][t]].name, 100.0 * pim[top[0][t]].n / all);
+        fprintf(stderr, " | in %llu stalls (%.2f s): %llu ticks, outside the VM %.1f%%", (unsigned long long)pst_count, pst_ns / 1e9,
+                (unsigned long long)st, 100.0 * pst_n[2] / (st ? st : 1));
+        for (int t = 0; t < 3 && top[1][t] >= 0; t++)
+            fprintf(stderr, "; %s %.1f%%", pim[top[1][t]].name, 100.0 * pim[top[1][t]].stall / (st ? st : 1));
+        fprintf(stderr, " | %s\n", f ? path : "no file");
+    }
+    pthread_mutex_unlock(&prof_lock);
+}
 /* PT_PROF: attributes one sampled host pc to the block (and PowerPC instruction) it belongs to. */
 void jit_prof_sample(CPU *c, uint64_t pc) {
     uint32_t i;
     int m = find_blk(pc, &i);
     st_ps_n++;
+    pthread_mutex_lock(&prof_lock);
+    if (m < 0)
+        prof_tick(1, -1);
+    else {
+        uint32_t a = blk[m].pc + 4 * i;
+        int img = prof_image(c, a), slot = -1;
+        for (uint32_t h = (a >> 2 ^ (uint32_t)img * 0x9E3779B1u) & 0xffff, k = 0; k < 64; k++, h = (h + 1) & 0xffff)
+            if (!pse[h].pc1 || (pse[h].pc1 == a + 1 && pse[h].img == img)) {
+                pse[h].pc1 = a + 1;
+                pse[h].img = (uint16_t)img;
+                pse[h].n++;
+                slot = (int)h;
+                break;
+            }
+        pse_drop += slot < 0;
+        pim[img].n++;
+        prof_tick(0, slot);
+    }
+    pthread_mutex_unlock(&prof_lock);
     if (m < 0) {
         st_ps_out++;
         return;
@@ -5465,6 +6153,31 @@ int jit_restore(CPU *c, const uint64_t *x, uint64_t pc) {
     return 1;
 }
 
+/* After a lookup exit: the target c->pc (translated at code) into its set, as jc_index() finds it: the newest in way
+ * 0, no key twice. */
+static void jc_fill(CPU *c, uint32_t *code, int stats) {
+    uint32_t s = kir ? c->sr[c->pc >> 28] : 0, i = jc_set(c->pc ^ s ^ kso << 31);
+    uint64_t key = (uint64_t)s << 32 | c->pc | KF | (uint64_t)kso << 63;
+    uint32_t g = jit_pggen ? jit_pggen[c->pc >> 12 & 0xffff] : 0;
+    JC *w = &jc[i];
+    if (stats) {
+        int k = w[0].pc == key ? 0 : jc_ways == 2 && w[1].pc == key ? 1 : -1;
+        st_jc[!w[0].code ? 0 : k < 0 ? 1 : jit_pggen && w[k].gen != g ? 2 : 3]++;
+        if (w[0].code && k < 0) {
+            st_jcm[i]++;
+            st_jck[i][0] = key;
+            st_jck[i][1] = w[jc_ways - 1].pc;
+            st_jck[i][2] = jc_ways == 2 ? w[0].pc : 0;
+        }
+    }
+    if (!w[0].code && njc < 1u << JC_MAX)
+        jc_used[njc++] = i;
+    if (jc_ways == 2 && w[0].pc != key)
+        w[1] = w[0];
+    w[0].pc = key;
+    w[0].code = (uint64_t)code + jit_delta;
+    w[0].gen = g;
+}
 void jit_run(
         CPU *c) { // until c->halted; a repeated call (after returning to the environment) continues with the existing code
     if (c->is970) {
@@ -5474,10 +6187,16 @@ void jit_run(
         return;
     }
     static int ready;
-    static uint32_t seen_gen, seen_mode, seen_cgen, seen_srgen;
-    if (!ready) {
-        init(c);
-        ready = 1;
+    static PT_CPU_LOCAL int mine; /* each CPU's thread calls for its own CPU; the first call translates the shared routines */
+    static PT_CPU_LOCAL uint32_t seen_gen, seen_mode, seen_cgen, seen_srgen;
+    static PT_CPU_LOCAL uint64_t seen_flush;
+    if (!mine) {
+        if (!ready)
+            init(c);
+        else
+            init_cpu(c);
+        ready = mine = 1;
+        seen_flush = st_cflush;
         seen_gen = c->xgen;
         seen_srgen = c->srgen_ok = c->srgen;
         c->tlbie_n = 0;
@@ -5487,6 +6206,8 @@ void jit_run(
             jit_dmap(c, 1);
     }
     int prof = env_on("PT_PROF"), stats = jit_stats_on = env_on("PT_STATS");
+    st_watch_pc = getenv("PT_STATS_BLOCK") ? (uint32_t)strtoul(getenv("PT_STATS_BLOCK"), NULL, 16) : 0;
+    st_cpu = c;
 #ifdef __linux__
     if (prof) {
         struct sigaction sa = {0};
@@ -5500,6 +6221,12 @@ void jit_run(
     uint32_t *code = NULL;
     int fill_jc = 0;
     while (!c->halted) {
+        pt_smp_checkpoint(); /* another CPU's flush of the code waits for this point, and happens here */
+        if (seen_flush != st_cflush) { // flushed, by any CPU: this CPU's cells point into the old code
+            seen_flush = st_cflush;
+            jc_reset();
+            code = NULL;
+        }
         if (c->irq) {
             ppc_irq(c);
             code = NULL;
@@ -5553,11 +6280,15 @@ void jit_run(
             uint64_t tt = stats ? jit_now() : 0;
             if (n > 512 || !jit_dtlbie) {
                 flush_all();
+                if (jit_dtlbie)
+                    jit_dtlbie(c, NULL, -1); // every page: the other CPUs' tables too
                 if (jit_dmap)
                     jit_dmap(c, 1);
             } else { // bit 0: data only (DBAT); block bodies stay (they are keyed by physical page)
                 for (uint32_t i = 0; i < n; i++)
                     if (!(c->tlbie_ea[i] & 1)) {
+                        st_tlbie_gen++;
+                        st_tlbie_code += code_vp[c->tlbie_ea[i] >> 12 & 0xffff];
                         if (jit_pggen)
                             jit_pggen[c->tlbie_ea[i] >> 12 & 0xffff]++;
                         else
@@ -5591,29 +6322,8 @@ void jit_run(
             continue;
         }
         if (fill_jc) { // indirect branch: remember the target in the cache
-            uint32_t s = kir ? c->sr[c->pc >> 28] : 0, h = (c->pc ^ s ^ kso << 31) * 0x9E3779B1u,
-                     i = jc_ways == 2 ? h >> 17 << 1 : h >> 16;
-            fill_jc = 0; // as jc_index()
-            uint64_t key = (uint64_t)s << 32 | c->pc | KF | (uint64_t)kso << 63;
-            uint32_t g = jit_pggen ? jit_pggen[c->pc >> 12 & 0xffff] : 0;
-            JC *w = &jc[i];
-            if (stats) {
-                int k = w[0].pc == key ? 0 : jc_ways == 2 && w[1].pc == key ? 1 : -1;
-                st_jc[!w[0].code ? 0 : k < 0 ? 1 : jit_pggen && w[k].gen != g ? 2 : 3]++;
-                if (w[0].code && k < 0) {
-                    st_jcm[i]++;
-                    st_jck[i][0] = key;
-                    st_jck[i][1] = w[jc_ways - 1].pc;
-                    st_jck[i][2] = jc_ways == 2 ? w[0].pc : 0;
-                }
-            }
-            if (!w[0].code && njc < 1 << 16)
-                jc_used[njc++] = i;
-            if (jc_ways == 2 && w[0].pc != key)
-                w[1] = w[0]; // the newest in way 0; no key twice
-            w[0].pc = key;
-            w[0].code = (uint64_t)code + jit_delta;
-            w[0].gen = g;
+            fill_jc = 0;
+            jc_fill(c, code, stats);
         }
         CPU before;
         if (check)
@@ -5628,9 +6338,15 @@ void jit_run(
         unsigned long mmio0 = jit_mmio_n;
         if (wlen)
             memcpy(win0, wp, wlen);
-        uint64_t tv = stats ? jit_now() : 0;
+        if ((uint32_t)c->jc_epoch >= 0xfff00000u) { // the epoch's low half is about to repeat: no cell of an old run
+            memset(c->l1, 0, sizeof c->l1);
+            c->jc_epoch = 0;
+        }
+        uint64_t tv = stats ? jit_now() : 0, flush0 = st_cflush;
         int why = enter(c, code);
         code = NULL;
+        if (st_cflush != flush0 && why == X_LINK)
+            continue; // another CPU flushed the code while this one waited to leave it: the link site is gone
         if (stats)
             jit_tm[0] += jit_now() - tv;
         st_exit[why & 7]++;
@@ -5773,6 +6489,22 @@ void jit_run(
     }
     if (st_so)
         fprintf(stderr, "ptolemy: blocks translated for XER.SO=1: %llu\n", (unsigned long long)st_so);
+    if (st_fsf_blocks || st_fsf_fails) { // the single-format FPR cache's learning (jit_fsf_fail, fsf_off)
+        unsigned used = 0, off = 0, k = 0;
+        for (int i = 0; i < 1024; i++)
+            used += !!nofsf[i], off += nofsf_n[i] >= 4;
+        fprintf(stderr,
+                "ptolemy: single-format FPRs: %llu translations, %llu X_FSF entries (%llu with MSR.FP = 0), "
+                "table %u/1024 (%u pcs off), "
+                "%llu refused for a full neighbourhood; off at:",
+                (unsigned long long)st_fsf_blocks, (unsigned long long)st_fsf_fails, (unsigned long long)st_fsf_fpoff,
+                used, off,
+                (unsigned long long)st_fsf_full);
+        for (int i = 0; i < 1024 && k < 24; i++)
+            if (nofsf_n[i] >= 4)
+                fprintf(stderr, " %08x", nofsf[i] - 1), k++;
+        fprintf(stderr, "\n");
+    }
     uint64_t entries = 0;
     for (unsigned i = 0; i < sizeof st_root / sizeof *st_root; i++)
         entries += st_root[i];

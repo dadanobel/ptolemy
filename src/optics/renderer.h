@@ -153,6 +153,7 @@ typedef struct {
                         wake:(void (^)(void))wake;
 - (unsigned)librariesCompiling; /* any thread */
 - (void)waitForLibraries; /* until no background compile runs (and calls its wake) */
+- (BOOL)waitForLibrariesNS:(uint64_t)ns; /* any thread: up to ns; YES when no background compile runs any more */
 - (PtR2Target *)targetWidth:(uint32_t)width
                      height:(uint32_t)height
                     samples:(PtR2MsaaInput)samples

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.9)
+project(AntiochusClassic C)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "RetroPPC")
+    message(FATAL_ERROR "Use Retro68's powerpc-apple-macos retroppc.toolchain.cmake (not RetroCarbon).")
+endif()
+add_application(AntiochusClassic classic.c size.r CREATOR AnCl)
+target_compile_options(AntiochusClassic PRIVATE -std=gnu99 -O2 -Wall -Wextra -mcpu=750 -fno-fast-math)

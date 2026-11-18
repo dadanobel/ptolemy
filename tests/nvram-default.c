@@ -44,6 +44,18 @@ int main(void) {
     unlink(path);
     pt_nvram_init(&n);
     assert(!pt_nvram_set_of(&n, "user-setting", "keep-me"));
+    {
+        char v[16] = "untouched", cut[5];
+        assert(pt_nvram_get_of(&n, "boot-args", v, sizeof v) == ENOENT && !strcmp(v, "untouched"));
+        assert(pt_nvram_get_of(&n, "user", v, sizeof v) == ENOENT); /* a prefix of a name is not the name */
+        assert(!pt_nvram_get_of(&n, "user-setting", v, sizeof v) && !strcmp(v, "keep-me"));
+        assert(!pt_nvram_get_of(&n, "user-setting", cut, sizeof cut) && !strcmp(cut, "keep"));
+        assert(!pt_nvram_set_of(&n, "boot-args", "") && !pt_nvram_get_of(&n, "boot-args", v, sizeof v) && !*v);
+        assert(!pt_nvram_set_of(&n, "boot-args", "-v fn=1") && !pt_nvram_get_of(&n, "boot-args", v, sizeof v) &&
+               !strcmp(v, "-v fn=1") && !pt_nvram_get_of(&n, "user-setting", v, sizeof v) && !strcmp(v, "keep-me"));
+        pt_nvram_init(&n);
+        assert(!pt_nvram_set_of(&n, "user-setting", "keep-me"));
+    }
     memcpy(original, n.data, sizeof original);
     put(path, original, sizeof original);
     load(&n, path);

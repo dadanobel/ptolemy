@@ -31,7 +31,7 @@ static void setup(int cache) {
     fp_lazy_enabled = 1;
     fp_more_enabled = 1;
     fp_moves_enabled = env_on("PT_FP_MOVES");
-    fp_directed_enabled = env_on("PT_FP_DIRECTED");
+    fp_directed_enabled = !getenv("PT_FP_DIRECTED") || atoi(getenv("PT_FP_DIRECTED")); /* the window's default: on */
     fcache_enabled = cache;
     fma_single_direct = 0;
     fp_mixed = 0;
@@ -84,7 +84,8 @@ static const Kernel kernels[] = {
         {"gb2-dot", K_DOT, 5},           {"gb2-lu", K_LU, 9},
         {"gb2-mandel", K_MANDEL, 14},    {"xb-fpbasic-inf", K_FPB, 17},
         {"xb-fpbasic-zero", K_FPB, 17},  {"xb-fpbasic-normal", K_FPB, 17},
-        {"gb2-dot-double-sum", K_DOT, 5}}; /* a sum not exactly single at entry (single-format cache) */
+        {"gb2-dot-double-sum", K_DOT, 5}, /* a sum not exactly single at entry (single-format cache) */
+        {"xb-fpbasic-specials", K_FPB, 17}}; /* every single class through lfs, the special paths and the eager forms */
 static CPU prepare(unsigned k, uint32_t iters) { /* the kernel's data and registers (Geekbench / Xbench layouts) */
     CPU c = initial();
     memset(memory, 0, 1 << 20);
@@ -129,9 +130,24 @@ static CPU prepare(unsigned k, uint32_t iters) { /* the kernel's data and regist
         putf(0x10000, (float)c.fpr[31]);
         putf(0x10004, (float)c.fpr[30]);
     }
+    if (!strcmp(x->name, "xb-fpbasic-specials")) { /* zeros, denormals, normals, tiny and huge, Inf, QNaN, SNaN */
+        static const uint32_t s[16] = {0x00000000, 0x80000000, 0x00000001, 0x807fffff, 0x00800000, 0x3f800000,
+                                       0xbfc00000, 0x7f7fffff, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc12345,
+                                       0x7f800001, 0xff812345, 0x7fbfffff, 0x1e3ce508};
+        c.gpr[0] = 0x10000;
+        for (uint32_t i = 0; 0x10000 + 4 * i < (1u << 20); i++) {
+            uint32_t h = i * 0x9E3779B9u; /* every pair of classes in every pair of operands */
+            h ^= h >> 15;
+            h *= 0x85EBCA6Bu;
+            wbe32(memory + 0x10000 + 4 * i, s[(h ^ h >> 13) >> 28]);
+        }
+        c.fpr[31] = 1.0;
+        c.fpr[30] = -1.5;
+    }
     c.ctr = iters;
     return c;
 }
+static CPU *shadow; /* the interpreter in step, compared at every exit: the state an interrupt there would see */
 static CPU run(CPU c, unsigned n) { /* as jit_run: links, interpreter steps, until the illegal word after the loop */
     uint32_t end = 0x1000 + 4 * n;
     pthread_jit_write_protect_np(0);
@@ -139,6 +155,16 @@ static CPU run(CPU c, unsigned n) { /* as jit_run: links, interpreter steps, unt
     pthread_jit_write_protect_np(1);
     while (c.pc != end) {
         int why = enter(&c, t);
+        if (shadow) {
+            while (shadow->pc != c.pc || shadow->ctr != c.ctr)
+                assert(interp_step(shadow) == 0);
+            CPU s = c;
+            ppc_fp_settle(&s);
+            if (diff(&s, shadow, 0, c.pc)) {
+                fprintf(stderr, "fp-kernels: the state at an exit (%d) differs from the interpreter\n", why);
+                exit(1);
+            }
+        }
         if (why == X_LINK) {
             pthread_jit_write_protect_np(0);
             uint32_t *site = (uint32_t *)c.jit_link;
@@ -300,20 +326,27 @@ int main(int argc, char **argv) {
     }
     for (unsigned k = 0; k < sizeof kernels / sizeof *kernels; k++) {
         const Kernel *x = &kernels[k];
-        if (!bench) {
-            CPU c = prepare(k, 3000);
-            memcpy(reference, memory, 1 << 20);
-            CPU r = c;
-            r.mem = r.vbase = reference;
-            r.preg[0].host = reference;
-            reset();
-            c = run(c, x->n);
-            while (r.pc != c.pc)
-                assert(interp_step(&r) == 0);
-            ppc_fp_settle(&c);
-            if (diff(&c, &r, 0, c.pc) || memcmp(memory, reference, 1 << 20)) {
-                fprintf(stderr, "fp-kernels: %s differs from the interpreter\n", x->name);
-                return 1;
+        if (!bench) { /* specials: then 4-iteration runs along the data, so each run's first status bits are compared */
+            for (uint32_t o = 0; o < (strcmp(x->name, "xb-fpbasic-specials") ? 1u : 3000u); o += 4) {
+                CPU c = prepare(k, o ? 4 : 3000);
+                c.gpr[0] += 16 * o;
+                if (o % 64 == 32) /* RN 1-3: the directed form on the guard's slow path (PT_FP_DIRECTED=0: the interpreter) */
+                    c.fpscr |= 1 + o / 64 % 3;
+                memcpy(reference, memory, 1 << 20);
+                CPU r = c;
+                r.mem = r.vbase = reference;
+                r.preg[0].host = reference;
+                reset();
+                shadow = strcmp(x->name, "xb-fpbasic-specials") ? NULL : &r;
+                c = run(c, x->n);
+                shadow = NULL;
+                while (r.pc != c.pc)
+                    assert(interp_step(&r) == 0);
+                ppc_fp_settle(&c);
+                if (diff(&c, &r, 0, c.pc) || memcmp(memory, reference, 1 << 20)) {
+                    fprintf(stderr, "fp-kernels: %s differs from the interpreter (at element %u)\n", x->name, o);
+                    return 1;
+                }
             }
             continue;
         }
@@ -347,6 +380,16 @@ int main(int argc, char **argv) {
                 }
         printf("fp-kernels: %-18s %7.2f ns/iteration (median of 7, min %.2f, max %.2f)%s\n", x->name, t[3], t[0], t[6],
                cache ? "" : " no FPR cache");
+    }
+    if (!bench) { /* PT_STATS_BLOCK: the passes of one block's loop are counted in the block itself */
+        jit_stats_on = 1;
+        st_watch_pc = 0x1000;
+        CPU c = prepare(0, 300);
+        reset();
+        CPU e = run(c, kernels[0].n);
+        assert(e.st_watch == 300);
+        jit_stats_on = 0;
+        st_watch_pc = 0;
     }
     if (!bench)
         printf("fp-kernels: %u kernels equal to the interpreter (state, FPSCR, memory) PASS\n",

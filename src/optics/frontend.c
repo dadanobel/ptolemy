@@ -209,7 +209,11 @@ struct PtRadeon {
     uint32_t zpass_query; /* occlusion query: open since ZB_ZPASS_DATA, its id */
     /* Session log: host time between published new frames (pace), and device entries that waited 10 ms or more for the lock */
     uint64_t pace_ns, pace_gap, pace_frames, pace_time, pace_max, pace_bucket[7], lock_waits, lock_wait_ns,
-            lock_wait_max;
+            lock_wait_max, service_skips;
+    struct { /* entries that waited 1 ms or more for the CP, by the entry point's source line */
+        uint32_t line;
+        uint64_t n, ns, max;
+    } wait_site[8];
     /* config.cp_thread: lock guards all of the above; the CP thread holds it while it runs and lets
      * go between packets while want (callers spinning for it) is nonzero. cp_kicked: a WPTR write it has not seen yet;
      * cp_running: inside cp_run; cp_sleeping: waiting on cp_event; cp_progress: packets accepted plus completions published. */
@@ -220,6 +224,24 @@ struct PtRadeon {
     int cp_async, cp_quit, cp_kicked, cp_running, cp_sleeping;
     uint64_t cp_progress;
     _Atomic int draw_wait; /* a draw packet waits in the ring for its shader (run_draw), read by compile completions */
+    /* engaged: the CP thread waits for the GPU inside a packet with the lock released (optics_frontend_gpu_wait_begin).
+     * Until that packet ends only the light accesses run (enter_at): register reads, the kick and interrupt register
+     * writes, the service tick without its executor work. Everything else sleeps on settled. gpu_wait: [0] the CP's
+     * waits, [1] other threads' (the lock stays held): count, ns, longest. */
+    int engaged;
+    pthread_cond_t settled;
+    pthread_t cp_self;
+    uint64_t gpu_wait[2][3], gpu_wait_since;
+    /* Stall attribution (session log). cp_ns: the CP thread's time by state (0 idle: nothing pending, 1 a completion
+     * fence, 2 a shader compile, 3 running), cp_at: since when it is in cp_kind. mark: the cumulative figures (ledger)
+     * at the last published frame; a gap of 100 ms or more while streaming adds its differences to stall_sum, its class
+     * (the CP's largest share: idle, fence, shader, executing, GPU wait; [5] idle without a draw) to stall_by, and is
+     * kept in stall when among the longest. pending_since: the native frame's GPU copy in flight. */
+    uint64_t cp_ns[4], cp_at, entry_wait_ns, pending_since, mark[8], stall_sum[10], stall_by[6];
+    int cp_kind;
+    struct {
+        uint64_t gap, v[9];
+    } stall[8];
     /* Immediate-mode primitive through the VAP vertex registers (vtx_write): VAP_VF_CNTL as written, the current
      * attributes (0x2300..0x24ab), the 16-byte groups written since it began, and the vertices emitted so far. */
     uint32_t imm_cntl, imm_attr[(0x24ac - 0x2300) / 4];
@@ -255,23 +277,45 @@ void optics_frontend_wake(PtRadeon *d) { /* any thread */
 static void relax(void) {
     __asm__ volatile("yield");
 }
-static void take(PtRadeon *d) {
+static int try_take(PtRadeon *d) { /* 0: held; otherwise the holder is in a long hold */
     for (unsigned i = 0; i < 4096; i++) {
         if (!pthread_mutex_trylock(&d->lock))
-            return;
+            return 0;
         relax();
     }
-    pthread_mutex_lock(&d->lock);
+    return -1;
+}
+static void take(PtRadeon *d) {
+    if (try_take(d))
+        pthread_mutex_lock(&d->lock);
 }
 static uint64_t mono_ns(void);
-static void enter(PtRadeon *d) { /* a device entry point, on any thread but the CP thread */
+/* A device entry point, on any thread but the CP thread. light: an access that touches neither the executor nor the
+ * CP's ring and stream, so it does not wait for a packet the CP left in a GPU wait (engaged). want stays up while the
+ * caller sleeps on settled: the CP hands the lock over right after that packet. */
+static void enter_at(PtRadeon *d, uint32_t line, int light) {
     if (!d->cp_async)
         return;
     atomic_fetch_add_explicit(&d->want, 1, memory_order_relaxed);
-    if (pthread_mutex_trylock(&d->lock)) {
+    int held = !pthread_mutex_trylock(&d->lock);
+    if (!held || (!light && d->engaged)) {
         uint64_t t = mono_ns();
-        take(d);
+        if (!held)
+            take(d);
+        while (!light && d->engaged)
+            pthread_cond_wait(&d->settled, &d->lock);
         t = mono_ns() - t;
+        for (unsigned i = 0; t >= 1000000u && i < 8; i++)
+            if (d->wait_site[i].line == line || !d->wait_site[i].line) {
+                d->wait_site[i].line = line;
+                d->wait_site[i].n++;
+                d->wait_site[i].ns += t;
+                if (t > d->wait_site[i].max)
+                    d->wait_site[i].max = t;
+                break;
+            }
+        if (t >= 1000000u)
+            d->entry_wait_ns += t;
         if (t >= 10000000u) {
             d->lock_waits++;
             d->lock_wait_ns += t;
@@ -281,6 +325,7 @@ static void enter(PtRadeon *d) { /* a device entry point, on any thread but the 
     }
     atomic_fetch_sub_explicit(&d->want, 1, memory_order_relaxed);
 }
+#define enter(d) enter_at((d), __LINE__, 0)
 static void leave(PtRadeon *d) {
     if (d->cp_async)
         pthread_mutex_unlock(&d->lock);
@@ -300,6 +345,34 @@ static int cp_yield(PtRadeon *d) {
             sched_yield();
     take(d);
     return d->epoch != epoch || d->cp_quit;
+}
+/* The executor is about to block on GPU progress inside a call (io.h: no GPU wait while holding a lock). On the CP
+ * thread the device lock is released until optics_frontend_gpu_wait_end (returns 1): light entries run meanwhile, the
+ * rest waits for the packet as before. Other threads keep the lock (the caller itself needs the result) and are counted.
+ * OPTICS_GPU_WAIT_UNLOCK=0: the CP keeps the lock too (the behaviour before; diagnostic switch). */
+static int gpu_wait_unlock = -1;
+int optics_frontend_gpu_wait_begin(PtRadeon *d) {
+    if (gpu_wait_unlock < 0)
+        gpu_wait_unlock = !getenv("OPTICS_GPU_WAIT_UNLOCK") || atoi(getenv("OPTICS_GPU_WAIT_UNLOCK"));
+    d->gpu_wait_since = mono_ns();
+    if (!gpu_wait_unlock || !d->cp_async || !pthread_equal(pthread_self(), d->cp_self))
+        return 0;
+    d->engaged = 1;
+    pthread_mutex_unlock(&d->lock);
+    return 1;
+}
+void optics_frontend_gpu_wait_end(PtRadeon *d, int released) {
+    if (released) {
+        take(d);
+        d->engaged = 0;
+        pthread_cond_broadcast(&d->settled);
+    }
+    /* counted by thread, not by `released`: with OPTICS_GPU_WAIT_UNLOCK=0 the CP's waits are still the CP's */
+    uint64_t t = mono_ns() - d->gpu_wait_since, *w = d->gpu_wait[!(d->cp_async && pthread_equal(pthread_self(), d->cp_self))];
+    w[0]++;
+    w[1] += t;
+    if (t > w[2])
+        w[2] = t;
 }
 /* OPTICS_TRACE=1: development traces (first register accesses, CRTC/2D/HOST_DATA, surfaces, per-target statistics). */
 static uint64_t mono_ns(void) {
@@ -1412,7 +1485,8 @@ static void reg_write(PtRadeon *d, uint32_t a, uint32_t v, int from_cp) {
         break;
     case CP_RB_BASE:
     case CP_RB_CNTL:
-        rb_setup(d);
+        if (!from_cp) /* the command processor does not re-create the ring it is reading a packet from */
+            rb_setup(d);
         break;
     case CP_RB_RPTR_ADDR:
         cp_writeback_rptr(d);
@@ -1983,7 +2057,10 @@ static int run_draw(PtRadeon *d, uint8_t opcode, const uint32_t *payload, uint32
             free(back);
         }
     } else if (built && exec_ops.draw) {
-        draw.defer = (uint8_t)defer;
+        /* 2: frames are streaming (one shown within 100 ms, the one before it too), so the executor may skip a draw whose
+         * shader still compiles (async shaders, frontend_metal.mm); 1 (a still picture, a one-shot render read back):
+         * the draw waits as before. */
+        draw.defer = (uint8_t)(defer ? 1 + (d->pace_gap && d->pace_gap < 100000000u && mono_ns() - d->pace_ns < 100000000u) : 0);
         result = exec_ops.draw(d->exec, d, &draw, &why);
     }
     d->in_executor = 0;
@@ -2112,8 +2189,9 @@ static int execute(PtRadeon *d, const PtR2Pm4Packet *p) {
     d->stats.packets++;
     if (p->type == 2 || (p->type == 3 && p->opcode == 0x10))
         return 0; /* filler, NOP */
-    if (p->type == 3 && (p->opcode == 0x9b || p->opcode == 0x1b)) {
-        /* Diagnostic switch OPTICS_BITBLT_MULTI=0 refuses 0x9B/0x1B. */
+    if (p->type == 3 && (p->opcode == 0x9b || p->opcode == 0x1b || p->opcode == 0x92)) {
+        /* CNTL_BITBLT (0x92) is one rectangle in 0x9B's layout: Leopard's Preview scrolls its window with it, inside one
+         * surface (t847). Diagnostic switch OPTICS_BITBLT_MULTI=0 refuses 0x9B/0x1B/0x92. */
         static int on = -1;
         if (on < 0) {
             const char *v = getenv("OPTICS_BITBLT_MULTI");
@@ -2209,18 +2287,61 @@ static int cp_launch_ib(PtRadeon *d) {
     d->stats.ib_launches++;
     return 0;
 }
+static void cp_state(PtRadeon *d, int kind) { /* the CP changes state: its time so far goes to the state it leaves */
+    uint64_t now = mono_ns();
+    d->cp_ns[d->cp_kind] += now - d->cp_at;
+    d->cp_at = now;
+    d->cp_kind = kind;
+}
+/* The cumulative figures a stall is explained with: the CP's time idle, at a fence, at a shader, running; of the running
+ * time its GPU waits; other threads' GPU waits; entries' waits for the CP (1 ms or more); draws executed. */
+static void ledger(const PtRadeon *d, uint64_t now, uint64_t v[8]) {
+    memcpy(v, d->cp_ns, sizeof d->cp_ns);
+    v[d->cp_kind] += now - d->cp_at;
+    v[4] = d->gpu_wait[0][1];
+    v[5] = d->gpu_wait[1][1];
+    v[6] = d->entry_wait_ns;
+    v[7] = d->stats.draws;
+}
+void (*optics_frontend_stall_hook)(uint64_t gap_ns);
+static void stall_note(PtRadeon *d, uint64_t now, uint64_t gap, const uint64_t v[8]) {
+    uint64_t dv[9];
+    for (int k = 0; k < 8; k++)
+        dv[k] = v[k] - d->mark[k];
+    dv[3] -= dv[3] < dv[4] ? dv[3] : dv[4]; /* running without its GPU waits: executing */
+    dv[8] = d->pending_since ? now - d->pending_since : 0;
+    int top = 0;
+    for (int k = 1; k < 5; k++)
+        if (dv[k] > dv[top])
+            top = k;
+    d->stall_by[top]++;
+    d->stall_by[5] += !top && !dv[7];
+    d->stall_sum[9] += gap;
+    for (int k = 0; k < 9; k++)
+        d->stall_sum[k] += dv[k];
+    unsigned least = 0;
+    for (unsigned i = 1; i < 8; i++)
+        if (d->stall[i].gap < d->stall[least].gap)
+            least = i;
+    if (gap > d->stall[least].gap) {
+        d->stall[least].gap = gap;
+        memcpy(d->stall[least].v, dv, sizeof dv);
+    }
+}
 /* kicked: a WPTR write (the RPTR write-back follows every kick, as before); a resumed CP writes RPTR back only when it moved. */
 static void cp_run_body(PtRadeon *d, int kicked);
 static void cp_run(PtRadeon *d, int kicked) {
-    if (!rate_on() || d->rate_depth) {
+    cp_state(d, 3);
+    if (!rate_on() || d->rate_depth)
         cp_run_body(d, kicked);
-        return;
+    else {
+        d->rate_depth = 1;
+        uint64_t t = mono_ns();
+        cp_run_body(d, kicked);
+        d->rate_cp += mono_ns() - t;
+        d->rate_depth = 0;
     }
-    d->rate_depth = 1;
-    uint64_t t = mono_ns();
-    cp_run_body(d, kicked);
-    d->rate_cp += mono_ns() - t;
-    d->rate_depth = 0;
+    cp_state(d, d->draw_wait ? 2 : d->cp_wait ? 1 : 0);
 }
 /* PMD_RATE: once a second, prints the frontend's work rates (draws, deferred completions, batches, GPU time). */
 static void rate_tick(PtRadeon *d) {
@@ -2322,6 +2443,7 @@ static void *cp_main(void *o) {
     PtRadeon *d = o;
     pthread_setname_np("org.ptolemy.radeon-cp");
     take(d);
+    d->cp_self = pthread_self();
     while (!d->cp_quit) {
         uint64_t g = pt_event_generation(&d->cp_event), before = d->cp_progress;
         if (cp_pending(d)) {
@@ -2385,6 +2507,7 @@ int pt_radeon_create(PtRadeon **out, const PtRadeonConfig *c) {
     d->reg[MC_FB_LOCATION / 4] = (uint32_t)(((d->vram_bytes >> 16) - 1) << 16); /* until the driver programs the MC */
     d->reg[DP_WRITE_MASK / 4] = 0xffffffffu;
     d->epoch = 1;
+    d->cp_at = mono_ns();
     if (pthread_mutex_init(&d->frame_lock, NULL)) {
         pt_r2_timeline_destroy(d->tl);
         pt_r2_io_destroy(d->io);
@@ -2397,6 +2520,7 @@ int pt_radeon_create(PtRadeon **out, const PtRadeonConfig *c) {
     d->owner = pthread_self();
     d->exec = exec_ops.create ? exec_ops.create(d) : NULL;
     if (c->cp_thread && !pthread_mutex_init(&d->lock, NULL)) {
+        pthread_cond_init(&d->settled, NULL);
         pt_event_init(&d->cp_event);
         d->cp_async = 1;
     } /* direct VRAM stays off */
@@ -2418,6 +2542,7 @@ int pt_radeon_create(PtRadeon **out, const PtRadeonConfig *c) {
             fprintf(stderr, "optics-frontend: no CP thread, the CP runs on the CPU owner\n");
             d->cp_async = 0;
             pt_event_destroy(&d->cp_event);
+            pthread_cond_destroy(&d->settled);
             pthread_mutex_destroy(&d->lock);
             direct_update(d);
         }
@@ -2439,7 +2564,9 @@ int pt_radeon_mmio(PtRadeon *d, uint32_t off, uint8_t *b, unsigned n, int wr) {
     if (!d || !b || (n != 1 && n != 2 && n != 4) || off >= REG_BYTES || off + n > REG_BYTES || (off & 3) + n > 4)
         return EINVAL;
     uint32_t a = off & ~3u, shift = (off & 3) * 8;
-    enter(d);
+    /* Light: every read (RBBM_STATUS reports busy from cp_running, no executor call, while the CP is engaged) and the
+     * writes that only store, kick the CP or acknowledge interrupts. */
+    enter_at(d, __LINE__, !wr || a == CP_RB_WPTR || a == GEN_INT_CNTL || a == GEN_INT_STATUS || a == CRTC_STATUS);
     if (wr) {
         uint32_t v = n == 4 ? rd32le(b) : n == 2 ? (uint32_t)(b[0] | b[1] << 8) : b[0];
         if (n != 4) {
@@ -2702,8 +2829,16 @@ static int publish_scanout(PtRadeon *d, int force) {
     s->seq = d->frame_seq;
     pthread_mutex_unlock(&d->frame_lock);
     /* pace: gaps while frames stream (the one before came within 100 ms); 100 ms or more is a stall the user sees */
-    uint64_t now = mono_ns(), gap = now - d->pace_ns;
+    uint64_t now = mono_ns(), gap = now - d->pace_ns, v[8];
     d->pace_ns = now;
+    ledger(d, now, v);
+    if (d->pace_gap && d->pace_gap < 100000000u && gap >= 100000000u && gap < 1000000000u) {
+        stall_note(d, now, gap, v);
+        if (optics_frontend_stall_hook)
+            optics_frontend_stall_hook(gap);
+    }
+    memcpy(d->mark, v, sizeof v);
+    d->pending_since = 0;
     if (d->pace_gap && d->pace_gap < 100000000u && gap < 1000000000u) {
         static const uint32_t bound[] = {20, 34, 50, 100, 250, 500};
         unsigned b = 0;
@@ -2722,12 +2857,28 @@ static int publish_scanout(PtRadeon *d, int force) {
 /* CPU owner, about every millisecond: VBL, a CP waiting on a completion fence (or with packets left by its budget),
  * and at the display period the scanout publication. */
 static void service(PtRadeon *d, uint64_t guest_ns);
-void pt_radeon_service(PtRadeon *d, uint64_t guest_ns) {
-    if (d) {
-        enter(d);
-        service(d, guest_ns);
-        leave(d);
+/* The CPU owner does not wait behind a long CP hold (a GPU wait): it skips the tick and runs the guest; VBL is latched
+ * from guest time and the CP wake, scanout publication follow on a later tick. Between packets the CP lets go (want). */
+uint64_t pt_radeon_service(PtRadeon *d, uint64_t guest_ns) {
+    if (!d)
+        return UINT64_MAX;
+    if (d->cp_async) {
+        atomic_fetch_add_explicit(&d->want, 1, memory_order_relaxed);
+        int busy = try_take(d);
+        atomic_fetch_sub_explicit(&d->want, 1, memory_order_relaxed);
+        if (busy) {
+            d->service_skips++; /* the caller's thread only */
+            return guest_ns + 1000000;
+        }
     }
+    service(d, guest_ns);
+    uint64_t next = d->vblank_ns + 16666667u, publish = d->published_ns + 16666667u;
+    if (publish > guest_ns && publish < next)
+        next = publish;
+    if (cp_pending(d) || d->engaged || d->frame_pending || rate_on())
+        next = guest_ns + 1000000;
+    leave(d);
+    return next;
 }
 /* Periodic device work in guest time: 60 Hz vertical blank, interrupts, the CP, deferred completions. */
 static void service(PtRadeon *d, uint64_t guest_ns) {
@@ -2747,6 +2898,8 @@ static void service(PtRadeon *d, uint64_t guest_ns) {
         else if (d->cp_sleeping)
             pt_event_signal(&d->cp_event);
     } /* a missed wake costs one tick */
+    if (d->engaged)
+        return; /* the executor is inside the CP's packet: statistics and the scanout publication follow on a later tick */
     if (rate_on())
         rate_tick(d);
     if (d->frame_pending)
@@ -2763,8 +2916,10 @@ static void service(PtRadeon *d, uint64_t guest_ns) {
             last[3] = h;
         }
         d->published_ns = guest_ns;
-        if (!d->frame_pending)
+        if (!d->frame_pending) {
             d->frame_pending = publish_scanout(d, 0) < 0;
+            d->pending_since = d->frame_pending ? mono_ns() : 0;
+        }
         /* development: OPTICS_SURFACE_DUMP, by host seconds since the first service call (the input script's clock is the
          * host's; guest time runs at its own rate), from 55 s every 3 s, 12 dumps */
         static const char *dir;
@@ -2840,15 +2995,58 @@ void pt_radeon_stats(PtRadeon *d, FILE *f) {
     OpticsFrontendStats s = d->stats;
     int direct = d->direct;
     uint64_t pf = d->pace_frames, pt = d->pace_time, pm = d->pace_max, pb[7], lw = d->lock_waits, ln = d->lock_wait_ns,
-             lm = d->lock_wait_max;
+             lm = d->lock_wait_max, sk = d->service_skips, gw[2][3];
     memcpy(pb, d->pace_bucket, sizeof pb);
+    memcpy(gw, d->gpu_wait, sizeof gw);
+    uint64_t cp[8], ss[10], sb[6];
+    ledger(d, mono_ns(), cp);
+    memcpy(ss, d->stall_sum, sizeof ss);
+    memcpy(sb, d->stall_by, sizeof sb);
+    char longest[640] = "";
+    for (unsigned i = 0, k = 0; i < 8 && k < sizeof longest; i++)
+        if (d->stall[i].gap) {
+            const uint64_t *x = d->stall[i].v;
+            k += (unsigned)snprintf(longest + k, sizeof longest - k, " %.0f: %.0f/%.0f/%.0f/%.0f/%.0f | %.0f, %.0f, %.0f, %llu;",
+                                    d->stall[i].gap / 1e6, x[3] / 1e6, x[4] / 1e6, x[2] / 1e6, x[1] / 1e6, x[0] / 1e6,
+                                    x[5] / 1e6, x[6] / 1e6, x[8] / 1e6, (unsigned long long)x[7]);
+        }
+    char sites[512] = "";
+    for (unsigned i = 0, k = 0; i < 8 && d->wait_site[i].line && k < sizeof sites; i++)
+        k += (unsigned)snprintf(sites + k, sizeof sites - k, " line %u: %llu (%.2f s, longest %.1f ms);", d->wait_site[i].line,
+                                (unsigned long long)d->wait_site[i].n, d->wait_site[i].ns / 1e9, d->wait_site[i].max / 1e6);
     leave(d);
+    if (sites[0])
+        fprintf(f, "device entries that waited 1 ms or more for the CP, by entry (frontend.c line):%s\n", sites);
+    fprintf(f,
+            "GPU waits inside executor calls: the CP thread %llu (%.2f s, longest %.1f ms; the device lock %s), other "
+            "threads %llu holding it (%.2f s, longest %.1f ms)\n",
+            (unsigned long long)gw[0][0], gw[0][1] / 1e9, gw[0][2] / 1e6,
+            gpu_wait_unlock ? "released" : "held: OPTICS_GPU_WAIT_UNLOCK=0", (unsigned long long)gw[1][0], gw[1][1] / 1e9,
+            gw[1][2] / 1e6);
+    fprintf(f,
+            "CP thread over the session: running %.1f s (of it GPU waits %.1f s), waiting for a shader %.1f s, for a "
+            "completion fence %.1f s, idle %.1f s\n",
+            cp[3] / 1e9, cp[4] / 1e9, cp[2] / 1e9, cp[1] / 1e9, cp[0] / 1e9);
+    fprintf(f,
+            "stalls of 100 ms or more while streaming: %llu, %.2f s; the CP thread in them: executing %.2f s, GPU waits "
+            "%.2f s, shader %.2f s, fence %.2f s, idle %.2f s; other threads' GPU waits %.2f s, entries waiting for the CP "
+            "%.2f s, the frame's GPU copy in flight %.2f s, draws %llu; by the CP's largest share: executing %llu, GPU wait "
+            "%llu, shader %llu, fence %llu, idle %llu (without a single draw: %llu)\n",
+            (unsigned long long)(sb[0] + sb[1] + sb[2] + sb[3] + sb[4]), ss[9] / 1e9, ss[3] / 1e9, ss[4] / 1e9,
+            ss[2] / 1e9, ss[1] / 1e9, ss[0] / 1e9, ss[5] / 1e9, ss[6] / 1e9, ss[8] / 1e9, (unsigned long long)ss[7],
+            (unsigned long long)sb[3], (unsigned long long)sb[4], (unsigned long long)sb[2], (unsigned long long)sb[1],
+            (unsigned long long)sb[0], (unsigned long long)sb[5]);
+    if (longest[0])
+        fprintf(f,
+                "the longest stalls, ms (gap: CP executing/GPU wait/shader/fence/idle | other threads' GPU waits, entry "
+                "waits, frame copy in flight, draws):%s\n",
+                longest);
     fprintf(f,
             "frame pacing: %llu frames while streaming, %.1f s (%.1f fps); gaps <20 ms %llu, <34 %llu, <50 %llu, <100 %llu, stalls <250 ms %llu, <500 %llu, <1 s %llu, longest %.0f ms; "
-            "device entries that waited 10 ms or more for the CP: %llu (%.2f s, longest %.0f ms)\n",
+            "device entries that waited 10 ms or more for the CP: %llu (%.2f s, longest %.0f ms); service ticks skipped behind the CP: %llu\n",
             (unsigned long long)pf, pt / 1e9, pt ? pf * 1e9 / pt : 0.0, (unsigned long long)pb[0],
             (unsigned long long)pb[1], (unsigned long long)pb[2], (unsigned long long)pb[3], (unsigned long long)pb[4],
-            (unsigned long long)pb[5], (unsigned long long)pb[6], pm / 1e6, (unsigned long long)lw, ln / 1e9, lm / 1e6);
+            (unsigned long long)pb[5], (unsigned long long)pb[6], pm / 1e6, (unsigned long long)lw, ln / 1e9, lm / 1e6, (unsigned long long)sk);
     fprintf(f,
             "optics-frontend: draws %llu packets %llu type0 %llu IBs %llu blits %llu (%llu bytes) refused: draws %llu packets %llu blits %llu; "
             "faults %llu (last %08x) writebacks %llu frames %llu (native %llu copied %llu) fence waits %llu completions deferred %llu RBBM reads %llu export failures %llu; "
@@ -2971,6 +3169,7 @@ void pt_radeon_close(PtRadeon *d) {
         pthread_join(d->cp, NULL);
         d->cp_async = 0;
         pt_event_destroy(&d->cp_event);
+        pthread_cond_destroy(&d->settled);
         pthread_mutex_destroy(&d->lock);
     }
     pt_radeon_stats(d, stderr); /* one line at exit: executed/refused work, fences, frames, failures */
@@ -3059,6 +3258,8 @@ int optics_frontend_idle(PtRadeon *d) {
 /* Another device's DMA reaches guest RAM [at, at+n): GPU ownership first. Any CPU-side thread; 0, EAGAIN (the GPU
  * still owns it: retry later) or EIO. */
 int optics_frontend_ram_before(PtRadeon *d, uint64_t at, size_t n, int write) {
+    if (!pt_r2_io_ram_tracked(d->io, at, n))
+        return 0; /* no GPU page there: nothing to wait for or invalidate, so no wait behind the CP's lock either */
     enter(d);
     PtR2IoResult r = pt_r2_io_before_physical(d->io, 1, at, n, write);
     leave(d);

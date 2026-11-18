@@ -98,11 +98,13 @@ static int pt_input_builtin(uint32_t token, uint32_t job, char **argv, unsigned 
     ptagent_call(PTA_OUTPUT, token, job, (uint32_t)(uintptr_t)message, (uint32_t)strlen(message), reply);
     return 1;
 }
-static void pt_input_guest_tick(uint32_t token, uint64_t now) {
+/* Reports the pointer; 1 when it or its visibility changed since the last report. */
+static int pt_input_guest_tick(uint32_t token, uint64_t now) {
     static uint64_t last;
+    static uint32_t sent[5];
     if (!pt_input_api.visible || !pt_input_api.mouse || !pt_input_api.width || !pt_input_api.height ||
         !pt_input_api.main_display || (last && now >= last && now - last < 50))
-        return;
+        return 0;
     last = now;
     uint32_t width = (uint32_t)pt_input_api.width(pt_input_api.main_display()),
              height = (uint32_t)pt_input_api.height(pt_input_api.main_display());
@@ -124,5 +126,8 @@ static void pt_input_guest_tick(uint32_t token, uint64_t now) {
         wire[4 * i + 3] = v;
     }
     (void)ptagent_call(PTA_POINTER, token, (uint32_t)(uintptr_t)wire, sizeof wire, 0, reply);
+    int changed = memcmp(sent, value + 1, sizeof sent) != 0;
+    memcpy(sent, value + 1, sizeof sent);
+    return changed;
 }
 #endif

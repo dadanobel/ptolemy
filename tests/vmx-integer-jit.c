@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * Real emitter vs interpreter: added integer VMX, SAT/CR6, aliasing, NJ and VEC.
+ * Real emitter vs interpreter: added integer VMX (including the carries, octet shifts and pixel unpacks), SAT/CR6,
+ * aliasing, NJ and VEC.
  * Build as vmx-fp-jit.c (tools/build-perf.sh; executed with --run-unit). */
 #include "jit-test.h"
 int main(void) {
@@ -14,7 +15,8 @@ int main(void) {
             0x1c4, 0x2c4, /* vsl vsr: the whole register by vB[15] & 7 bits */
             0x024, 0x025, 0x026, 0x027, 0x028, 0x029, /* vmsumubm vmsummbm vmsumuhm vmsumuhs vmsumshm vmsumshs (VA) */
             0x608, 0x648, 0x708, 0x688, 0x788, /* vsum4ubs vsum4shs vsum4sbs vsum2sws vsumsws */
-            0x004, 0x044, 0x084 /* vrlb vrlh vrlw */
+            0x004, 0x044, 0x084, /* vrlb vrlh vrlw */
+            0x180, 0x580, 0x40c, 0x44c, 0x34e, 0x3ce /* vaddcuw vsubcuw vslo vsro vupkhpx vupklpx */
     };
     uint32_t *code =
             mmap(NULL, 65536, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
@@ -23,7 +25,7 @@ int main(void) {
     for (unsigned oi = 0; oi < sizeof ops / sizeof *ops; oi++)
         for (unsigned k = 0; k < 1024; k++) {
             unsigned xo = ops[oi], a = rnd() & 31, b = rnd() & 31, d = rnd() & 31;
-            if (xo == 0x20e || xo == 0x24e || xo == 0x28e || xo == 0x2ce)
+            if (xo == 0x20e || xo == 0x24e || xo == 0x28e || xo == 0x2ce || xo == 0x34e || xo == 0x3ce)
                 a = 0;
             uint32_t in = 4u << 26 | d << 21 | a << 16 | b << 11 | xo;
             if (xo >= 0x020 && xo < 0x030)

@@ -154,8 +154,7 @@ int main(void) {
     aw(a, 0x70, 0xa0);
     for (unsigned i = 0; i < 12; i += 2)
         assert(!pt_ata_mmio(a, 0, cdb + i, 2, 1));
-    pt_ata_service(a);
-    assert(s->pending);
+    assert(s->pending); /* submitted by the packet's last word; a service call here could already complete it */
     aw(a, 0x80, 4);
     assert(a->status & 0x80);
     scsi_drain(s);
@@ -170,6 +169,11 @@ int main(void) {
     PtUsbDevice dev = pt_usb_msc_device(u);
     usb_control(&dev, 0, 5, 7, 0);
     assert(dev.address(dev.opaque) == 7);
+    /* A refused SETUP ends the transfer before it: the status stage does not commit the refused request's bytes. */
+    uint8_t set[8] = {0, 5, 9, 0, 0, 0, 0, 0}, bad[8] = {0x40, 5, 0x33, 0, 0, 0, 0, 0};
+    assert(dev.packet(dev.opaque, 0, PT_USB_SETUP, set, 8, 0) == 8 &&
+           dev.packet(dev.opaque, 0, PT_USB_SETUP, bad, 8, 0) == PT_USB_STALL &&
+           dev.packet(dev.opaque, 0, PT_USB_IN, bad, 0, 0) == PT_USB_STALL && dev.address(dev.opaque) == 7);
     usb_control(&dev, 0, 9, 1, 0);
     memset(cdb, 0, 16);
     cdb[0] = 0x28;

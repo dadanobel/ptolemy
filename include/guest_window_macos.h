@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #import "display_macos.h"
+/* The guest system's name for menus and messages: the launcher passes PT_GUEST_SYSTEM (Tiger or Leopard). */
+static inline NSString *PTGuestName(void) {
+    const char *s = getenv("PT_GUEST_SYSTEM");
+    return s && (!strcmp(s, "Tiger") || !strcmp(s, "Leopard")) ? @(s) : @"Mac OS X";
+}
 @protocol PTGuestWindowActions <NSObject>
 /* Main thread -> the machine adapter's queue; never call devices here. */
 - (void)pauseGuest:(BOOL)pause;

@@ -11,7 +11,9 @@ typedef struct {
     size_t used;
     uint8_t block[64];
 } PtSha256;
-static uint32_t pt_sha_rotr(uint32_t x, unsigned n) {
+/* Always inline: gcc 4.0 at -O2 left this a call, twelve calls and returns a round in the guest agent (the worker's
+ * hash of a transferred file was most of its time). */
+static inline __attribute__((always_inline)) uint32_t pt_sha_rotr(uint32_t x, unsigned n) {
     return (x >> n) | (x << (32 - n));
 }
 static void pt_sha_block(PtSha256 *s, const uint8_t *b) {

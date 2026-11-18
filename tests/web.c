@@ -34,6 +34,32 @@ int main(void) {
     size_t n = pt_web_downgrade(page, sizeof page - 1);
     const char *want = "<a href=\"http://a.org/x\">http://http://</a>{\"u\":\"http:\\/\\/b.org\"} https:/";
     assert(n == strlen(want) && !memcmp(page, want, n));
+    assert(pt_web_profile("Mozilla/5.0 (Macintosh; U; PPC Mac OS X 10_5_8; en-us) AppleWebKit/534.59.10 (KHTML, like Gecko) Version/5.1.10 Safari/534.59.10") == PT_WEB_SAFARI5 &&
+           pt_web_profile("Mozilla/5.0 (Macintosh; U; PPC Mac OS X 10_4_11; en) AppleWebKit/531.22.7 (KHTML, like Gecko) Version/4.1.3 Safari/531.22.7") == PT_WEB_SAFARI4 &&
+           pt_web_profile("Mozilla/5.0 (Macintosh; U; PPC Mac OS X; en) AppleWebKit/412 (KHTML, like Gecko) Safari/412") == PT_WEB_LEGACY &&
+           pt_web_profile(NULL) == PT_WEB_LEGACY);
+    static const char *html[][2] = {
+        {"<p><IMG class=a src=\"blank.gif\" data-src=\"/real.jpg\" alt=x></p>", "<p><IMG class=a src=\"/real.jpg\" data-src=\"/real.jpg\" alt=x></p>"},
+        {"<img data-lazy-src='a.png' width=3>", "<img src=\"a.png\" data-lazy-src='a.png' width=3>"},
+        {"<img srcset=\"s.jpg 1x, l.jpg 2x\">", "<img src=\"s.jpg\" srcset=\"s.jpg 1x, l.jpg 2x\">"},
+        {"<img src=\"k.jpg\" srcset=\"l.jpg 2x\">", "<img src=\"k.jpg\" srcset=\"l.jpg 2x\">"},
+        {"<img src=k.jpg>", "<img src=k.jpg>"},
+        {"a<noscript><img src=\"n.jpg\"></noscript>b", "a<img src=\"n.jpg\">b"},
+        {"<NOSCRIPT><meta http-equiv=\"refresh\" content=\"0;url=/nojs\"></NOSCRIPT>", "<NOSCRIPT><meta http-equiv=\"refresh\" content=\"0;url=/nojs\"></NOSCRIPT>"},
+        {"<script>var s='<img data-src=\"x\">';</script><img data-src=\"y\">", "<script>var s='<img data-src=\"x\">';</script><img src=\"y\" data-src=\"y\">"},
+        {"<style>a<b{}</style><noscript>t</noscript>", "<style>a<b{}</style>t"},
+        {"<img data-src=\"z\"", "<img data-src=\"z\""},
+        {"<script>unterminated <img data-src=q>", "<script>unterminated <img data-src=q>"},
+    };
+    for (unsigned i = 0; i < sizeof html / sizeof *html; i++) {
+        size_t m = 0;
+        uint8_t *o = pt_web_html((const uint8_t *)html[i][0], strlen(html[i][0]), PT_WEB_SAFARI5, &m);
+        if (!o || m != strlen(html[i][1]) || memcmp(o, html[i][1], m)) {
+            printf("html case %u: got \"%.*s\"\n", i, (int)m, o ? (char *)o : "");
+            return 1;
+        }
+        free(o);
+    }
     uint32_t seed = 7; /* random heads: never crash, never read past n (ASan) */
     for (unsigned i = 0; i < 20000; i++) {
         size_t len = 1 + i % 300;
@@ -44,8 +70,14 @@ int main(void) {
         }
         (void)pt_web_parse(b, len, &r);
         (void)pt_web_downgrade((uint8_t *)b, len);
+        for (size_t j = 0; j < len; j++) {
+            seed = seed * 1664525 + 1013904223;
+            b[j] = "<>imgsrcdata-=\"' noscript/"[seed % 25];
+        }
+        size_t m;
+        free(pt_web_html((const uint8_t *)b, len, (int)(i % 3), &m));
         free(b);
     }
-    puts("PASS: web gateway request heads (origin/absolute form, limits, NUL), https:// downgrade, fuzzed heads");
+    puts("PASS: web gateway request heads (origin/absolute form, limits, NUL), https:// downgrade, profiles, HTML edits (lazy images, noscript, scripts kept), fuzzed heads and pages");
     return 0;
 }

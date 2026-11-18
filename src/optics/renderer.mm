@@ -1080,6 +1080,9 @@ static MTLCompileOptions *compileOptions() {
 - (void)waitForLibraries {
     dispatch_group_wait(_compiling, DISPATCH_TIME_FOREVER);
 }
+- (BOOL)waitForLibrariesNS:(uint64_t)ns {
+    return !dispatch_group_wait(_compiling, dispatch_time(DISPATCH_TIME_NOW, (int64_t)ns));
+}
 - (PtR2Program *)preparePVS:(const PtR2ShaderIR *)pvs
             vertexInterface:(const PtR2ShaderInterface *)vi
                    fragment:(const PtR2ShaderIR *)us

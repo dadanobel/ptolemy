@@ -6,10 +6,11 @@
 <key>CFBundleName</key><string>Ptolemy</string>
 <key>CFBundleIconFile</key><string>Ptolemy</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0b3</string>
-<key>CFBundleVersion</key><string>1.0b3</string>
+<key>CFBundleShortVersionString</key><string>1.0b4</string>
+<key>CFBundleVersion</key><string>1.0b4</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
-<key>NSRemovableVolumesUsageDescription</key><string>Ptolemy uses the Tiger installer you choose and your external media.</string>
+<key>NSCameraUsageDescription</key><string>Ptolemy shows this Mac's camera to Mac OS X as a USB camera while a program there uses it.</string>
+<key>NSRemovableVolumesUsageDescription</key><string>Ptolemy uses the Mac OS X installer you choose and your external media.</string>
 </dict></plist>

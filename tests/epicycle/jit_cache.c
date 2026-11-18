@@ -11,8 +11,7 @@ int sys_call(CPU *c) {
 static int phase;
 static uint64_t old5;
 static JC *cell(uint32_t pc) {
-    uint32_t h = pc * 0x9E3779B1u;
-    return &jc[jc_ways == 2 ? h >> 17 << 1 : h >> 16];
+    return &jc[jc_set(pc)];
 } // as jc_index(), IR=PR=SO=0; way 0 is the newest
 static int fake_enter(CPU *c, void *code) {
     (void)code;

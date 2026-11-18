@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* The machine's devices wired together: which interrupt line each one raises, its DBDMA channels, and when each
+ * device next needs the CPU owner (pt_devices_deadline). */
 #include "devices.h"
 #include "atapi.h"
 #include <errno.h>
@@ -70,6 +72,12 @@ int pt_devices_init(PtDevices *d, PtRam ram, PtBus *bus, PtPic *pic, PtEvent *ev
     pt_pmu_init(&d->pmu, &d->gpio, now, seconds, nd_devices_via_irq, d);
     pt_ohci_init(&d->usb, ram, &d->hid[0], &d->hid[1], &d->hid[2], nd_devices_usb_irq, d);
     pt_usb_msc_init(&d->storage);
+    pt_usb_uvc_init(&d->camera);
+    d->camera_on = getenv("PT_CAMERA") && atoi(getenv("PT_CAMERA"));
+    if (d->camera_on) {
+        PtUsbDevice camera = pt_usb_uvc_device(&d->camera);
+        pt_ohci_camera(&d->usb, &camera);
+    }
     unsigned latency = 25;
     const char *text = getenv("PT_PCM_LATENCY_MS");
     if (text) {
@@ -140,6 +148,7 @@ int pt_devices_close(PtDevices *d) {
                 error = e;
         }
     d->block = d->optical.block = d->storage.scsi.block = NULL;
+    pt_usb_uvc_close(&d->camera);
     for (unsigned k = 0; k < 3; k++)
         pt_hid_destroy(&d->hid[k]);
     return error;
@@ -272,8 +281,11 @@ void pt_devices_service(PtDevices *d, uint64_t now) {
         d->usb_at += count * 1000000;
         if (count > 64)
             count = 64;
-        while (count--)
+        while (count--) {
             pt_ohci_frame(&d->usb);
+            if (d->camera_on)
+                pt_usb_uvc_tick(&d->camera);
+        }
     }
     pt_screamer_service(&d->sound, now);
     if (!d->audio)
@@ -296,8 +308,19 @@ uint64_t pt_devices_deadline(PtDevices *d) {
     uint64_t at = pt_pmu_deadline(&d->pmu);
     if (d->service_at < at)
         at = d->service_at;
-    if ((pt_ohci_needs_clock(&d->usb) || (d->dma[16].regs[1] & PT_DMA_ACTIVE)) && d->usb_at < at)
-        at = d->usb_at;
+    if ((pt_ohci_needs_clock(&d->usb) || (d->dma[16].regs[1] & PT_DMA_ACTIVE)) && d->usb_at < at) {
+        /* A bus with nothing to do, no sound and no report waiting in a HID device: its frames run seven late, eight in
+         * one service (the catch-up above) - an interrupt endpoint is polled every 8 ms, and input wakes the CPU by
+         * itself (pt_input_send). Otherwise an idle CPU wakes every millisecond for frames that do nothing. A camera
+         * that is attached but not streaming is as quiet as the rest: its clock ticks once a frame in the catch-up. */
+        static int on = -1; /* PT_DEVICE_LATE=0: every frame in its millisecond, as before */
+        if (on < 0)
+            on = !(getenv("PT_DEVICE_LATE") && !atoi(getenv("PT_DEVICE_LATE")));
+        int late = on && pt_ohci_quiet(&d->usb) && !(d->dma[16].regs[1] & PT_DMA_ACTIVE) && !d->camera.open &&
+                   !(d->hid[0].count | d->hid[1].count | d->hid[2].count);
+        if (d->usb_at + late * 7000000ull < at)
+            at = d->usb_at + late * 7000000ull;
+    }
     return at;
 }
 void pt_devices_audio_stats(PtDevices *d) {

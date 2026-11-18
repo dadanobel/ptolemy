@@ -17,6 +17,7 @@ static inline int pt_env_flag(const char *name) {
  * A line represents an asserted interrupt, not the electrical pin voltage. */
 enum {
     PT_NSRC = 64,
+    PT_NCPU = 2,
     PT_MASK = 0x80000000u,
     PT_ACTIVE = 0x40000000u,
     PT_LEVEL = 0x00400000u,
@@ -25,23 +26,27 @@ enum {
 };
 typedef struct {
     pthread_mutex_t lock;
-    uint32_t vp[PT_NSRC], dest[PT_NSRC];
-    uint64_t wires[PT_NSRC], pending, servicing;
-    unsigned ctpr, spurious, gcr;
-    uint64_t level_mask, asserted, eligible;
-    int line_output;
-    void (*notify)(void *);
-    void *notify_opaque;
+    uint32_t vp[PT_NSRC], dest[PT_NSRC], ipi_vp[4];
+    uint64_t wires[PT_NSRC], pending, servicing[PT_NCPU];
+    unsigned cpus, ctpr[PT_NCPU], spurious, gcr;
+    unsigned ipi_pending[PT_NCPU], ipi_servicing[PT_NCPU]; /* one bit per IPI channel */
+    uint64_t level_mask, asserted, eligible[PT_NCPU];
+    int line_output; /* bit n: CPU n's interrupt output */
+    void (*notify[PT_NCPU])(void *);
+    void *notify_opaque[PT_NCPU];
 } PtPic;
 void pt_pic_init(PtPic *);
 void pt_pic_destroy(PtPic *);
 /* Install while quiescent. Called AFTER unlocking, on either output transition;
  * it is a wakeup hint, not a sampled level. Receiver re-reads the PIC. */
-void pt_pic_set_notify(PtPic *, void (*)(void *), void *);
+void pt_pic_set_notify(PtPic *, void (*)(void *), void *); /* CPU 0 */
+/* A second CPU: its registers at 0x21000, its own output and notification, and the four IPI channels. */
+void pt_pic_add_cpu(PtPic *, void (*)(void *), void *);
 void pt_pic_line(PtPic *, unsigned src, unsigned producer, int asserted);
 uint32_t pt_pic_read(PtPic *, uint32_t offset);
 void pt_pic_write(PtPic *, uint32_t offset, uint32_t value);
-int pt_pic_output(PtPic *);
+int pt_pic_output(PtPic *); /* CPU 0 */
+int pt_pic_output_cpu(PtPic *, unsigned cpu);
 
 /* Pure virtual-time model, owned by the CPU; host ns must be monotonic.
  * DEC uses elapsed ticks, independent of writes to TB. */
@@ -75,13 +80,20 @@ uint64_t pt_vtime_host(PtVtime *, uint64_t virtual_deadline); /* UINT64_MAX whil
 typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t cond;
-    uint64_t generation;
+    _Atomic uint64_t generation;
+    uint64_t poll_max, poll_ns; /* pt_event_poll */
 } PtEvent;
 void pt_event_init(PtEvent *);
 void pt_event_destroy(PtEvent *);
 uint64_t pt_event_generation(PtEvent *);
 void pt_event_signal(PtEvent *);
 int pt_event_wait(PtEvent *, uint64_t observed, uint64_t timeout_ns);
+/* For an event with one waiter that is mostly signalled soon after it starts to wait (a guest CPU's thread: the other
+ * CPU hands it work): pt_event_wait first looks at the generation for a while, without sleeping, and a signal in that
+ * time costs no wake-up of a host thread. The time adapts between 0 and max_ns: it grows (max/32, then doubling) when
+ * a wait that did sleep was over within max_ns, and is 0 again after one that took longer - an idle waiter just sleeps.
+ * max_ns 0: off, as every event starts. */
+void pt_event_poll(PtEvent *, uint64_t max_ns);
 /* timeout_ns == UINT64_MAX means wait until the generation changes. */
 
 typedef struct {

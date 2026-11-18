@@ -3,6 +3,7 @@
 #include "platform.h"
 #include "pt_cpu_profile.h"
 #include "devices.h"
+#include "camera_macos.h"
 #include "nvram.h"
 #include "board.h"
 #include "pci_address.h"
@@ -36,14 +37,29 @@
 #include <sys/wait.h>
 extern char **environ;
 
+#include "smp.h"
 CPU *pt_hv_init(int);
+CPU *pt_hv_add_cpu(void);
+void pt_hv_cpu_thread(int);
 void pt_hv_map(void *, uint32_t, uint64_t, int);
 void pt_hv_stats(void);
+void jit_prof_stall(uint64_t gap_ns);
+void jit_prof_session(void);
 void pt_hv_unmap(uint32_t, uint64_t);
 int pt_hv_protect(uint64_t, uint64_t, unsigned);
 uint64_t pt_hv_cntvct(void);
 void pt_hv_vtimer_shift(uint64_t ns);
 static PtClock clock_model;
+/* The second G4 (PT_CPUS=2, machine()): its CPU structure, the event that ends its sleep, its decrementer (clock1; the
+ * timebase is one, clock_model's). It stays in reset until the kernel pulses its line on KeyLargo (smp_gpio). CPU 0 keeps
+ * the devices: only its interrupt check services them. Everything here is under the CPUs' lock (epicycle/smp.h). */
+static CPU *cpu0, *cpu1;
+static PtEvent wake1;
+static PtClock clock1;
+static _Atomic int cpu1_go, machine_stop, tb_want = 1;
+static _Atomic uint64_t alarm1_ns = UINT64_MAX; /* its decrementer's deadline, host time: the ticker wakes it for that alone */
+static int tb_on = 1;
+static uint64_t tb_held; /* the timebase while KeyLargo holds it (tb_on = 0) */
 static PtPic pic;
 static PtFwCfg fw;
 static PtEvent wake;
@@ -285,6 +301,7 @@ static int ram_before(void *opaque, uint32_t at, size_t n, int write) {
 }
 static PtRamHooks ram_hooks = {ram_before, NULL};
 static uint64_t gpu_at = UINT64_MAX;
+static int gpu_late; /* the Radeon's service is not due within the millisecond: nothing for the CP, see gpu_soon */
 static void radeon_configure(void);
 static PtGpuMemory radeon_memory = {128u << 20, 256u << 20, 0x90000000u};
 /* End of the PCI memory window the ROM advertises in "ranges" (own OpenBIOS fork: 1.25 GiB from 0x80000000); the
@@ -571,13 +588,46 @@ static void schedule_alarm(void) {
     if (network_enabled && pt_net_rtl_deadline(&network) < deadline)
         deadline = pt_net_rtl_deadline(&network);
     deadline = pt_vtime_host(&vtime, deadline); /* the one virtual -> host conversion */
-    if (atomic_exchange(&alarm_ns, deadline) != deadline)
+    int moved = atomic_exchange(&alarm_ns, deadline) != deadline;
+    if (cpu1) {
+        delay = pt_clock_deadline(&clock1);
+        uint64_t second = delay == UINT64_MAX ? UINT64_MAX : pt_vtime_host(&vtime, clock1.last_ns + delay);
+        moved |= atomic_exchange(&alarm1_ns, second) != second;
+    }
+    if (moved)
         pt_event_signal(&alarm_event);
 }
 static void kick(void *opaque) {
     CPU *c = opaque;
     atomic_store_explicit(&c->irq, 1, memory_order_release);
-    pt_event_signal(&wake);
+    pt_event_signal(c == cpu1 ? &wake1 : &wake);
+}
+/* Two CPUs: MacRISC2CPU registers each of them without nap (supports_nap = !flush-on-lock, and it sets flush-on-lock
+ * whenever /cpus has more than one child - disassembly of AppleMacRISC2PE 10.5), and XNU's table gives the 7447A no doze.
+ * machine_idle then returns at once and both idle loops spin: so does a real dual G4, whose bus a napping CPU would
+ * not snoop. Nothing here needs that, and a spinning idle loop is a host core at full power. The kernel's own switch is
+ * the boot argument fn=1 (ppc_init.c, forcenap; the same in xnu-792 and xnu-1228): the engine keeps it as the last word
+ * of the firmware's boot-args while the machine has two CPUs and takes its own word away when it has one. A user's own
+ * fn= is left as it is. PT_SMP_NAP=0: no word - the idle of the real machine. */
+static void nap_boot_arg(int on) {
+    char args[1024] = "";
+    pt_nvram_get_of(&nvram, "boot-args", args, sizeof args - 8);
+    size_t n = strlen(args);
+    int ours = n >= 4 && !strcmp(args + n - 4, "fn=1") && (n == 4 || args[n - 5] == ' ');
+    if (on && !strstr(args, "fn="))
+        strcat(args, n ? " fn=1" : "fn=1");
+    else if (!on && ours)
+        args[n > 4 ? n - 5 : 0] = 0;
+    else
+        return;
+    int e = pt_nvram_set_of(&nvram, "boot-args", args);
+    if (e) {
+        errno = e;
+        fatal("boot-args");
+    }
+}
+static void smp_boundary(int n) { /* epicycle/smp.c: that CPU leaves its block at its next interrupt check */
+    atomic_store_explicit(&(n ? cpu1 : cpu0)->irq, 1, memory_order_release);
 }
 int sys_call(CPU *c) {
     ppc_exception(c, 0xc00, c->pc, 0);
@@ -602,31 +652,100 @@ static void sync_fast_clock(CPU *c) {
         return;
     mach_timebase_info_data_t t;
     mach_timebase_info(&t);
-    c->tb_m = (uint64_t)(((unsigned __int128)t.numer << 32) / (40ull * t.denom));
-    c->tb_a = pt_clock_tb(&clock_model) - (uint64_t)(((unsigned __int128)pt_hv_cntvct() * c->tb_m) >> 32);
-    c->dec_w = pt_clock_dec(&clock_model);
+    c->tb_m = tb_on ? (uint64_t)(((unsigned __int128)t.numer << 32) / (40ull * t.denom)) : 0; /* held: a constant */
+    c->tb_a = (tb_on ? pt_clock_tb(&clock_model) : tb_held) -
+              (uint64_t)(((unsigned __int128)pt_hv_cntvct() * c->tb_m) >> 32);
+    c->dec_w = pt_clock_dec(c == cpu1 ? &clock1 : &clock_model);
     c->dec_tbw = fast_tb(c);
+}
+/* The machine has one timebase: the second CPU reads it with the first CPU's coefficients. Coefficients of its own
+ * come from a second reading of the host counter, later than the first by the time between the two calls, and put its
+ * timebase behind the first CPU's by as much - a time stamp passed from one CPU to the other could then be ahead of
+ * the receiver's clock. (Both vCPUs have the same counter: their vtimer offsets only move together, hvf.c.) */
+static void same_timebase(void) {
+    cpu1->dec_tbw += cpu0->tb_a - cpu1->tb_a; /* its decrementer was read at this timebase: the same moment, renamed */
+    cpu1->tb_a = cpu0->tb_a;
+    cpu1->tb_m = cpu0->tb_m;
+}
+/* A clock moves to now. A CPU that moves the other CPU's clock past its decrementer takes away the deadline the ticker
+ * would have woken that CPU for (the next one is a full turn of the decrementer later): it tells that CPU itself.
+ * clock_model is the first CPU's, clock1 the second's. */
+static void clock_move(PtClock *k, uint64_t now) {
+    int was = k->dec_pending;
+    pt_clock_update(k, now);
+    if (!was && k->dec_pending && (k == &clock1) != (pt_smp_self() == 1))
+        kick(k == &clock1 ? cpu1 : cpu0);
+}
+/* The timebase changed (a write, KeyLargo's gate): both CPUs' JIT code reads it through their coefficients, in the
+ * middle of blocks. At a block boundary of the caller. */
+static void sync_fast_clocks(void) {
+    pt_smp_stop_world();
+    sync_fast_clock(cpu0);
+    if (cpu1) {
+        sync_fast_clock(cpu1);
+        same_timebase();
+    }
+    pt_smp_start_world();
+}
+/* KeyLargo's timebase-enable line (GPIO 0x73: 4 stops both CPUs' timebases, 0 lets them run; MacRISC2CPU::
+ * enableCPUTimeBase). XNU's cpu_sync_timebase stops it, reads it on the first CPU, writes that value on the second and
+ * lets it run: with one timebase here the write changes nothing, and the gate keeps the time from running meanwhile.
+ * The decrementers do not stop with it (the gate closes for microseconds, once per start of the second CPU). */
+static void timebase_gate(void) {
+    int want = atomic_load(&tb_want);
+    if (want == tb_on)
+        return;
+    clock_move(&clock_model, now_ns());
+    if (!want)
+        tb_held = pt_clock_tb(&clock_model);
+    else {
+        pt_clock_write_tb(&clock_model, 1, (uint32_t)(tb_held >> 32));
+        pt_clock_write_tb(&clock_model, 0, (uint32_t)tb_held);
+    }
+    tb_on = want;
+    sync_fast_clocks();
+}
+/* A write to KeyLargo's GPIO block with two CPUs (MacRISC2CPU, by disassembly of AppleMacRISC2PE 10.5): 0x5c is the
+ * second CPU's soft reset - startCPU writes 4 (the line driven low), then 0 - and 0x73 the timebase gate. This is in
+ * the middle of the writer's block: the gate is acted on at its next interrupt check. */
+static void smp_gpio(CPU *c, uint32_t offset, uint8_t v) {
+    if (offset == 0x5c && !(v & 4) && !atomic_exchange(&cpu1_go, 1))
+        pt_event_signal(&wake1);
+    if (offset == 0x73) {
+        atomic_store(&tb_want, !(v & 4));
+        atomic_store_explicit(&c->irq, 1, memory_order_release);
+    }
 }
 /* Engine side of mfspr/mtspr for the timer registers (DEC, TBL/TBU): keeps the clock model and the fast timebase in
  * step. */
 static uint32_t spr(CPU *c, int n, int wr, uint32_t v) {
-    pt_clock_update(&clock_model, now_ns());
+    PtClock *k = c == cpu1 ? &clock1 : &clock_model; /* each CPU's decrementer; the timebase is clock_model's */
+    uint64_t now = now_ns();
+    clock_move(&clock_model, now);
+    if (cpu1)
+        clock_move(&clock1, now);
     if (n == 22) {
         if (wr) {
-            pt_clock_write_dec(&clock_model, v);
+            pt_clock_write_dec(k, v);
             c->dec_w = v;
             c->dec_tbw = fast_tb(c);
         }
         schedule_alarm();
-        if (clock_model.dec_pending)
+        if (k->dec_pending)
             kick(c);
         return c->dec_w - (uint32_t)(fast_tb(c) - c->dec_tbw);
     }
-    if (clock_model.dec_pending)
+    if (k->dec_pending)
         kick(c);
-    if (wr) {
+    if (wr && !tb_on) { /* held by KeyLargo: the value it starts from again */
+        tb_held = n == 269 || n == 285 ? (uint64_t)v << 32 | (uint32_t)tb_held : (tb_held & ~0xffffffffull) | v;
+        sync_fast_clocks();
+    } else if (wr) {
         pt_clock_write_tb(&clock_model, n == 269 || n == 285, v);
-        sync_fast_clock(c);
+        if (cpu1)
+            sync_fast_clocks();
+        else
+            sync_fast_clock(c);
     }
     uint64_t tb = fast_tb(c);
     return (n == 269 || n == 285) ? tb >> 32 : tb;
@@ -635,6 +754,7 @@ static uint32_t spr(CPU *c, int n, int wr, uint32_t v) {
  * vtimer offset, devices, audio play head, OHCI frames). Other threads keep finishing their own work (GPU, block I/O);
  * the window may stop the machine while paused. No reset, no GPU epoch change. */
 static void guest_pause(void) {
+    pt_smp_stop_world(); /* the second CPU too: it waits at a block boundary */
     pt_vtime_pause(&vtime, host_ns());
     atomic_store(&alarm_ns, UINT64_MAX);
     uint32_t stopped = devices_enabled ? atomic_exchange(&peripherals.pcm.stopped, 1)
@@ -649,6 +769,7 @@ static void guest_pause(void) {
         atomic_store(&peripherals.pcm.stopped, stopped);
     uint64_t d = pt_vtime_resume(&vtime, host_ns());
     pt_hv_vtimer_shift(d);
+    pt_smp_start_world();
     fprintf(stderr, "ptolemy: paused %.3f s\n", d / 1e9);
 }
 /* Called by the CPU at interrupt checks: pauses for the window, ends the run at --seconds, advances the clock and
@@ -656,6 +777,7 @@ static void guest_pause(void) {
 static uint32_t irq(CPU *c, uint32_t ack) {
     if (atomic_load(&pause_request) && !atomic_load(&stand_stop))
         guest_pause();
+    timebase_gate();
     uint64_t now = now_ns();
     pt_clock_update(&clock_model, now);
     if (now >= end_ns)
@@ -723,8 +845,13 @@ static uint32_t irq(CPU *c, uint32_t ack) {
             pt_radeon_remap(radeon);
     } /* the CPU view follows the BAR */
     if (radeon) {
-        pt_radeon_service(radeon, now);
-        gpu_at = now + 1000000;
+        gpu_at = pt_radeon_service(radeon, now);
+        static int on = -1; /* PT_DEVICE_LATE=0: by the millisecond, as before */
+        if (on < 0)
+            on = !(getenv("PT_DEVICE_LATE") && !atoi(getenv("PT_DEVICE_LATE")));
+        if (!on)
+            gpu_at = now + 1000000;
+        gpu_late = gpu_at > now + 1000000;
     }
     if (shot_dir && now >= shot_at) {
         shot();
@@ -737,14 +864,57 @@ static uint32_t irq(CPU *c, uint32_t ack) {
         nvram_at = nvram_error ? UINT64_MAX : now + 250000000;
     }
     schedule_alarm();
+    if (c->halted && cpu1 && !atomic_exchange(&machine_stop, 1))
+        kick(cpu1); /* the machine stops: the second CPU with it */
     uint32_t r = (clock_model.dec_pending ? PEND_DEC : 0) | (pt_pic_output(&pic) ? PEND_EXT : 0);
     return r;
 }
+/* The second CPU's interrupt check: its decrementer and its interrupt output. The devices are CPU 0's (irq). */
+static uint32_t irq1(CPU *c, uint32_t ack) {
+    timebase_gate();
+    uint64_t now = now_ns();
+    pt_clock_update(&clock1, now);
+    if (ack & PEND_DEC)
+        clock1.dec_pending = 0;
+    if (atomic_load(&machine_stop) || atomic_load(&stand_stop) || now >= end_ns)
+        c->halted = 1;
+    schedule_alarm();
+    return (clock1.dec_pending ? PEND_DEC : 0) | (pt_pic_output_cpu(&pic, 1) ? PEND_EXT : 0);
+}
 static void idle(CPU *c) {
-    uint64_t g = pt_event_generation(&wake);
-    uint32_t pending = irq(c, 0);
-    if (!(pending && (c->msr & MSR_EE)) && !c->halted)
-        pt_event_wait(&wake, g, UINT64_MAX);
+    PtEvent *e = c == cpu1 ? &wake1 : &wake;
+    uint64_t g = pt_event_generation(e);
+    uint32_t pending = c == cpu1 ? irq1(c, 0) : irq(c, 0);
+    if (!(pending && (c->msr & MSR_EE)) && !c->halted) {
+        pt_smp_sleep_begin(); /* the other CPU has the engine meanwhile */
+        pt_event_wait(e, g, UINT64_MAX);
+        pt_smp_sleep_end();
+    }
+}
+/* The second CPU's thread: held in reset until the kernel releases it, then a system reset in real mode at 0x100,
+ * where XNU's handler finds its start routine (osfmk/ppc/lowmem_vectors.s, ResetHandler). */
+static void *cpu1_thread(void *p) {
+    CPU *c = p;
+    pt_hv_cpu_thread(1);
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    for (;;) {
+        uint64_t g = pt_event_generation(&wake1);
+        if (atomic_load(&cpu1_go) || atomic_load(&machine_stop))
+            break;
+        pt_event_wait(&wake1, g, UINT64_MAX);
+    }
+    pt_smp_attach(1);
+    if (!atomic_load(&machine_stop)) {
+        fprintf(stderr, "ptolemy: second CPU released from reset\n");
+        jit_run(c);
+        if (!atomic_load(&machine_stop)) { /* it stopped by itself (an engine error): the machine stops */
+            fprintf(stderr, "ptolemy: second CPU stopped at pc=%08x, code %d\n", c->pc, c->exit_code);
+            atomic_store(&stand_stop, 1);
+            kick(cpu0);
+        }
+    }
+    pt_smp_sleep_begin(); /* it holds nothing more */
+    return NULL;
 }
 /* Timer thread: sleeps until the next device or clock deadline and then raises the CPU's interrupt check. */
 static void *ticker(void *p) {
@@ -754,6 +924,13 @@ static void *ticker(void *p) {
         if (atomic_load(&stop_timer))
             break;
         uint64_t deadline = atomic_load(&alarm_ns), now = host_ns(); /* host domain (schedule_alarm converted) */
+        uint64_t second = atomic_load(&alarm1_ns);
+        int due = 0;
+        if (second != UINT64_MAX && now >= second) { /* the second CPU's decrementer: that CPU only */
+            if (atomic_compare_exchange_strong(&alarm1_ns, &second, UINT64_MAX))
+                kick(cpu1);
+            due = 1;
+        }
         if (deadline != UINT64_MAX && now >= deadline) {
             /* Disarm before waking: a concurrent CPU rearm must not be lost. */
             if (atomic_compare_exchange_strong(&alarm_ns, &deadline, UINT64_MAX)) {
@@ -761,7 +938,9 @@ static void *ticker(void *p) {
                 if (now - deadline > atomic_load(&alarm_late))
                     atomic_store(&alarm_late, now - deadline);
             }
-        } else {
+        } else if (!due) {
+            if (second < deadline)
+                deadline = second;
             pt_event_wait(&alarm_event, g, deadline == UINT64_MAX ? UINT64_MAX : deadline - now);
         }
     }
@@ -1016,6 +1195,8 @@ static int board_access(void *base, uint32_t offset, uint8_t *b, unsigned n, int
     }
     int known = 1;
     uint64_t value = wr ? pt_read_be(b, n) : 0;
+    if (cpu1 && wr && n == 1 && (uintptr_t)base == 0x80000000u && (offset == 0x5c || offset == 0x73))
+        smp_gpio(pt_smp_self() ? cpu1 : cpu0, offset, b[0]); /* and on to the GPIO model, as any write */
     if (a == 0xf0000510 && n == 2) {
         if (wr)
             pt_fw_select(&fw, value);
@@ -1139,6 +1320,8 @@ static void radeon_vram_guard(void *opaque, int (*fault)(void *, uint64_t, uint6
     vram_fault = fault;
     vram_fault_device = device;
     c->env_guard = fault ? board_guard : NULL;
+    if (cpu1)
+        cpu1->env_guard = c->env_guard;
 }
 /* A Radeon write reached guest RAM (CP write-back, 2D into GART). The CPU keeps its lwarx reservation as an
  * EA, so it is dropped conservatively on any device write: a spurious stwcx. failure is architecturally allowed. */
@@ -1183,6 +1366,15 @@ static int radeon_ram970(CPU *c, uint64_t pa, unsigned n, int write) {
     return e;
 }
 #endif
+/* A register write while the Radeon's service is not due for long: there may be work for the CP now, and the service
+ * is its backstop (a wake the CP thread missed), so by the millisecond again. Either CPU, under the CPUs' lock. */
+static void gpu_soon(void) {
+    if (!gpu_late)
+        return;
+    gpu_late = 0;
+    gpu_at = now_ns() + 1000000;
+    schedule_alarm();
+}
 static int radeon_access(void *opaque, uint32_t off, uint8_t *b, unsigned n, int wr) {
     if (!(config[14][4] & 2)) {
         if (!wr)
@@ -1190,6 +1382,8 @@ static int radeon_access(void *opaque, uint32_t off, uint8_t *b, unsigned n, int
         return -1;
     }
     int e = (uintptr_t)opaque == 2 ? pt_radeon_vram(radeon, off, b, n, wr) : pt_radeon_mmio(radeon, off, b, n, wr);
+    if (wr && (uintptr_t)opaque != 2)
+        gpu_soon();
     if (e && !wr)
         memset(b, 0, n);
     return e ? -1 : 0;
@@ -1207,8 +1401,11 @@ static int isa_access(void *opaque, uint32_t port, uint8_t *b, unsigned n, int w
             }
         }
     if (radeon && (config[14][4] & 1)) {
-        if (port >= bars[4].base && (uint64_t)port + n <= bars[4].base + bars[4].size)
+        if (port >= bars[4].base && (uint64_t)port + n <= bars[4].base + bars[4].size) {
             r = pt_radeon_mmio(radeon, port - bars[4].base, b, n, wr);
+            if (wr)
+                gpu_soon();
+        }
         else
             r = pt_radeon_port(radeon, port, b, n, wr);
     }
@@ -1279,7 +1476,7 @@ static void mmio(CPU *c, uint32_t a, uint8_t *b, int n, int wr) {
     /* Bounded diagnostic capture, never a silent claim of a complete trace. */
     if (trace && (tail || (trace_written < 100000 && trace_keep(a, c->pc)))) {
         uint64_t now = now_ns();
-        pt_clock_update(&clock_model, now);
+        clock_move(&clock_model, now);
         typeof(ring[0]) e = {seq,
                              now,
                              pt_clock_tb(&clock_model),
@@ -1297,8 +1494,12 @@ static void mmio(CPU *c, uint32_t a, uint8_t *b, int n, int wr) {
     seq++;
     /* Status/data reads can acknowledge IRQ or complete PIO. Defer service to
      * the CPU scheduling boundary; never recurse into devices from MMIO. */
-    if ((devices_enabled && peripherals.service_requested) || (wr && a >= 0xfff04000 && a < 0xfff08000 && nvram.store))
-        atomic_store_explicit(&c->irq, 1, memory_order_release);
+    if ((devices_enabled && peripherals.service_requested) || (wr && a >= 0xfff04000 && a < 0xfff08000 && nvram.store)) {
+        if (c == cpu1)
+            kick(cpu0); /* the devices are the first CPU's, and it may sleep past the millisecond */
+        else
+            atomic_store_explicit(&c->irq, 1, memory_order_release);
+    }
 }
 /* Registers the board's MMIO ranges (mac-io, fw_cfg, PCI bridges, Radeon) on the device bus. */
 static void bus_init(void) {
@@ -1684,9 +1885,28 @@ int main(int argc, char **argv) {
     return machine();
 }
 /* The vCPU belongs to the thread that creates it: everything from here runs on the machine thread. */
+/* PT_IDLE_POLL, microseconds (200 when not set): with two CPUs, how long at most an idle CPU looks for its wake-up
+ * before its thread sleeps (pt_event_poll). A guest thread that hands work to the other CPU - a contended mutex -
+ * otherwise waits every time for the host to wake that CPU's thread, and the pair runs several times slower than with
+ * CPUs that never sleep. 0: a CPU sleeps at once, as before, also when it waits for the engine's lock (pt_smp_look).
+ * A machine with one CPU is not changed. */
+static uint64_t idle_poll_ns(void) {
+    const char *v = getenv("PT_IDLE_POLL");
+    return v ? strtoull(v, 0, 10) * 1000 : 200000;
+}
 static int machine(void) {
     print_config();
-    CPU *c = pt_hv_init(1);
+    /* PT_CPUS=2: a second G4 (7400, 7447A; the JIT only). PT_SMP_SERIAL=1: the two take turns, nothing runs in
+     * parallel (to tell a defect of the second CPU's bring-up from one of concurrency). */
+    int two = getenv("PT_CPUS") && atoi(getenv("PT_CPUS")) == 2 && cpu_model && !cpu970 && !interpreter;
+    pt_smp_init(1 + two, pt_env_flag("PT_SMP_SERIAL"), smp_boundary);
+    CPU *c = cpu0 = pt_hv_init(1);
+    if (two) {
+        cpu1 = pt_hv_add_cpu();
+        pt_event_init(&wake1);
+        pt_event_poll(&wake1, idle_poll_ns());
+        pt_smp_look(idle_poll_ns() ? 30000 : 0);
+    }
     uint8_t *ram = mmap(0, 1ull << 32, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (ram == MAP_FAILED || mprotect(ram, guest_ram_bytes, PROT_READ | PROT_WRITE) ||
         mprotect(ram + 0xfff00000, 0x100000, PROT_READ | PROT_WRITE))
@@ -1771,10 +1991,13 @@ static int machine(void) {
             fatal("--of");
         }
     }
+    nap_boot_arg(cpu1 && !(getenv("PT_SMP_NAP") && !atoi(getenv("PT_SMP_NAP"))));
     fprintf(stderr, "RAM: %u MiB; profile: %s\n", ram_mb, product_boot ? "PowerBook5,8" : "firmware console");
     pci_init();
     pt_pic_init(&pic);
     pt_fw_init(&fw, guest_ram_bytes);
+    if (cpu1)
+        fw.data[0][5][0] = 2; /* FW_CFG_NB_CPUS: the firmware adds the second node under /cpus */
     bus_init();
     if (cpu970) {
         fw.data[0][6][0] = 3;
@@ -1794,6 +2017,7 @@ static int machine(void) {
     if (network_enabled)
         add_network_regions();
     pt_event_init(&wake);
+    pt_event_poll(&wake, two ? idle_poll_ns() : 0);
     pt_event_init(&alarm_event);
     if (network_enabled) {
         uint8_t mac[6];
@@ -1851,6 +2075,7 @@ static int machine(void) {
             errno = e;
             fatal("Radeon initialization");
         }
+        optics_frontend_stall_hook = jit_prof_stall;
         radeon_configure();
         gpu_at = now_ns();
     }
@@ -1862,6 +2087,8 @@ static int machine(void) {
             errno = e;
             fatal("device initialization");
         }
+        if (peripherals.camera_on && atoi(getenv("PT_CAMERA")) != 2) /* 2: the device's own test pattern */
+            peripherals.camera.source = pt_camera_macos_source();
         if (disk_rw) { /* a clone (cp -c / clonefile), or any raw with --overlay */
             if (disk) {
                 fprintf(stderr, "--disk and --disk-readonly are exclusive\n");
@@ -1906,9 +2133,12 @@ static int machine(void) {
         }
     }
     pt_clock_init(&clock_model, now_ns());
+    clock1 = clock_model;
     sync_fast_clock(c);
     end_ns = seconds ? now_ns() + (uint64_t)seconds * 1000000000 : UINT64_MAX;
     pt_pic_set_notify(&pic, kick, c);
+    if (cpu1)
+        pt_pic_add_cpu(&pic, kick, cpu1);
     atomic_init(&alarm_ns, pt_vtime_host(&vtime, end_ns));
     {
         struct sigaction sa = {0};
@@ -1970,14 +2200,35 @@ static int machine(void) {
     }
     if (agent || radeon_enabled)
         c->env_hypercall = private_call;
-    pthread_t thread;
+    pthread_t thread, second;
+    if (cpu1) { /* as the first after its reset, but for where it starts and whose interrupt check it has */
+        cpu1->mem = c->mem;
+        cpu1->sys = 2;
+        cpu1->pc = 0x100;
+        cpu1->spr[287] = c->spr[287];
+        cpu1->spr[1017] = c->spr[1017];
+        cpu1->spr[1023] = 1; /* PIR */
+        memcpy(cpu1->cr, c->cr, sizeof c->cr);
+        memcpy(cpu1->preg, c->preg, sizeof c->preg);
+        cpu1->npreg = c->npreg;
+        cpu1->env_mmio = mmio;
+        cpu1->env_spr = spr;
+        cpu1->env_irq = irq1;
+        cpu1->env_idle = idle;
+        cpu1->env_hypercall = c->env_hypercall;
+        cpu1->env_guard = c->env_guard;
+        sync_fast_clock(cpu1);
+        same_timebase();
+        if (pthread_create(&second, 0, cpu1_thread, cpu1))
+            fatal("second CPU thread");
+    }
     if (pthread_create(&thread, 0, ticker, c))
         fatal("timer thread");
     pt_stand_window_ready();
-    /* PT_QOS=1: the CPU thread asks for the user-interactive class, so macOS keeps it on performance cores;
-     * Half-Life runs without it sometimes drop 8-17%. =0 or unset: unchanged. */
-    if (getenv("PT_QOS") && atoi(getenv("PT_QOS")))
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    /* The CPU thread asks for the user-interactive class, so macOS keeps it on performance cores
+     * (Half-Life runs without it sometimes dropped 8-17%). */
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    pt_smp_attach(0);
     if (interpreter)
         while (!c->halted) {
             interp_step(c);
@@ -1986,6 +2237,12 @@ static int machine(void) {
         }
     else
         jit_run(c);
+    if (cpu1) { /* however this CPU stopped: the second one too, before anything is taken apart */
+        atomic_store(&machine_stop, 1);
+        kick(cpu1);
+        pt_smp_sleep_begin();
+        pthread_join(second, 0);
+    }
     atomic_store(&stop_timer, 1);
     pt_event_signal(&alarm_event);
     pthread_join(thread, 0);
@@ -2044,6 +2301,7 @@ static int machine(void) {
 #endif
     if (env_on("PT_STATS"))
         pt_hv_stats();
+    jit_prof_session(); /* PT_PROF: nothing without samples */
     if (trace && tail)
         for (uint64_t i = seq > TAIL ? seq - TAIL : 0; i < seq; i++)
             trace_line(&ring[i % TAIL]);

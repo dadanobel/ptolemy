@@ -327,7 +327,7 @@ static int drop_to_guest(NSString *sock, NSURL *url, PTAgentCancellation *operat
     if (self.asked || !config->agent_socket) {
         [self offerForce:restart
                   detail:self.asked
-                                 ? @"Tiger was asked and is still running: an application may be waiting for you, or the request was cancelled in Tiger."
+                                 ? [NSString stringWithFormat:@"%@ was asked and is still running: an application may be waiting for you, or the request was cancelled in %@.", PTGuestName(), PTGuestName()]
                                  : nil];
         return;
     }
@@ -357,7 +357,7 @@ static int drop_to_guest(NSString *sock, NSURL *url, PTAgentCancellation *operat
                 self.asked = NO;
                 [self.window setGuestActivity:nil];
                 [self offerForce:restart
-                          detail:rc > 0 ? [NSString stringWithFormat:@"Tiger did not accept the request (%@).", text]
+                          detail:rc > 0 ? [NSString stringWithFormat:@"%@ did not accept the request (%@).", PTGuestName(), text]
                                         : nil];
             }
         });
@@ -368,12 +368,14 @@ static int drop_to_guest(NSString *sock, NSURL *url, PTAgentCancellation *operat
         return;
     NSAlert *a = [NSAlert new];
     a.alertStyle = NSAlertStyleWarning;
-    a.messageText = restart ? @"Force Tiger to restart?" : @"Force Tiger to shut down?";
+    NSString *guest = PTGuestName();
+    a.messageText = restart ? [NSString stringWithFormat:@"Force %@ to restart?", guest]
+                            : [NSString stringWithFormat:@"Force %@ to shut down?", guest];
     a.informativeText = [NSString
-            stringWithFormat:@"%@ Forcing stops Tiger at once: what it has not yet written to its disk is lost. "
-                              "You can also choose %@ in Tiger’s Apple menu.",
-                             detail ?: @"Tiger cannot be asked: Ptolemy Tools are not running in it.",
-                             restart ? @"Restart" : @"Shut Down"];
+            stringWithFormat:@"%@ Forcing stops %@ at once: what it has not yet written to its disk is lost. "
+                              "You can also choose %@ in %@’s Apple menu.",
+                             detail ?: [NSString stringWithFormat:@"%@ cannot be asked: Ptolemy Tools are not running in it.", guest],
+                             guest, restart ? @"Restart" : @"Shut Down", guest];
     [a addButtonWithTitle:@"Cancel"];
     [a addButtonWithTitle:restart ? @"Force Restart" : @"Force Shut Down"].hasDestructiveAction = YES;
     [a beginSheetModalForWindow:self.window.window
@@ -512,7 +514,8 @@ static uint64_t clip_gen;
         return;
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     panel.prompt = @"Insert";
-    panel.message = @"Choose a disk image (.dmg, .iso, .cdr, .img, .sparseimage) or a .zip archive to give to Tiger.";
+    panel.message = [NSString
+            stringWithFormat:@"Choose a disk image (.dmg, .iso, .cdr, .img, .sparseimage) or a .zip archive to give to %@.", PTGuestName()];
     [panel beginSheetModalForWindow:self.window.window
                   completionHandler:^(NSModalResponse response) {
                       if (response != NSModalResponseOK || !panel.URL)
@@ -527,7 +530,7 @@ static uint64_t clip_gen;
                                   if (self.stopped)
                                       return;
                                   NSAlert *a = [NSAlert new];
-                                  a.messageText = @"Tiger could not use this image";
+                                  a.messageText = [NSString stringWithFormat:@"%@ could not use this image", PTGuestName()];
                                   a.informativeText =
                                           [NSString stringWithFormat:@"%@: %s.", path.lastPathComponent, strerror(e)];
                                   [a beginSheetModalForWindow:self.window.window completionHandler:nil];
@@ -540,8 +543,8 @@ static uint64_t clip_gen;
         if (self.stopped)
             return;
         NSAlert *a = [NSAlert new];
-        a.messageText = @"Tiger is using the disc in the CD/DVD drive";
-        a.informativeText = @"Eject it in Tiger first (drag its icon to the Trash), then try again.";
+        a.messageText = [NSString stringWithFormat:@"%@ is using the disc in the CD/DVD drive", PTGuestName()];
+        a.informativeText = [NSString stringWithFormat:@"Eject it in %@ first (drag its icon to the Trash), then try again.", PTGuestName()];
         [a beginSheetModalForWindow:self.window.window completionHandler:nil];
     });
 }
@@ -549,12 +552,14 @@ static uint64_t clip_gen;
 - (void)aboutWeb:(id)sender {
     (void)sender;
     NSAlert *a = [NSAlert new];
-    a.messageText = @"Web pages in Tiger";
-    a.informativeText =
-            @"Tiger's own browsers can no longer open most of today's secure sites. To help them, your Mac fetches http:// pages "
-             "for Tiger over a secure HTTPS connection whenever the site offers one, and adjusts them a little (links, newer picture formats) "
-             "so Tiger can show them. All of this happens on this Mac and nothing is sent anywhere else: the sites are reached the same way "
-             "as when you browse on your Mac. Browsers that handle https:// themselves, such as PowerFox, connect directly.";
+    NSString *guest = PTGuestName();
+    a.messageText = [NSString stringWithFormat:@"Web pages in %@", guest];
+    a.informativeText = [NSString
+            stringWithFormat:@"%@'s own browsers can no longer open most of today's secure sites. To help them, your Mac fetches http:// pages "
+                              "for %@ over a secure HTTPS connection whenever the site offers one, and adjusts them a little (links, newer picture formats) "
+                              "so %@ can show them. All of this happens on this Mac and nothing is sent anywhere else: the sites are reached the same way "
+                              "as when you browse on your Mac. Browsers that handle https:// themselves, such as PowerFox, connect directly.",
+                             guest, guest, guest];
     if (self.window.window)
         [a beginSheetModalForWindow:self.window.window completionHandler:nil];
     else
@@ -586,8 +591,8 @@ static uint64_t clip_gen;
     NSMutableArray<NSURL *> *queue = [files mutableCopy];
     self.sendQueue = queue;
     NSAlert *sheet = [NSAlert new];
-    sheet.messageText = @"Copying to Tiger…";
-    sheet.informativeText = @"Each file appears on Tiger’s desktop when it is complete.";
+    sheet.messageText = [NSString stringWithFormat:@"Copying to %@…", PTGuestName()];
+    sheet.informativeText = [NSString stringWithFormat:@"Each file appears on %@’s desktop when it is complete.", PTGuestName()];
     [sheet addButtonWithTitle:@"Stop"];
     NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 40)];
     NSTextField *label = [NSTextField labelWithString:@""];
@@ -665,7 +670,7 @@ static uint64_t clip_gen;
                     [failed addObject:[NSString stringWithFormat:@"%@: %@", url.lastPathComponent,
                                                                  why.length
                                                                          ? why
-                                                                         : @"Ptolemy Tools in Tiger did not answer"]];
+                                                                         : @"Ptolemy Tools did not answer"]];
                 }
             }
         }
@@ -684,7 +689,8 @@ static uint64_t clip_gen;
                 return;
             NSAlert *a = [NSAlert new];
             a.messageText =
-                    list.count == 1 ? @"A File Was Not Copied to Tiger" : @"Some Files Were Not Copied to Tiger";
+                    list.count == 1 ? [NSString stringWithFormat:@"A File Was Not Copied to %@", PTGuestName()]
+                                    : [NSString stringWithFormat:@"Some Files Were Not Copied to %@", PTGuestName()];
             a.informativeText = [list componentsJoinedByString:@"\n"];
             [a beginSheetModalForWindow:self.window.window completionHandler:nil];
         });
@@ -695,10 +701,12 @@ static uint64_t clip_gen;
     if (!sock || self.stopped)
         return;
     NSAlert *a = [NSAlert new];
-    a.messageText = @"Receive a File from Tiger";
-    a.informativeText =
-            @"Enter the full path of a regular file in Tiger. It will be copied without replacing an existing Mac file.";
-    NSTextField *path = [NSTextField textFieldWithString:@"/Users/"];
+    a.messageText = @"Get Files from Ptolemy";
+    a.informativeText = [NSString
+            stringWithFormat:@"Enter the path of a file or folder in %@ (~ is your home folder there). A folder arrives as a "
+                              "ZIP archive. Nothing on the Mac is replaced.",
+                             PTGuestName()];
+    NSTextField *path = [NSTextField textFieldWithString:@"~/Desktop/"];
     path.frame = NSMakeRect(0, 0, 420, 24);
     a.accessoryView = path;
     [a addButtonWithTitle:@"Choose Destination…"];
@@ -709,7 +717,7 @@ static uint64_t clip_gen;
                   if (response != NSAlertFirstButtonReturn)
                       return;
                   NSString *guest = path.stringValue;
-                  if (![guest hasPrefix:@"/"] || guest.length > 1000)
+                  if (!([guest hasPrefix:@"/"] || [guest hasPrefix:@"~"]) || guest.length > 1000)
                       return;
                   NSOpenPanel *panel = [NSOpenPanel openPanel];
                   panel.canChooseDirectories = YES;
@@ -720,15 +728,7 @@ static uint64_t clip_gen;
                                     if (result != NSModalResponseOK)
                                         return;
                                     NSData *directory = [panel.URL.URLByResolvingSymlinksInPath.path
-                                                   dataUsingEncoding:NSUTF8StringEncoding],
-                                           *source = [guest dataUsingEncoding:NSUTF8StringEncoding];
-                                    NSMutableData *body = [NSMutableData data];
-                                    uint32_t n = htonl((uint32_t)directory.length);
-                                    [body appendBytes:&n length:4];
-                                    [body appendData:directory];
-                                    n = htonl((uint32_t)source.length);
-                                    [body appendBytes:&n length:4];
-                                    [body appendData:source];
+                                            dataUsingEncoding:NSUTF8StringEncoding];
                                     PTAgentCancellation *operation = [PTAgentCancellation new];
                                     NSAlert *progress = [NSAlert new];
                                     progress.messageText = @"Receiving File…";
@@ -740,8 +740,42 @@ static uint64_t clip_gen;
                                                              [operation cancel];
                                                      }];
                                     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                                        NSString *output = nil;
-                                        int status = agent_request_cancel(socket, 4, body, 600, &output, operation);
+                                        /* In the guest: expand ~, and pack a folder (an Antiochus report, say) into
+                                         * /tmp/ptolemy-export.XXXXXX/NAME.zip; the export itself takes regular files only. */
+                                        static const char prepare[] =
+                                                "p=$1; case $p in '~') p=$HOME;; '~/'*) p=$HOME/${p#??};; esac\n"
+                                                "while [ \"$p\" != / ] && [ \"${p%/}\" != \"$p\" ]; do p=${p%/}; done\n"
+                                                "if [ -d \"$p\" ]; then t=`/usr/bin/mktemp -d /tmp/ptolemy-export.XXXXXX` || exit 3\n"
+                                                "/usr/bin/ditto -c -k --sequesterRsrc --keepParent \"$p\" \"$t/${p##*/}.zip\" "
+                                                "|| { /bin/rm -rf \"$t\"; exit 4; }; p=$t/${p##*/}.zip; fi\n"
+                                                "[ -f \"$p\" ] || exit 2\necho \"$p\"\n";
+                                        NSString *output = nil, *file = nil;
+                                        int status = agent_request(socket, 1, argv_body(@[ @"/bin/sh", @"-c", @(prepare), @"sh", guest ]),
+                                                                   600, &output);
+                                        file = status ? nil
+                                                      : [[output stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                                                                componentsSeparatedByString:@"\n"]
+                                                                .lastObject;
+                                        if (![file hasPrefix:@"/"]) {
+                                            status = status ?: -1;
+                                            if (!output.length)
+                                                output = @"the path is not a file or folder in the guest";
+                                        } else if (!operation.cancelled) {
+                                            NSData *source = [file dataUsingEncoding:NSUTF8StringEncoding];
+                                            NSMutableData *body = [NSMutableData data];
+                                            uint32_t n = htonl((uint32_t)directory.length);
+                                            [body appendBytes:&n length:4];
+                                            [body appendData:directory];
+                                            n = htonl((uint32_t)source.length);
+                                            [body appendBytes:&n length:4];
+                                            [body appendData:source];
+                                            output = nil;
+                                            status = agent_request_cancel(socket, 4, body, 600, &output, operation);
+                                        }
+                                        if ([file hasPrefix:@"/tmp/ptolemy-export."]) /* the ZIP made for a folder */
+                                            agent_request(socket, 1,
+                                                          argv_body(@[ @"/bin/rm", @"-rf", file.stringByDeletingLastPathComponent ]), 60,
+                                                          NULL);
                                         dispatch_async(dispatch_get_main_queue(), ^{
                                             if (self.stopped)
                                                 return;
@@ -755,9 +789,13 @@ static uint64_t clip_gen;
                                                     cancelled
                                                             ? @"No partial file is published. A file that completed before cancellation may remain."
                                                     : status
-                                                            ? @"Check the file path, available space, and Ptolemy Tools. Existing files were preserved."
+                                                            ? [NSString stringWithFormat:@"%@\nCheck the path, available space, and Ptolemy "
+                                                                                          "Tools. Existing files were preserved.",
+                                                                                         [output stringByTrimmingCharactersInSet:
+                                                                                                         NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                                                                                                 ?: @""]
                                                             : [NSString stringWithFormat:@"%@ was saved to %@.",
-                                                                                         guest.lastPathComponent,
+                                                                                         file.lastPathComponent,
                                                                                          panel.URL.path];
                                             dispatch_async(dispatch_get_main_queue(), ^{
                                                 if (!self.stopped)
@@ -796,6 +834,10 @@ static uint64_t clip_gen;
     id<MTLBuffer> _cursor;
     uint32_t _cursorGen, _cursorW, _cursorH, _gammaGen, _gamma[256];
     BOOL _gammaOn;
+    Params _shown; /* the last presentation: frame, cursor and gamma generations, parameters, drawable size */
+    PtGpuTicket _shownTicket;
+    uint32_t _shownCursorGen, _shownGammaGen;
+    CGSize _shownSize;
 }
 - (instancetype)initWithView:(PTDisplayView *)view actions:(PTStandActions *)actions {
     if (!(self = [super init]))
@@ -875,12 +917,6 @@ static uint64_t clip_gen;
         } else if (now - _gameSince >= 1.0 && _view.gameMode != game)
             _view.gameMode = game;
     }
-    id<CAMetalDrawable> drawable = [_view.metalLayer nextDrawable];
-    if (!drawable) {
-        if (leased)
-            pt_radeon_frame_release(card, &rf);
-        return;
-    }
     CGSize ds = _view.metalLayer.drawableSize;
     Params p = {0};
     if (m.enabled) {
@@ -941,6 +977,25 @@ static uint64_t clip_gen;
                                                    : 1; /* pointer maps through the drawn image */
     _view.guestRect = m.enabled ? NSMakeRect(p.ox / k, p.oy / k, m.width * p.sx / k, m.height * p.sy / k) : NSZeroRect;
     _view.pointerSuspended = NO;
+    /* Nothing new since the last presentation: the layer keeps showing it (no redraw and composite at 60 Hz). */
+    if (_last && rf.ticket.epoch == _shownTicket.epoch && rf.ticket.seq == _shownTicket.seq &&
+        _cursorGen == _shownCursorGen && _gammaGen == _shownGammaGen && CGSizeEqualToSize(ds, _shownSize) &&
+        !memcmp(&p, &_shown, sizeof p)) {
+        if (leased)
+            pt_radeon_frame_release(card, &rf);
+        return;
+    }
+    id<CAMetalDrawable> drawable = [_view.metalLayer nextDrawable];
+    if (!drawable) {
+        if (leased)
+            pt_radeon_frame_release(card, &rf);
+        return;
+    }
+    _shown = p;
+    _shownTicket = rf.ticket;
+    _shownCursorGen = _cursorGen;
+    _shownGammaGen = _gammaGen;
+    _shownSize = ds;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = drawable.texture;
     rp.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -1081,7 +1136,9 @@ int pt_stand_window_main(PtStandWindow *w) {
         helpItem.submenu = help;
         helpItem.title = @"Help";
         [bar addItem:helpItem];
-        [help addItemWithTitle:@"Web Pages in Tiger" action:@selector(aboutWeb:) keyEquivalent:@""].target = actions;
+        [help addItemWithTitle:[NSString stringWithFormat:@"Web Pages in %@", PTGuestName()]
+                        action:@selector(aboutWeb:)
+                 keyEquivalent:@""].target = actions;
         app.helpMenu = help;
         app.mainMenu = bar;
         PTStandPresenter *presenter = [[PTStandPresenter alloc] initWithView:win.displayView actions:actions];

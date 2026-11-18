@@ -57,6 +57,23 @@ func productSelfTest() throws {
     try check(
         value["Preserve"] as? Int == 17 && (value["AutoLaunchedApplicationDictionary"] as? [[String: Any]])?.count == 1,
         "Idempotent Tools and preserved preferences")
+    /* Silent update: newer Tools of ours replace the installed ones; a folder without our receipt is preserved. */
+    let tools = volume.appendingPathComponent("Library/Ptolemy Tools")
+    let newer = Data("our newer worker".utf8)
+    try newer.write(to: medium.appendingPathComponent("payload/bin/worker"))
+    try Data("\(sha1(newer)) 0755 bin/worker\n".utf8).write(to: medium.appendingPathComponent("manifest.sha1"))
+    try ToolsPreinstaller.install(volume: volume, medium: medium)
+    try check(
+        try Data(contentsOf: tools.appendingPathComponent("payload/bin/worker")) == newer
+            && (try fm.contentsOfDirectory(atPath: volume.appendingPathComponent("Library").path)).filter {
+                $0.hasPrefix(".Ptolemy Tools")
+            }.isEmpty, "Silent update: newer Tools replace ours, nothing left beside")
+    try fm.removeItem(at: tools.appendingPathComponent(".ptolemy-receipt"))
+    try newer.write(to: medium.appendingPathComponent("payload/bin/worker"))
+    try Data("\(sha1(file)) 0755 bin/worker\n".utf8).write(to: medium.appendingPathComponent("manifest.sha1"))
+    try file.write(to: medium.appendingPathComponent("payload/bin/worker"))
+    try reject { try ToolsPreinstaller.install(volume: volume, medium: medium) }  // someone else's folder: preserved
+    try check(try Data(contentsOf: tools.appendingPathComponent("payload/bin/worker")) == newer, "Foreign Tools untouched")
     try Data("tampered".utf8).write(to: medium.appendingPathComponent("payload/bin/worker"))
     try reject { try ToolsPreinstaller.install(volume: volume, medium: medium) }
     try reject { _ = try checkedChild(root, "../outside") }
@@ -64,6 +81,32 @@ func productSelfTest() throws {
     let identity = InstallerIdentity(version: "10.4", build: "8A428")
     let installer = root.appendingPathComponent("installer.iso")
     var item = Installation(installer: installer.path, installerIdentity: identity)
+    try check(item.shownIdentity.version == "10.4", "The window names the installer until the system is read")
+    item.systemIdentity = InstallerIdentity(version: "10.4.11", build: "8S165")
+    try check(item.shownIdentity.build == "8S165", "The window names the installed system once read")
+    let legacy = try JSONDecoder().decode(
+        Installation.self,
+        from: Data(
+            #"{"schema":1,"id":"\#(UUID().uuidString)","name":"Tiger","cpu":"7447a","ram":2048,"diskGiB":40,"phase":"ready","installer":"/x.iso","installerIdentity":{"version":"10.4","build":"8A428"}}"#
+                .utf8))
+    try check(legacy.systemIdentity == nil && legacy.shownIdentity.build == "8A428", "installation.json without systemIdentity")
+    try check(legacy.toolsDigest == nil, "installation.json without toolsDigest: Tools are put on the disk at the next start")
+    item.systemIdentity = nil
+    let machine = root.appendingPathComponent("u1"), disk = machine.appendingPathComponent("Tiger.sparsebundle")
+    try fm.createDirectory(at: disk, withIntermediateDirectories: true)
+    try plistData(["bundle-backingstore-version": 1]).write(to: disk.appendingPathComponent("Info.plist"))
+    try check(!(try ensureBundleV1(disk) { _, _ in throw InstallError("hdiutil must not run for a version-1 disk") }), "U1: v1 untouched")
+    try plistData(["bundle-backingstore-version": 2]).write(to: disk.appendingPathComponent("Info.plist"))
+    try check(
+        try ensureBundleV1(disk) { _, args in
+            let out = URL(fileURLWithPath: args.last!)
+            try fm.createDirectory(at: out, withIntermediateDirectories: false)
+            try plistData(["bundle-backingstore-version": 1]).write(to: out.appendingPathComponent("Info.plist"))
+            return Data()
+        }, "U1: v2 converted")
+    try check(
+        (try plist(Data(contentsOf: disk.appendingPathComponent("Info.plist"))))["bundle-backingstore-version"] as? Int == 1
+            && fm.fileExists(atPath: machine.appendingPathComponent("Tiger-v2.sparsebundle").path), "U1: v1 in place, v2 kept")
     var commands = [(String, [String])]()
     var failResize = false
     let library = try ProductLibrary(root: root.appendingPathComponent("Library")) { tool, args in
@@ -104,6 +147,14 @@ func productSelfTest() throws {
     item.ram = 2048
     item.cpu = "G5"
     try reject { try item.validate() }
+    item.cpu = "7447a-dual"
+    try reject { try item.validate() }  // Tiger: no Dual G4
+    var leopard = item
+    leopard.installerIdentity = InstallerIdentity(version: "10.5", build: "9A581")
+    try leopard.validate()
+    try check(
+        !cpuChoices(item).contains { $0.id == "7447a-dual" } && cpuChoices(leopard).contains { $0.id == "7447a-dual" },
+        "Dual G4 is offered under Leopard only")
     let resources = ProductResources(root: root)
     item.cpu = "7447a"
     let a = resources.arguments(item, folder, cd: "/dev/rdisk20")
@@ -112,8 +163,9 @@ func productSelfTest() throws {
         chosen.cpu = cpu.id
         let args = resources.arguments(chosen, folder, cd: nil)
         try check(
-            args.contains("--window") && args.firstIndex(of: "--cpu").map { args[$0 + 1] == cpu.id } == true,
+            args.contains("--window") && args.firstIndex(of: "--cpu").map { args[$0 + 1] == (cpu.id == "7447a-dual" ? "7447a" : cpu.id) } == true,
             "Explicit CPU launch contract")
+        try check((resources.environment(.ready, chosen)["PT_CPUS"] == "2") == (cpu.id == "7447a-dual"), "Dual G4 asks the engine for two CPUs")
     }
     let oldFast = getenv("PT_CPU_FAST").map { String(cString: $0) }
     setenv("PT_CPU_FAST", "0", 1)

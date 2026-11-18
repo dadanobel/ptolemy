@@ -243,11 +243,42 @@ func openInstaller(_ item: Installation, shadow: URL) throws -> ImageMount {
     try check(made, "Cannot prepare the Leopard installer")
     return try ImageMount(image: image, readOnly: true, shadow: shadow)
 }
+/// The installed system's version, from the machine's disk mounted read-only (a read-only attach keeps the bundle at
+/// bundle-backingstore-version 1, which the engine needs; Finder's attach does not, t912/t925).
+func installedIdentity(_ folder: URL) throws -> InstallerIdentity {
+    let disk = try ImageMount(image: folder.appendingPathComponent("Tiger.sparsebundle"), readOnly: true)
+    defer { try? disk.close() }
+    return try validateSystemVolume(disk.volume, installer: false)
+}
+/// U1: macOS 27 upgrades a sparsebundle that Finder opens to bundle-backingstore-version 2, which the engine does not read
+/// ("writable disk: Invalid argument", t912). hdiutil convert writes a version-1 copy (allocated blocks only: the machine is
+/// stopped, so the guest's journal is clean); it takes the disk's place, the upgraded one stays beside it as Tiger-v2.sparsebundle
+/// until the machine's next normal stop. Returns true when it converted.
+func ensureBundleV1(_ bundle: URL, execute: (String, [String]) throws -> Data = command) throws -> Bool {
+    func version(_ b: URL) throws -> Int {
+        try plist(Data(contentsOf: b.appendingPathComponent("Info.plist")))["bundle-backingstore-version"] as? Int ?? 1
+    }
+    guard try version(bundle) >= 2 else { return false }
+    let fm = FileManager.default, dir = bundle.deletingLastPathComponent()
+    let copy = dir.appendingPathComponent("Tiger-v1.sparsebundle"), old = dir.appendingPathComponent("Tiger-v2.sparsebundle")
+    try? fm.removeItem(at: copy)
+    _ = try execute("/usr/bin/hdiutil", ["convert", bundle.path, "-format", "UDSB", "-o", copy.path])
+    try check(try version(copy) == 1, "The disk was opened in Finder and could not be converted back for Ptolemy")
+    try? fm.removeItem(at: old)
+    try fm.moveItem(at: bundle, to: old)
+    try fm.moveItem(at: copy, to: bundle)
+    return true
+}
 enum InstallPhase: String, Codable { case installer, toolsPending, ready }
-let cpus = [(id: "750", name: "G3 750"), (id: "7400", name: "G4 7400"), (id: "7447a", name: "G4 7447A")]  // a machine's processors: --cpu value, name
+let cpus = [(id: "750", name: "G3 750"), (id: "7400", name: "G4 7400"), (id: "7447a", name: "G4 7447A"), (id: "7447a-dual", name: "Dual G4 7447A")]  // a machine's processors: id, name
+/// The processors a machine of this system may choose: Dual G4 only under Leopard (Tiger ticks 100 Hz on every CPU in idle: a second G4 doubles its idle cost).
+func cpuChoices(_ item: Installation) -> [(id: String, name: String)] { cpus.filter { $0.id != "7447a-dual" || item.installerIdentity.system == "Leopard" } }
 struct Installation: Codable {
     var schema = 1, id = UUID(), name = "Tiger", cpu = "7447a", ram = 2048, diskGiB = 40, phase = InstallPhase.installer
     var installer: String, installerIdentity: InstallerIdentity
+    var systemIdentity: InstallerIdentity? = nil  // the installed system, read from the machine's disk; nil until the first read
+    var toolsDigest: String? = nil  // SHA-256 of the PtolemyTools.dmg last put on the disk; nil: before this record existed
+    var shownIdentity: InstallerIdentity { systemIdentity ?? installerIdentity }  // what the window names: updates show
     func validate() throws {
         try check(
             schema == 1 && !name.isEmpty && name.utf8.count <= 80 && !name.contains("\0"), "Invalid installation record"
@@ -256,6 +287,7 @@ struct Installation: Codable {
             cpus.contains(where: { $0.id == cpu }) && (512...2048).contains(ram) && ram % 64 == 0,
             "Invalid CPU or memory settings")
         try check(cpu != "750" || installerIdentity.system != "Leopard", "Leopard needs a G4 processor")
+        try check(cpu != "7447a-dual" || installerIdentity.system == "Leopard", "Dual G4 needs Leopard")
         try check((8...120).contains(diskGiB), "Disk size must be 8–120 GiB (this board uses LBA28)")
     }
     static func load(_ folder: URL) throws -> Installation {
@@ -284,6 +316,10 @@ struct ProductResources {
         rom = root.appendingPathComponent("openbios-ppc")
         tools = root.appendingPathComponent("PtolemyTools.dmg")
     }
+    /// The bundled Tools medium's identity: an installation whose record differs gets these Tools on its next start.
+    func toolsDigest() throws -> String {
+        SHA256.hash(data: try Data(contentsOf: tools)).map { String(format: "%02x", $0) }.joined()
+    }
     func validate() throws {
         for p in [engine, rom, tools] { try regular(p) }
         try check(FileManager.default.isExecutableFile(atPath: engine.path), "The bundled engine is not executable")
@@ -295,7 +331,7 @@ struct ProductResources {
             "auto-boot?=true", "--network-user", "--window", "--seconds", "0",
         ]  // rootless network on by default
         // Explicit model selection leaves the engine's optimization policy independent.
-        a += ["--cpu", item.cpu]
+        a += ["--cpu", item.cpu == "7447a-dual" ? "7447a" : item.cpu]  // Dual G4: two 7447A, PT_CPUS=2 (environment(_:_:))
         if let cd = cd { a += ["--cd", cd, "--boot-cd"] }
         return a
     }
@@ -305,8 +341,14 @@ struct ProductResources {
         e["PT_EDID_MODE"] = "screen"
         e["PT_POINTER_V2"] = e["PT_POINTER_V2"] ?? "1"
         e["PT_R1_UX"] = e["PT_R1_UX"] ?? "1"
+        e["PT_CAMERA"] = e["PT_CAMERA"] ?? "1" /* the Mac's camera as a USB camera (b4-0085/0086); macOS asks at first use */
         e["PT_PRODUCT_UI"] = "1"
         e["PT_RESTART"] = phase == .ready ? "reexec" : "exit"
+        return e
+    }
+    func environment(_ phase: InstallPhase, _ item: Installation) -> [String: String] {
+        var e = environment(phase)
+        if item.cpu == "7447a-dual" { e["PT_CPUS"] = "2" }
         return e
     }
 }
@@ -396,6 +438,23 @@ final class ProductLibrary {
         { try? fm.removeItem(at: old) }
     }
 }
+/// Silent Tools update (owner, 17.11): a stopped machine whose record names other Tools than this Ptolemy carries gets them
+/// on its disk; the guest installs them itself at the next login (the login item, install.py), with no question.
+/// Returns true when the disk was changed. The window calls it before a start; `--update-tools FOLDER` runs it alone.
+func updateTools(_ folder: URL, _ item: inout Installation, _ resources: ProductResources) throws -> Bool {
+    let digest = try resources.toolsDigest()
+    guard item.phase == .ready, item.toolsDigest != digest else { return false }
+    let medium = try ImageMount(image: resources.tools, readOnly: true)
+    defer { try? medium.close() }
+    let target = try ImageMount(image: folder.appendingPathComponent("Tiger.sparsebundle"), readOnly: false)
+    defer { try? target.close() }
+    try ToolsPreinstaller.install(volume: target.volume, medium: medium.volume)
+    try target.close()
+    try medium.close()
+    item.toolsDigest = digest
+    try item.save(folder)
+    return true
+}
 struct ToolsPreinstaller {
     static func install(volume: URL, medium: URL) throws {
         _ = try validateSystemVolume(volume, installer: false)
@@ -439,18 +498,27 @@ struct ToolsPreinstaller {
         }
         try check(!entries.isEmpty, "Empty Tools payload")
         let fm = FileManager.default
+        /* Earlier Tools of ours (their receipt is there) are replaced whole: the new set is staged beside them and takes
+         * their place by rename; the login item then installs it in the guest at the next login (install.py keeps the
+         * user's older versions and logs). A folder without our receipt is someone else's and is preserved. */
+        var replace = false
         if fm.fileExists(atPath: dest.path) {
             try directory(dest)
             try regular(dest.appendingPathComponent("manifest.sha1"))
-            try check(
-                try Data(contentsOf: dest.appendingPathComponent("manifest.sha1")) == bytes,
-                "Different Tools already exist; preserved")
-            for (hash, _, name) in entries {
-                try payload(
-                    dest, name, hash, "Link in installed Tools payload",
-                    "Installed Tools checksum mismatch; files preserved")
+            if try Data(contentsOf: dest.appendingPathComponent("manifest.sha1")) == bytes {
+                for (hash, _, name) in entries {
+                    try payload(
+                        dest, name, hash, "Link in installed Tools payload",
+                        "Installed Tools checksum mismatch; files preserved")
+                }
+            } else {
+                try check(
+                    fm.fileExists(atPath: dest.appendingPathComponent(".ptolemy-receipt").path),
+                    "Different Tools already exist; preserved")
+                replace = true
             }
-        } else {
+        }
+        if replace || !fm.fileExists(atPath: dest.path) {
             try fm.createDirectory(
                 at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o755])
             defer { try? fm.removeItem(at: stage) }
@@ -480,7 +548,17 @@ struct ToolsPreinstaller {
                 "CFBundleName": "Ptolemy Tools Setup", "CFBundlePackageType": "APPL", "LSUIElement": true,
             ]).write(to: contents.appendingPathComponent("Info.plist"))
             try Data(receipt.utf8).write(to: stage.appendingPathComponent(".ptolemy-receipt"))
-            try fm.moveItem(at: stage, to: dest)
+            if replace {
+                let old = library.appendingPathComponent(".Ptolemy Tools-old-" + UUID().uuidString)
+                try fm.moveItem(at: dest, to: old)
+                do { try fm.moveItem(at: stage, to: dest) } catch {
+                    try? fm.moveItem(at: old, to: dest)  // the earlier Tools stay as they were
+                    throw error
+                }
+                try? fm.removeItem(at: old)
+            } else {
+                try fm.moveItem(at: stage, to: dest)
+            }
         }
         let prefs = library.appendingPathComponent("Preferences")
         try directory(prefs)

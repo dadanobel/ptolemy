@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* The host side of Ptolemy Agent's private calls. Every guest buffer is checked page by page (RAM only, user
+ * mappings, write permission) before a command is read or answered. */
 #include "ppc.h"
 #include "pt_agent.h"
 #include "platform.h"

@@ -1,0 +1,15 @@
+Antiochus 1.0-draft4 / antiochus-score-4, by Astra: sources as delivered, 41 files, none edited here.
+Her SHA256SUMS: sha256 dfbff95ec6c23450fd9b6a686820580ae067e9fdacd30fc8436bfa57dd467272
+Built by her inside Tiger with Apple GCC 4.0 and the 10.4 SDK; the programs in Ptolemy Tools are those builds.
+
+SPDX-License-Identifier: GPL-2.0-or-later
+The line above also covers the files that carry no such line of their own:
+  README.md
+  classic/CMakeLists.txt
+  compare.py
+  docs/PROTOCOL.md
+  resources/Antiochus-Leopard.icns
+  resources/Antiochus-Tiger.icns
+  resources/Info.plist
+  resources/Rosetta-Info.plist
+  resources/Rosetta.icns

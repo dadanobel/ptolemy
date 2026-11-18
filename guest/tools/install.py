@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Python 2.3 (Tiger). User-only, versioned install; never edits /System or ISO.
-import os, sys, sha, stat, shutil, tempfile
+import os, sys, sha, stat, shutil, tempfile, time, fcntl
 
 
 def fail(message):
@@ -103,11 +103,133 @@ def atomic_link(target, path):
             os.unlink(temp)
 
 
+# Antiochus and its demonstration rosettast: payload/Antiochus/NAME, linked from ~/Applications/Ptolemy Tools/Antiochus.
+TOOLS = ('Antiochus.app', 'rosettast.app')
+# Earlier Tools linked them in ~/Applications itself: (that link's name, the application that replaces it).
+OLD = (('Antiochus.app', 'Antiochus.app'), ('Rosetta Stone.app', 'rosettast.app'))
+
+
+# A link of ours: a symlink to versions/<20 hex digits>/tail in the Tools folder. Anything else is someone's own.
+def ours(root, link, tail):
+    if not os.path.islink(link):
+        return False
+    prefix = os.path.join(root, 'versions') + '/'
+    target = os.readlink(link)
+    rest = target[len(prefix):]
+    return (target.startswith(prefix) and rest[20:21] == '/' and not rest[:20].strip('0123456789abcdef')
+            and rest[21:] == tail)
+
+
+# The (target, link) pairs this payload brings. An application it lacks keeps its link, at the version that has it.
+def tool_links(root, payload, dest, folder):
+    result = []
+    for name in TOOLS:
+        if not os.path.isdir(os.path.join(payload, 'Antiochus', name)):
+            continue
+        link = os.path.join(folder, name)
+        if lexists(link) and not ours(root, link, 'Antiochus/' + name):
+            fail('Existing application will be preserved: ' + link)
+        result.append((os.path.join(dest, 'Antiochus', name), link))
+    return result
+
+
+def launch_agent(library, link):
+    label = 'org.ptolemy.experimental.guest-agent'
+    config = ('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>' + label
+              + '</string><key>ProgramArguments</key><array><string>/usr/bin/open</string><string>' + xml(link)
+              + '</string></array><key>RunAtLoad</key><true/></dict></plist>\n')
+    return os.path.join(library, 'LaunchAgents', label + '.plist'), config
+
+
+# A running agent of another version holds the worker lock: the new one would start beside it and stay OFF (t877).
+# Ask it to quit (it stops its worker first) and wait until the lock is free. Not when it is this version already.
+def stop_other_agent(root, app):
+    mine = app and os.path.realpath(app)  # None: stop any agent
+    other = 0
+    for line in os.popen('/bin/ps -axwwo command').read().splitlines():
+        at = line.find('/Contents/MacOS/PtolemyAgent')
+        rest = line[at + 28:]  # after the executable: nothing, or LaunchServices' -psn_ argument
+        if at > 0 and (not rest or rest.startswith(' ')) and os.path.realpath(line[:at]) != mine:
+            other = 1
+    if not other:
+        return
+    try:
+        os.setsid()  # the installer may run under that agent: leave its process group, which it stops
+    except OSError:
+        pass
+    spawn(['/usr/bin/osascript', '-e', 'tell application "Ptolemy Agent" to quit'])
+    lock = os.path.join(root, 'agent.lock')
+    for i in range(80):
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return
+            except IOError:
+                pass
+        finally:
+            os.close(fd)
+        time.sleep(0.25)
+    fail('The running Ptolemy Agent did not quit; quit it from its menu and run the installer again')
+
+
+# install.py remove: takes away what the installer made and nothing else - the agent's start at login, the links that
+# are ours, the installed versions. Someone else's application or link in the same places stays; so do the command logs.
+def remove():
+    home = os.path.expanduser('~')
+    library = os.path.join(home, 'Library')
+    root = os.path.join(library, 'Application Support', 'Ptolemy')
+    applications = os.path.join(home, 'Applications')
+    folder = os.path.join(applications, 'Ptolemy Tools', 'Antiochus')
+    link = os.path.join(applications, 'Ptolemy Agent.app')
+    if os.path.isdir(root):
+        stop_other_agent(root, None)
+    plist, config = launch_agent(library, link)
+    if lexists(plist):
+        if os.path.islink(plist) or open(plist, 'rb').read() != config:
+            print 'A different LaunchAgent is preserved: ' + plist
+        else:
+            spawn(['/bin/launchctl', 'unload', plist])
+            os.unlink(plist)
+    if os.path.islink(link) and os.readlink(link) == os.path.join(root, 'current', 'Ptolemy Agent.app'):
+        os.unlink(link)
+    for name in TOOLS:
+        if ours(root, os.path.join(folder, name), 'Antiochus/' + name):
+            os.unlink(os.path.join(folder, name))
+    for name, new in OLD:
+        if ours(root, os.path.join(applications, name), name):
+            os.unlink(os.path.join(applications, name))
+    current = os.path.join(root, 'current')
+    if os.path.islink(current):
+        os.unlink(current)
+    versions = os.path.join(root, 'versions')
+    if os.path.isdir(versions) and not os.path.islink(versions):
+        for name in os.listdir(versions):
+            path = os.path.join(versions, name)
+            if len(name) == 20 and not name.strip('0123456789abcdef') and os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+    lock = os.path.join(root, 'agent.lock')
+    if os.path.isfile(lock) and not os.path.islink(lock):
+        os.unlink(lock)
+    for path in (folder, os.path.dirname(folder), versions, root):  # only when nothing else is in them
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+    print 'Removed Ptolemy Guest Tools.'
+    if os.path.isdir(root):
+        print 'Kept (command logs or files that are not the installer\'s): ' + root
+    return 0
+
+
 def main():
     if os.getuid() == 0:
         fail('Run as the logged-in Tiger user, without sudo')
     if sys.platform != 'darwin':
         fail('This installer runs inside Tiger')
+    if sys.argv[1:] == ['remove']:
+        return remove()
     media = os.path.dirname(os.path.abspath(__file__))
     payload = os.path.join(media, 'payload')
     version, entries = records(media)
@@ -124,17 +246,18 @@ def main():
     dest = os.path.join(versions, version)
     applications = os.path.join(home, 'Applications')
     directory(applications)
+    folder = os.path.join(applications, 'Ptolemy Tools', 'Antiochus')
+    tools = tool_links(root, payload, dest, folder)
+    if tools:
+        directory(os.path.dirname(folder))
+        directory(folder)
     link = os.path.join(applications, 'Ptolemy Agent.app')
     expected = os.path.join(root, 'current', 'Ptolemy Agent.app')
     if lexists(link) and (not os.path.islink(link) or os.readlink(link) != expected):
         fail('Existing application will be preserved: ' + link)
     agents = os.path.join(library, 'LaunchAgents')
     directory(agents)
-    label = 'org.ptolemy.experimental.guest-agent'
-    plist = os.path.join(agents, label + '.plist')
-    config = ('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>Label</key><string>' + label
-              + '</string><key>ProgramArguments</key><array><string>/usr/bin/open</string><string>' + xml(link)
-              + '</string></array><key>RunAtLoad</key><true/></dict></plist>\n')
+    plist, config = launch_agent(library, link)
     if lexists(plist):
         if os.path.islink(plist) or open(plist, 'rb').read() != config:
             fail('Existing LaunchAgent differs; preserved')
@@ -159,8 +282,14 @@ def main():
         finally:
             if stage:
                 shutil.rmtree(stage)
+    stop_other_agent(root, os.path.join(dest, 'Ptolemy Agent.app'))  # before current moves: an old agent still resolves to its own version
     atomic_link(os.path.join('versions', version), os.path.join(root, 'current'))
     atomic_link(expected, link)
+    for target, path in tools:
+        atomic_link(target, path)
+    for name, new in OLD:  # the links of earlier Tools, once the application is in its new place
+        if ours(root, os.path.join(applications, name), name) and lexists(os.path.join(folder, new)):
+            os.unlink(os.path.join(applications, name))
     if not lexists(plist):
         fd, tmp = tempfile.mkstemp(prefix='.ptolemy-', dir=agents)
         os.close(fd)

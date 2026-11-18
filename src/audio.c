@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* The sound path to the Mac: a lock-free FIFO from the guest's play head to CoreAudio, with priming and underrun
+ * counts (see include/audio.h). */
 #include "audio.h"
 #include <stdlib.h>
 #include <math.h>

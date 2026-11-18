@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Keeps the CPU's and the GPU's views of guest memory consistent: pages the GPU uses are opened, made read-only or
+ * closed to the CPU, in groups of the VM's real page size, so a CPU access to them faults and is seen in time. */
 #include "guard.h"
 #include <stdlib.h>
 #include <string.h>

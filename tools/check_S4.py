@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-UNITS = ('platform block dma scsi atapi ata hid input usb_msc ohci audio audio_macos pmu nvram board devices').split()
+UNITS = ('platform block dma scsi atapi ata hid input usb_msc usb_uvc ohci audio audio_macos pmu nvram board devices').split()
 
 
 def anchor(text, s):  # the one span of text that s matches, whitespace aside (the sources are clang-formatted)
@@ -79,6 +79,8 @@ def main():
         'pmu-faults',
         'optical',
         'media-lifetime',
+        'usb-uvc',
+        'devices-late',
     ]
     for test in tests:
         run(cc + [root / 'tests' / f'{test}.c', archive, '-o', out / test] + frameworks)

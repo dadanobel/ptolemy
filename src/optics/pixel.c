@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Pixel formats of the Radeon's textures and render targets: bytes per pixel, component order and compressed
+ * blocks, as the Metal backend needs them. */
 #include "pixel.h"
 #include <math.h>
 unsigned optics_pixel_bytes(OpticsPixelLayout p) {

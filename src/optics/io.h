@@ -58,6 +58,10 @@ PtR2IoResult pt_r2_io_cpu_write(PtR2Io *, uint64_t, const void *, size_t, unsign
  * identity makes GART aliases share ownership and invalidation. BUSY means
  * request export/materialization and yield; no GPU wait while holding a lock. */
 PtR2IoResult pt_r2_io_before_physical(PtR2Io *, int ram, uint64_t, size_t, int write);
+/* Any thread, no lock: 1 if a guest RAM page of [at, at+n) is tracked (watched, snapshotted or GPU-owned) or the range
+ * reaches past 4 GiB. 0: pt_r2_io_before_physical would find nothing to wait for or invalidate. The answer is a moment's,
+ * like pt_r2_io_before_physical's under the caller's lock: a page tracked right after it is the GPU's next transfer. */
+int pt_r2_io_ram_tracked(PtR2Io *, uint64_t at, size_t n);
 PtR2IoResult pt_r2_io_snapshot(PtR2Io *, uint64_t, size_t, PtR2IoToken *);
 int pt_r2_io_snapshot_valid(PtR2Io *, PtR2IoToken);
 PtR2IoResult pt_r2_io_release(PtR2Io *, PtR2IoToken);

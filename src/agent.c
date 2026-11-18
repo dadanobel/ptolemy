@@ -122,7 +122,7 @@ static const char *prepare_transfer(Transfer *x, const uint8_t *b, uint32_t n, u
     }
     if ((uint64_t)st.st_size > PTA_XLIMIT) {
         close(f);
-        return "larger than 4 GB, the limit for copying into Tiger\n";
+        return "larger than 4 GB, the limit for copying into the guest\n";
     }
     PtSha256 h;
     pt_sha256_init(&h);
@@ -214,12 +214,12 @@ static void accept_request(PtAgent *a) {
     } else if ((op < 1 || op > 4) || !seconds || seconds > 600 || (op == 1 && !valid_request(b, n)))
         strcpy(message, "invalid request\n");
     else if (off)
-        strcpy(message, "Tiger agent is off or not polling\n");
+        strcpy(message, "Ptolemy Tools in the guest are off or not polling\n");
     else if (busy)
         strcpy(message, "another command is active; disconnect its client to cancel\n");
     else if (op >= 2 && a->version < PTA_TRANSFER_VERSION)
         snprintf(message, sizeof message,
-                 "the Tiger agent (protocol %u) cannot receive files or text; install the current Guest Tools\n",
+                 "the guest agent (protocol %u) cannot receive files or text; install the current Guest Tools\n",
                  a->version);
     else if (op == 3) {
         Transfer x;
@@ -241,7 +241,7 @@ static void accept_request(PtAgent *a) {
         pthread_mutex_lock(&a->lock);
         if (!why && (!a->token || a->version < PTA_TRANSFER_VERSION || a->pending || a->x.active)) {
             close(x.fd);
-            strcpy(message, "the Tiger agent changed state; try again\n");
+            strcpy(message, "the guest agent changed state; try again\n");
             why = message;
         }
         if (!why) {
@@ -394,7 +394,7 @@ static void *serve(void *opaque) {
         if (x->active && !x->done && now - a->heartbeat > 5000000000ull) {
             x->cancel = x->done = x->failed = 1;
             if (!x->result[0])
-                strcpy(x->result, "the Tiger agent stopped responding; not published\n");
+                strcpy(x->result, "the guest agent stopped responding; not published\n");
         }
         if (a->export && a->cancel && (!a->delivered || now - a->heartbeat > 5000000000ull)) {
             a->done = 1;
@@ -435,12 +435,12 @@ static void *serve(void *opaque) {
         }
     }
     if (a->client >= 0) {
-        static const char m[] = "Tiger stopped; command outcome unknown\n";
+        static const char m[] = "the guest stopped; command outcome unknown\n";
         reply(a->client, 2, 1, m, sizeof m - 1);
         close(a->client);
     }
     if (a->x.active) {
-        static const char m[] = "Tiger stopped; transfer not published\n";
+        static const char m[] = "the guest stopped; transfer not published\n";
         if (a->x.client >= 0) {
             reply(a->x.client, 0, 1, m, sizeof m - 1);
             close(a->x.client);
@@ -505,7 +505,7 @@ PtAgent *pt_agent_open(const char *path) {
         unlink(path);
         goto fail;
     }
-    fprintf(stderr, "Ptolemy Agent development access: %s (enable the visible app in Tiger)\n", path);
+    fprintf(stderr, "Ptolemy Agent development access: %s (enable the visible app in the guest)\n", path);
     return a;
 fail: {
     int error = errno;
@@ -660,7 +660,7 @@ int pt_agent_unregister(PtAgent *a, uint32_t t) {
         }
         if (a->x.active && !a->x.done) {
             a->x.cancel = a->x.done = a->x.failed = 1;
-            strcpy(a->x.result, "the Tiger agent stopped; not published\n");
+            strcpy(a->x.result, "the guest agent stopped; not published\n");
         }
         rc = PTA_OK;
         wake(a);
@@ -772,9 +772,9 @@ int pt_agent_xdone(PtAgent *a, uint32_t t, uint32_t id, uint32_t status, const c
                      path);
         else {
             x->failed = 1;
-            const char *w = status == 5   ? "Tiger's disk is full"
-                            : status == 6 ? "Tiger could not write the file"
-                            : status == 8 ? "Tiger could not create the file"
+            const char *w = status == 5   ? "the guest's disk is full"
+                            : status == 6 ? "the guest could not write the file"
+                            : status == 8 ? "the guest could not create the file"
                                           : NULL;
             if (!x->result[0]) {
                 if (x->cancel)

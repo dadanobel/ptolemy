@@ -4,7 +4,8 @@
  * (type-0 packets), an indirect buffer with one more fill, and a scratch write with its write-back. While the CP thread
  * works, this thread keeps writing and reading its own VRAM bytes and polling RPTR/RBBM_STATUS/scratch, and a second
  * thread calls the status and DMA-coherence entry points. Every round then checks its fills, the CPU's bytes, RPTR and
- * idle. One reset lands with work in flight; close joins the thread. Run under ThreadSanitizer and AddressSanitizer. */
+ * idle. One reset lands with work in flight; close joins the thread. The service tick (VBL, CP wake) runs beside the CP
+ * and must not wait behind one long packet (a 64 MiB fill). Run under ThreadSanitizer and AddressSanitizer. */
 #include "optics-test.h"
 #include <assert.h>
 #include <pthread.h>
@@ -18,6 +19,7 @@ enum {
     IB = 0x30000,
     FILL = 0x100000,
     MINE = 0x200000,
+    BIG = 0x2000000, /* a 64 MiB fill at 8 KiB pitch */
     PITCH = 256,
     ROUNDS = 400,
     CP_IB_BASE = 0x738,
@@ -55,10 +57,13 @@ static void submit(unsigned r) {
     reg(SCRATCH_REG0, r);
     mmio(CP_RB_WPTR, wptr);
 }
-static uint64_t now_ms(void) {
+static uint64_t now_ns(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
-    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+static uint64_t now_ms(void) {
+    return now_ns() / 1000000;
 }
 static unsigned mine;
 static uint32_t mine_v[4096]; /* the CPU's own VRAM bytes, checked while the CP runs */
@@ -68,6 +73,7 @@ static void cpu_work(void) {
     assert(vr(off) == v);
     mine_v[mine % 4096] = v;
     mine++;
+    pt_radeon_service(d, now_ns());
     (void)rd(CP_RB_RPTR);
     (void)rd(RBBM_STATUS);
     (void)vr(SCRATCH);
@@ -102,6 +108,36 @@ static void *other(void *o) { /* agent status and another device's DMA coherence
         assert(!optics_frontend_ram_before(d, 4096 * (n % 16), 64, n & 1));
     }
     return NULL;
+}
+static void big_fill(uint32_t tag) { /* one packet the CP holds the device for */
+    reg(DP_GUI_MASTER_CNTL, 0x00f006d2u);
+    reg(DST_PITCH_OFFSET, (8192 / 64) << 22 | BIG >> 10);
+    reg(DP_BRUSH_FRGD_CLR, tag);
+    reg(DST_Y_X, 0);
+    reg(DST_HEIGHT_WIDTH, 8192u << 16 | 2048);
+    reg(SCRATCH_REG0, tag);
+    mmio(CP_RB_WPTR, wptr);
+}
+static void long_hold(void) { /* an entry waits out the fill; then only service ticks while another fill runs */
+    uint64_t t0 = now_ns(), t, hold = 0, worst = 0, end;
+    big_fill(0xb16f111u);
+    for (uint32_t v = 0; v != 0xb16f111u;) {
+        t = now_ns();
+        v = vr(SCRATCH);
+        if (now_ns() - t > hold)
+            hold = now_ns() - t;
+    }
+    t = now_ns();
+    big_fill(0xb16f112u);
+    for (end = t + 2 * (t - t0) + 50000000u; t < end; t = now_ns()) {
+        pt_radeon_service(d, t);
+        if (now_ns() - t > worst)
+            worst = now_ns() - t;
+    }
+    while (vr(SCRATCH) != 0xb16f112u) {
+    }
+    fprintf(stderr, "long hold: an entry waited %.1f ms, the longest service tick %.2f ms\n", hold / 1e6, worst / 1e6);
+    assert(hold < 8000000u || worst < hold / 2); /* a short hold is lost in scheduling noise */
 }
 int main(void) {
     optics_frontend_set_executor(NULL);
@@ -142,6 +178,13 @@ int main(void) {
         submit(r);
         wait_round(r);
     }
+    long_hold();
+    /* The ring's own registers written by a packet in the ring: the ring is not re-created under its reader. */
+    ring(1u << 16 | CP_RB_BASE >> 2); /* one packet, two registers: CP_RB_BASE, then CP_RB_CNTL */
+    ring(RB);
+    ring(9);
+    submit(ROUNDS + 1);
+    wait_round(ROUNDS + 1);
     for (unsigned i = 0; i < 4096; i++)
         assert(vr(MINE + 4 * i) == mine_v[i]);
     atomic_store(&done, 1);

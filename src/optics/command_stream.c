@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Reads the Radeon's PM4 command stream - the ring and the indirect buffers it calls - from guest memory and hands
+ * whole packets to the executor. A packet that cannot run yet (BUSY) is retried later, never half applied. */
 #include "command_stream.h"
 #include <stdlib.h>
 typedef struct {
