@@ -68,6 +68,11 @@ optics_metal_executor(void); /* the product Metal executor (installed by its con
 /* Any thread (GPU completion): post a CPU-owner event so a CP waiting on a fence resumes. No guest interrupt. */
 void optics_frontend_wake(PtRadeon *);
 /* Frontend services for the executor (CPU owner). */
+/* Around every blocking wait for GPU progress inside an executor call: begin right before it, end(its result) right
+ * after. On the CP thread the device lock is released in between, so the executor must hold no frontend state across
+ * the pair but its own; calls that need the executor wait for the CP's packet (frontend.c, engaged). */
+int optics_frontend_gpu_wait_begin(PtRadeon *);
+void optics_frontend_gpu_wait_end(PtRadeon *, int released);
 int optics_trace(void); /* OPTICS_TRACE=1: development traces on */
 uint32_t optics_frontend_register(const PtRadeon *, uint32_t offset); /* current register value, no side effects */
 int optics_frontend_vram_offset(const PtRadeon *, uint64_t gpu, uint64_t *offset);

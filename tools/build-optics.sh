@@ -30,14 +30,14 @@ done
 D=$O/dev
 mkdir -p "$D"
 dev=""
-for unit in platform block dma scsi atapi ata hid input usb_msc ohci audio audio_macos pmu nvram board devices net_rtl net_user web; do
+for unit in platform block dma scsi atapi ata hid input usb_msc usb_uvc ohci audio audio_macos pmu nvram board devices net_rtl net_user web; do
     clang -std=c11 -D_DARWIN_C_SOURCE -O2 -Wall -Wextra -Werror -Iinclude -c "src/$unit.c" -o "$D/$unit.o" -pthread
     dev="$dev $D/$unit.o"
 done
 clang -fobjc-arc -O2 -Wall -Wextra -Werror -Iinclude -c src/input_macos.m -o "$D/input_macos.o"
 rm -f "$D/libptdevices.a"
 ar rcs "$D/libptdevices.a" $dev "$D/input_macos.o"
-for unit in stand_window_macos display_macos guest_window_macos net_macos web_macos; do
+for unit in stand_window_macos display_macos guest_window_macos net_macos web_macos camera_macos; do
     clang -fobjc-arc -O2 -Wall -Wextra -Werror -Iinclude -c "src/$unit.m" -o "$D/$unit.o"
 done
 clang -std=c11 -D_DARWIN_C_SOURCE -O2 -Wall -Wextra -Werror -Iinclude -c src/agent.c -o "$D/agent.o" -pthread
@@ -60,9 +60,10 @@ ar rcs "$O/liboptics.a" $objs "$O"/frontend_host_macos.o "$O"/surface_metal.o "$
 clang -std=gnu11 -D_DARWIN_C_SOURCE -DPT_HVF -DPT_NO_MAIN $g5flags -O2 -Iinclude -I"$E" \
     src/firmware.c "$D"/export.o "$D"/agent.o "$D"/agent_guest.o \
     "$E"/hvf.c "$E"/interp.c "$E"/altivec.c "$E"/mmu.c "$E"/jit.c $g5sources "$D"/libptdevices.a -force_load "$O/liboptics.a" $hvfobjs \
-    "$D"/stand_window_macos.o "$D"/display_macos.o "$D"/guest_window_macos.o "$D"/net_macos.o "$D"/web_macos.o \
+    "$D"/stand_window_macos.o "$D"/display_macos.o "$D"/guest_window_macos.o "$D"/net_macos.o "$D"/web_macos.o "$D"/camera_macos.o \
     -framework Carbon -framework AppKit -framework Metal -framework QuartzCore -framework Foundation \
-    -framework vmnet -framework ImageIO -framework CoreGraphics -framework Hypervisor -framework AudioUnit -framework AudioToolbox -framework CoreAudio -lc++ \
+    -framework vmnet -framework ImageIO -framework CoreGraphics -framework Hypervisor -framework AudioUnit -framework AudioToolbox -framework CoreAudio \
+    -framework AVFoundation -framework CoreMedia -framework CoreVideo -lc++ \
     -Wl,-map,"$O/link.map" -o "$OUT"
 codesign --force --sign - --entitlements "$E"/hv.entitlements "$OUT"
 if [ -z "${OPTICS_NO_TESTS:-}" ]; then
@@ -83,6 +84,9 @@ if [ -z "${OPTICS_NO_TESTS:-}" ]; then
     clang $CF tests/optics-draw-decode.c "$P/r300_state.c" "$P/pixel.c" "$P/foundation/pm4.c" "$P/foundation/shader_decode.c" "$P/foundation/shader_eval.c" \
         -o build/test-optics-draw-decode
     build/test-optics-draw-decode
+    # CP ring boundaries: across the end, N-1 and N words, MORE, BUSY hold, budget, WPTR, header race, errors.
+    clang $CF tests/optics-ring.c "$P/ring.c" "$P/foundation/pm4.c" -o build/test-optics-ring
+    build/test-optics-ring
     # Completion: deferred mode (delayed and failed GPU completion, no double execution), then the default early publish.
     clang $CF tests/optics-fence.c $CORE -o build/test-optics-fence
     build/test-optics-fence 2>/dev/null
@@ -90,9 +94,27 @@ if [ -z "${OPTICS_NO_TESTS:-}" ]; then
     # The CP thread beside the CPU (locking, hand-over, reset in flight, close), under ThreadSanitizer.
     clang $CF -g -fsanitize=thread tests/optics-cp-thread.c $CORE -o build/test-optics-cp-thread
     TSAN_OPTIONS=halt_on_error=1 build/test-optics-cp-thread 2>build/test-optics-cp-thread.log || { cat build/test-optics-cp-thread.log; exit 1; }
+    # The lock-free map of tracked guest RAM pages (device accesses skip the device lock), with a reader beside.
+    clang $CF -g -fsanitize=thread tests/optics-io-ram-map.c "$P/io.c" "$P/address.c" -o build/test-optics-io-ram-map
+    TSAN_OPTIONS=halt_on_error=1 build/test-optics-io-ram-map 2>build/test-optics-io-ram-map.log || { cat build/test-optics-io-ram-map.log; exit 1; }
+    # Two CPUs: the OpenPIC as AppleMPIC drives it.
+    clang -std=c11 -D_DARWIN_C_SOURCE -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/openpic-smp.c src/platform.c -pthread -o build/test-openpic-smp
+    ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/test-openpic-smp
+    clang -std=c11 -D_DARWIN_C_SOURCE -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/ohci-quiet.c src/ohci.c src/hid.c src/platform.c -pthread -o build/test-ohci-quiet
+    ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/test-ohci-quiet
+    # Two CPUs: their lock under two threads (parallel, then taking turns), under ThreadSanitizer.
+    clang -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=thread tests/smp-lock.c "$E"/smp.c -pthread -o build/test-smp-lock
+    TSAN_OPTIONS=halt_on_error=1 build/test-smp-lock
+    TSAN_OPTIONS=halt_on_error=1 build/test-smp-lock serial
+    clang -std=c11 -D_DARWIN_C_SOURCE -O1 -g -Wall -Wextra -Werror -fsanitize=thread -Iinclude tests/event-poll.c src/platform.c -pthread -o build/test-event-poll
+    TSAN_OPTIONS=halt_on_error=1 build/test-event-poll
     # A draw waiting for its shader (OPTICS_EXEC_BUSY) leaves the device lock free; its compile's completion runs it once.
     clang $CF -g -fsanitize=thread tests/optics-draw-defer.c $CORE -o build/test-optics-draw-defer
     TSAN_OPTIONS=halt_on_error=1 build/test-optics-draw-defer 2>build/test-optics-draw-defer.log || { cat build/test-optics-draw-defer.log; exit 1; }
+    # A GPU wait inside an executor call on the CP thread leaves the device lock free; `held` is the negative control.
+    clang $CF -g -fsanitize=thread tests/optics-gpu-wait.c $CORE -o build/test-optics-gpu-wait
+    TSAN_OPTIONS=halt_on_error=1 build/test-optics-gpu-wait 2>build/test-optics-gpu-wait.log || { cat build/test-optics-gpu-wait.log; exit 1; }
+    TSAN_OPTIONS=halt_on_error=1 build/test-optics-gpu-wait held 2>>build/test-optics-gpu-wait.log || { cat build/test-optics-gpu-wait.log; exit 1; }
     # Fast VRAM on real HVF stage-2 protection; the argument run bypasses the protection (negative control).
     clang $CF tests/optics-guard-hvf.c $CORE "$P/cpu_access.c" "$P/cpu_guard.c" -framework Hypervisor -o build/test-optics-guard-hvf
     codesign --force --sign - --entitlements "$E"/hv.entitlements build/test-optics-guard-hvf

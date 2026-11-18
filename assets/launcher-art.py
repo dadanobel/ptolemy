@@ -3,10 +3,45 @@
 """The launcher art, regenerated with python3 launcher-art.py (in assets/; numpy + Pillow). Original procedural
 textures, no source images: launcher-fur.jpg (tiger-like fur), launcher-leopard.jpg (leopard-like fur), launcher-metal.jpg
 (brushed metal); mark-glass.png is
-mark-transparent-1024.png turned into translucent dark glass with a light rim."""
+mark-transparent-1024.png turned into translucent dark glass with a light rim; tile-tiger.png and tile-leopard.png are
+the list's tiles (tiles() below)."""
+
+import sys
 
 import numpy as np
 from PIL import Image, ImageFilter
+
+
+def tiles():
+    """The list's tiles (tile-tiger.png, tile-leopard.png): the system's fur in a brushed-metal bezel, a rounded square
+    with its own alpha, cut from the files this script makes. Original drawing: no system artwork, no letter, no logo.
+    256 px, shown at 40 to 132 points. `python3 launcher-art.py tiles` makes only these two."""
+    n, bezel, radius = 256, 13, 54
+    yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
+
+    def rounded(inset, r):  # coverage of a rounded square inset from the edge, antialiased
+        q = np.maximum(np.abs(np.stack([xx, yy]) - (n - 1) / 2) - ((n - 1) / 2 - inset - r), 0)
+        return np.clip(r - np.hypot(q[0], q[1]) + 0.5, 0, 1)
+
+    outer, inner = rounded(1, radius), rounded(bezel, radius - bezel)
+    streak = np.asarray(Image.open('launcher-metal.jpg').convert('L').resize((n, n), Image.LANCZOS), np.float32) / 255
+    rim = (0.50 + 0.42 * (1 - yy / n) + (streak - 0.5) * 0.35)[..., None] * np.array([0.97, 0.98, 1.0])
+    shade = np.clip(1.08 - 0.55 * np.hypot(xx / n - 0.42, yy / n - 0.36), 0.55, 1.1)[..., None]  # light from above left
+    groove = np.clip(rounded(bezel - 2.5, radius - bezel + 2.5) - inner, 0, 1)[..., None]  # the dark seam inside the bezel
+    gloss = (np.clip(1 - yy / (n * 0.46), 0, 1) ** 1.6 * 0.20 * inner)[..., None]  # a sheet of light over the upper half
+    for fur, name, crop in (
+        ('launcher-fur.jpg', 'tile-tiger.png', (330, 150, 830, 650)),
+        ('launcher-leopard.jpg', 'tile-leopard.png', (300, 200, 720, 620)),
+    ):
+        f = np.asarray(Image.open(fur).convert('RGB').crop(crop).resize((n, n), Image.LANCZOS), np.float32) / 255
+        rgb = rim * (1 - inner[..., None]) + f * shade * inner[..., None]
+        rgb = rgb * (1 - groove * 0.75) + gloss
+        Image.fromarray((np.dstack([np.clip(rgb, 0, 1), outer]) * 255).astype(np.uint8)).save(name)
+
+
+if sys.argv[1:] == ['tiles']:
+    tiles()
+    sys.exit()
 
 W, H = 1200, 800
 y, x = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -146,3 +181,4 @@ col = col * (1 - ink) + dark * ink
 Image.fromarray((np.clip(col.transpose(1, 2, 0), 0, 1) * 255).astype(np.uint8)).filter(
     ImageFilter.GaussianBlur(0.5)
 ).save('launcher-leopard.jpg', quality=86)
+tiles()

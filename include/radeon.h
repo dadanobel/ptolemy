@@ -56,7 +56,9 @@ void pt_radeon_config(PtRadeon *, const uint8_t pci[256], const PtAgp *);
 int pt_radeon_mmio(PtRadeon *, uint32_t offset, uint8_t *, unsigned, int write);
 int pt_radeon_vram(PtRadeon *, uint32_t offset, uint8_t *, unsigned, int write);
 int pt_radeon_port(PtRadeon *, unsigned port, uint8_t *, unsigned, int write);
-void pt_radeon_service(PtRadeon *, uint64_t guest_ns);
+/* Returns when the next call is due, guest time: in a millisecond while the CP has work or waits, or a frame is to be
+ * published; otherwise at the next 60 Hz event (vertical blank, scanout publication). */
+uint64_t pt_radeon_service(PtRadeon *, uint64_t guest_ns);
 /* CPU owner: one line of executed/refused work, fences, frames and failures (at exit). */
 void pt_radeon_stats(PtRadeon *, FILE *);
 int pt_radeon_reset(PtRadeon *);

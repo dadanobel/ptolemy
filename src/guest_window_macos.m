@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* The window that shows the guest: its menus (Machine, Media, View), pause, and the button that captures the mouse. */
 #import "guest_window_macos.h"
 @implementation PTGuestWindow {
     __weak id<PTGuestWindowActions> _actions;
@@ -90,13 +91,13 @@
         force = [self item:@"Force Shut Down" selector:@selector(force:) menu:_machineMenu tag:0];
         force.keyEquivalentModifierMask = NSEventModifierFlagOption;
         force.alternate = YES;
-        [self item:@"Force Quit in Tiger…" selector:@selector(forceQuit:) menu:_machineMenu tag:0];
+        [self item:[NSString stringWithFormat:@"Force Quit in %@…", PTGuestName()] selector:@selector(forceQuit:) menu:_machineMenu tag:0];
         _mediaMenu = [[NSMenu alloc] initWithTitle:@"Media"];
         [self item:@"Insert Disk Image…" selector:@selector(insert:) menu:_mediaMenu tag:0];
         [self item:@"Eject CD/DVD" selector:@selector(eject:) menu:_mediaMenu tag:0];
         [self item:@"Eject Disk Image" selector:@selector(eject:) menu:_mediaMenu tag:1];
-        [self item:@"Send Files to Tiger…" selector:@selector(files:) menu:_mediaMenu tag:0];
-        [self item:@"Get Files from Tiger…" selector:@selector(export:) menu:_mediaMenu tag:0];
+        [self item:@"Send Files to Ptolemy…" selector:@selector(files:) menu:_mediaMenu tag:0];
+        [self item:@"Get Files from Ptolemy…" selector:@selector(export:) menu:_mediaMenu tag:0];
         _viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
         NSMenuItem *fullscreen = [self item:@"Full Screen" selector:@selector(fullscreen:) menu:_viewMenu tag:0];
         fullscreen.keyEquivalent = @"f";

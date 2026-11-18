@@ -18,6 +18,7 @@ void pt_nvram_init(PtNvram *);
 /* Rebuilds a damaged Open Firmware view with default partitions; 1 when it did. */
 int pt_nvram_repair_of(PtNvram *);
 int pt_nvram_set_of(PtNvram *, const char *name, const char *value);
+int pt_nvram_get_of(const PtNvram *, const char *name, char *value, size_t size); /* 0, or ENOENT */
 int pt_nvram_platform_uuid(PtNvram *); /* Leopard's platform-uuid in the guest bank, once: 1 added, 0 present */
 int pt_nvram_flash_enable(PtNvram *); /* Core99 command transport; preserves the firmware view. */
 enum {

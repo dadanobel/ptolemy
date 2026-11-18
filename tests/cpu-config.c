@@ -30,16 +30,17 @@ int main(void) {
         int expected = k == 2;
         assert(!!nolink == expected && !!nojc == expected && !!fp_old == expected && !!fma_fast == expected);
     }
-    const char *fast[] = {"PT_FMA_FAST",  "PT_FP_ROUND_FAST", "PT_FP_HOIST", "PT_FP_LAZY",   "PT_FP_MORE",
-                          "PT_FPR_CACHE", "PT_VMX_NEON",      "PT_VMX_INT2", "PT_VMX_MHADD", "PT_VMX_FP2"};
+    const char *fast[] = {"PT_FMA_FAST", "PT_FP_ROUND_FAST", "PT_FP_HOIST",    "PT_FP_LAZY",  "PT_FP_MORE",   "PT_FPR_CACHE",
+                          "PT_CR_FUSE",  "PT_VMX_NEON",      "PT_VMX_INT2",    "PT_VMX_MHADD", "PT_VMX_FP2"};
     const uint32_t pvr[] = {0x00080301, 0x000c0209, 0x80030102};
     unsetenv("PT_FP_OLD");
     unsetenv("PT_NOLINK");
     unsetenv("PT_NOJC");
     for (unsigned model = 0; model < 3; model++)
         for (unsigned mode = 0; mode < 5; mode++) {
-            for (unsigned n = 0; n < 10; n++)
+            for (unsigned n = 0; n < 11; n++)
                 unsetenv(fast[n]);
+            unsetenv("PT_FP_DIRECTED");
             unsetenv("PT_CPU_FAST");
             if (mode == 1)
                 setenv("PT_CPU_FAST", "0", 1);
@@ -53,10 +54,11 @@ int main(void) {
             init(&c);
             assert(fma_fast == enabled && fp_hoist_enabled == enabled && fp_lazy_enabled == enabled);
             assert(fp_round_fast == enabled && fp_more_enabled == enabled && fcache_enabled == (enabled && mode != 4));
+            assert(!!cr_fuse == enabled && fp_directed_enabled == enabled);
             assert(vmx_neon_enabled == (enabled && model != 0));
             assert(!!(jmsr & MSR_VEC) == (model != 0));
             if (!model)
-                for (unsigned n = 6; n < 10; n++)
+                for (unsigned n = 7; n < 11; n++)
                     assert(!getenv(fast[n]));
         }
     puts("CPU config: unset/0/1 through real init PASS");

@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Keyboard and pointer events from the Mac's window to the guest: a queue from the window's thread to the CPU owner,
+ * which feeds them to the USB keyboard, tablet and mouse. */
 #include "input.h"
 #include <string.h>
 void pt_input_init(PtInputQueue *q, PtEvent *wake, _Atomic uint32_t *kick) {

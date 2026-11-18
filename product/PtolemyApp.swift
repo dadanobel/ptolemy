@@ -2,37 +2,13 @@
 import AppKit
 import UniformTypeIdentifiers
 
-final class InstallerDropView: NSView {
-    var selected: ((URL) -> Void)?
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        registerForDraggedTypes([.fileURL])
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-            ? .copy : []
-    }
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard
-            let urls = sender.draggingPasteboard.readObjects(
-                forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], urls.count == 1
-        else { return false }
-        selected?(urls[0])
-        return true
-    }
-}
 /* The machines are always listed; the selected one has one large button whose words say what it does now (Start Tiger, Show Tiger's Window,
- * Continue Installation, Finish Setup); a new machine is made in its own sheet. Look: Launcher.swift. */
-final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private var window: NSWindow!, library: ProductLibrary!, view: LauncherView!, sheet: NSWindow?
+ * Continue Installation, Finish Setup); a new machine is made in its own sheet. The window, its look and the sheets: Launcher.swift. */
+final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSDraggingDestination, NSUserInterfaceValidations {
+    private var window: NSWindow!, library: ProductLibrary!, ui: MainWindow!, form: NewMachineForm?
     private var urls = [URL](), items = [Installation?](), index = 0, installer: URL?, identity: InstallerIdentity?,
         message = ""
-    private let name = NSTextField(string: "Tiger"),
-        chosen = NSTextField(wrappingLabelWithString: "Choose a Tiger or Leopard install DVD image (or drop it here)."),
-        diskLabel = NSTextField(labelWithString: "40 GB")
-    private let slider = NSSlider(value: 40, minValue: 8, maxValue: 120, target: nil, action: nil)
-    private var links = [NSButton](), busy = false, quitting = false, running: URL?, started: Date?
+    private var busy = false, quitting = false, running: URL?, started: Date?
     private let lock = NSLock()
     private var process: Process?, cancelled = false
     private var resources: ProductResources { ProductResources(root: Bundle.main.resourceURL!) }
@@ -43,65 +19,17 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         NSApp.setActivationPolicy(.regular)
-        NSApp.appearance = NSAppearance(named: .darkAqua)
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered,
-            defer: false)
-        window.title = "Ptolemy"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.backgroundColor = .black
-        window.isReleasedWhenClosed = false
+        ui = MainWindow(target: self)
+        window = ui.window
         window.delegate = self
-        window.minSize = NSSize(width: 900, height: 600)
         window.center()
-        let drop = InstallerDropView(frame: NSRect(x: 0, y: 0, width: 1120, height: 720))
-        drop.selected = { [weak self] url in
-            self?.newMachine()
-            self?.choose(url)
-        }
-        view = makeView()
-        view.frame = drop.bounds
-        view.autoresizingMask = [.width, .height]
-        drop.addSubview(view)
-        window.contentView = drop
-        let menu = NSMenu()
-        let app = NSMenuItem()
-        app.submenu = NSMenu()
-        app.submenu?.addItem(
-            withTitle: "Quit Ptolemy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        menu.addItem(app)
-        NSApp.mainMenu = menu
+        window.setFrameAutosaveName("PtolemyLauncher")
+        ui.sidebar.selected = { [weak self] i in self?.select(i) }
+        NSApp.mainMenu = mainMenu(target: self)
         _ = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.updateCard() }
         reload()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-    func makeView() -> LauncherView {
-        func link(_ t: String, _ a: Selector) -> NSButton {
-            let b = linkButton(t, target: self, action: a)
-            links.append(b)
-            return b
-        }
-        let tiles: [[NSControl]] = [
-            [
-                Art.label("Shared with the Mac", 11, bold: true, color: Art.dim),
-                Art.label("Clipboard, dropped files, sound", 12),
-            ],
-            [
-                Art.label("Network", 11, bold: true, color: Art.dim), Art.label("On", 12),
-                linkButton("Web Pages…", target: self, action: #selector(aboutWeb)),
-            ],
-            [
-                Art.label("Machine", 11, bold: true, color: Art.dim), link("Settings…", #selector(settings)),
-                linkButton("Show in Finder", target: self, action: #selector(reveal)),
-                link("Move to Trash…", #selector(remove)),
-            ],
-        ]
-        return LauncherView(
-            target: self, primary: #selector(primaryAction), newMachine: #selector(newMachine),
-            select: #selector(selectMachine(_:)), tiles: tiles)
     }
     private func reload() {
         do {
@@ -112,88 +40,88 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refresh()
     }
     private func refresh() {
-        guard view != nil else { return }
-        view.setMachines(
-            urls.indices.map { i -> Machine in
+        guard ui != nil else { return }
+        ui.sidebar.set(
+            urls.indices.map { i -> RowModel in
                 let item = items[i]
                 let live = running == urls[i]
-                let detail =
+                let state =
                     live
                     ? "Running"
                     : item?.phase == .ready
                         ? "Stopped" : item?.phase == .toolsPending ? "Setup: step 2 of 3" : "Installing: step 1 of 3"
-                return (
-                    item?.name ?? "Tiger", detail, item?.installerIdentity.version ?? "?", live,
-                    item?.phase == .installer
-                )
+                return RowModel(
+                    guest: item.map { Guest($0.installerIdentity) }, name: item?.name ?? "Unreadable machine",
+                    system: item.map { "\(Art.fullName($0.shownIdentity)) (\($0.shownIdentity.build))" } ?? "",
+                    state: state, running: live)
             }, selected: index)
         updateCard()
     }
     private func updateCard() {
-        guard view != nil else { return }
-        let v = view!
+        guard ui != nil else { return }
         let has = urls.indices.contains(index)
         let live = has && running == urls[index]
         let item: Installation? = has ? items[index] : nil
-        let status: String
-        let name: String
-        let specs: String
-        let note: String
+        var m = StageModel()
+        m.busy = busy && running == nil
+        m.actionsEnabled = has && !busy
         if let item = item {
             let minutes = started.map { Int(Date().timeIntervalSince($0) / 60) } ?? 0
             let cpu = cpus.first(where: { $0.id == item.cpu })?.name ?? item.cpu
-            status =
+            let sys = item.installerIdentity.system
+            m.guest = Guest(item.installerIdentity)  // the look follows the selected machine's system
+            m.status =
                 live
                 ? (minutes < 1 ? "Running" : "Running for \(minutes) minute\(minutes == 1 ? "" : "s")")
                 : item.phase == .ready
                     ? "Ready"
                     : item.phase == .toolsPending ? "Setup: Ptolemy Tools are next" : "Installation not finished"
-            name = item.name
-            specs =
-                "Mac OS X \(item.installerIdentity.version) · PowerPC \(cpu)\n\(item.ram >= 1024 && item.ram % 1024 == 0 ? "\(item.ram / 1024) GB" : "\(item.ram) MB") memory · \(item.diskGiB) GB disk"
-            let sys = item.installerIdentity.system
-            v.primary.title =
+            m.name = item.name
+            m.system = "\(Art.fullName(item.shownIdentity)) (\(item.shownIdentity.build))"
+            m.specs =
+                "PowerPC \(cpu) · \(item.ram >= 1024 && item.ram % 1024 == 0 ? "\(item.ram / 1024) GB" : "\(item.ram) MB") memory · \(item.diskGiB) GB disk"
+            m.primary =
                 live
                 ? "Show \(sys)’s Window"
                 : item.phase == .ready
                     ? "Start \(sys)" : item.phase == .toolsPending ? "Finish Setup" : "Continue Installation"
-            v.primary.isEnabled = live ? process != nil : !busy
-            note =
+            m.primaryEnabled = live ? process != nil : !busy
+            m.note =
                 live
                 ? "To stop, shut down from \(sys)’s Apple menu."
                 : busy && running != nil ? "Another machine is running." : message
         } else if has {
-            status = "Unreadable"
-            name = "Tiger"
-            specs = "This machine’s settings could not be read."
-            note = message
-            v.primary.title = "Start Tiger"
-            v.primary.isEnabled = false
+            m.guest = .tiger
+            m.status = "Unreadable"
+            m.name = "Unreadable machine"
+            m.specs = "This machine’s settings could not be read."
+            m.note = message
+            m.primary = "Start"
+            m.primaryEnabled = false
+            m.actionsEnabled = false
         } else {
-            status = "Welcome"
-            name = "No machines yet"
-            specs = "Drop a Tiger or Leopard install DVD image onto this window,\nor choose New Machine…"
-            note = message
-            v.primary.title = "New Machine…"
-            v.primary.isEnabled = !busy
+            m.status = "Welcome"
+            m.name = "No machines yet"
+            m.specs = "Drop a Tiger or Leopard install DVD image onto this window, or choose New Machine…"
+            m.note = message
+            m.primary = "New Machine…"
+            m.primaryEnabled = !busy
         }
-        let leopard = item?.installerIdentity.system == "Leopard"  // the look follows the selected machine's system
-        if leopard != Art.leopard {
-            Art.leopard = leopard
-            v.tiles.flatMap { $0.subviews }.compactMap { $0 as? NSButton }.forEach(styleLink)
-            v.rows.forEach { $0.needsDisplay = true }
-            v.hero.needsDisplay = true
-            v.primary.needsDisplay = true
+        primaryEnabled = m.primaryEnabled
+        ui.stage.show(m)
+        ui.setPrimary(m.primary, showsWindow: live)
+        NSApp.mainMenu?.item(withTitle: "Machine")?.submenu?.item(at: 0)?.title = m.primary
+    }
+    private var primaryEnabled = true
+    /* Menu commands and toolbar items are enabled as the stage's buttons are. */
+    func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(primaryAction): return primaryEnabled
+        case #selector(newMachine): return !busy && form == nil
+        case #selector(settings), #selector(remove): return selected != nil && !busy
+        case #selector(reveal): return selected != nil
+        default: return true
         }
-        Art.set(v.status, status, 11, bold: true, color: Art.accent)
-        Art.set(v.name, name, 34, bold: true)
-        Art.set(v.specs, specs, 12, color: Art.rgb(0xcfc9bf))
-        Art.set(v.note, note, 11, color: Art.dim)
-        v.newMachine.isEnabled = !busy
-        links.forEach { $0.isEnabled = has && !busy }
-        if busy && running == nil { v.spinner.startAnimation(nil) } else { v.spinner.stopAnimation(nil) }
-        v.needsLayout = true
-        v.needsDisplay = true
     }
     private var selected: URL? { urls.indices.contains(index) ? urls[index] : nil }
     private func system(_ folder: URL?) -> String {
@@ -229,12 +157,12 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
     }
-    @objc private func selectMachine(_ sender: NSControl) {
-        index = sender.tag
+    private func select(_ i: Int) {
+        index = i
         message = ""
-        refresh()
+        updateCard()
     }
-    @objc private func primaryAction() {
+    @objc func primaryAction() {
         guard let folder = selected else {
             newMachine()
             return
@@ -251,79 +179,43 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try self.run(folder)
         }
     }
-    @objc private func aboutWeb() {
+    @objc func aboutWeb() {
         let a = NSAlert()
         a.messageText = "Web pages in Tiger and Leopard"
         a.informativeText =
             "The browsers of Tiger and Leopard can no longer open most of today’s secure sites. To help them, your Mac fetches http:// pages for them over a secure HTTPS connection whenever the site offers one, and adjusts them a little (links, newer picture formats) so the old browsers can show them. All of this happens on this Mac and nothing is sent anywhere else: the sites are reached the same way as when you browse on your Mac. Browsers that handle https:// themselves, such as PowerFox, connect directly."
         a.beginSheetModal(for: window)
     }
-    @objc private func reveal() { if let f = selected { NSWorkspace.shared.activateFileViewerSelecting([f]) } }
+    @objc func reveal() { if let f = selected { NSWorkspace.shared.activateFileViewerSelecting([f]) } }
     /* New machine: its own sheet (install image, name, disk size). */
-    @objc private func newMachine() {
-        guard !busy, sheet == nil else { return }
+    @objc func newMachine() {
+        guard !busy, form == nil else { return }
         installer = nil
         identity = nil
-        chosen.stringValue = "Choose a Tiger or Leopard install DVD image (or drop it onto the window)."
-        let s = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 236), styleMask: [.titled], backing: .buffered,
-            defer: false)
-        s.appearance = NSAppearance(named: .darkAqua)
-        let title = Art.label("New Machine", 13, bold: true)
-        let choose = NSButton(title: "Choose Install DVD…", target: self, action: #selector(pick))
-        slider.target = self
-        slider.action = #selector(diskChanged)
-        diskLabel.stringValue = "\(Int(slider.doubleValue)) GB"
-        [chosen, diskLabel].forEach { $0.font = Art.font(11) }
-        name.font = Art.font(13)
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(closeSheet))
-        let create = NSButton(title: "Create and Install", target: self, action: #selector(create))
-        create.keyEquivalent = "\r"
-        cancel.keyEquivalent = "\u{1b}"
-        [choose, cancel, create].forEach { $0.font = Art.font(13) }
-        let row = NSStackView(views: [Art.label("Name", 13), name])
-        row.spacing = 10
-        name.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        let disk = NSStackView(views: [Art.label("Disk", 13), slider, diskLabel])
-        disk.spacing = 10
-        slider.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        let buttons = NSStackView(views: [cancel, create])
-        buttons.spacing = 10
-        let stack = NSStackView(views: [title, NSStackView(views: [choose, chosen]), row, disk, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 20, right: 22)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        s.contentView = NSView()
-        s.contentView!.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: s.contentView!.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: s.contentView!.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: s.contentView!.topAnchor),
-            buttons.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -22),
-        ])
-        chosen.preferredMaxLayoutWidth = 280
-        sheet = s
-        window.beginSheet(s)
+        let f = NewMachineForm()
+        f.choose = { [weak self] in self?.pick() }
+        f.create = { [weak self] in self?.create() }
+        f.cancel = { [weak self] in self?.closeSheet() }
+        form = f
+        window.beginSheet(f.window)
     }
-    @objc private func closeSheet() {
-        if let s = sheet {
-            window.endSheet(s)
-            sheet = nil
+    private func closeSheet() {
+        if let f = form {
+            window.endSheet(f.window)
+            form = nil
         }
     }
-    @objc private func pick() {
+    private func pick() {
         guard !busy else { return }
         let p = NSOpenPanel()
         p.title = "Choose a PowerPC Tiger or Leopard Install DVD Image"
         p.allowedContentTypes = [.diskImage, UTType(filenameExtension: "iso") ?? .data]
         p.allowsMultipleSelection = false
-        p.beginSheetModal(for: sheet ?? window) { if $0 == .OK, let url = p.url { self.choose(url) } }
+        p.beginSheetModal(for: form?.window ?? window) { if $0 == .OK, let url = p.url { self.choose(url) } }
     }
     private func choose(_ url: URL) {
         guard !busy else { return }
-        chosen.stringValue = "Checking \(url.lastPathComponent)…"
+        form?.chosen.stringValue = "Checking \(url.lastPathComponent)…"
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try regular(url)
@@ -333,28 +225,25 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async {
                     self.installer = url
                     self.identity = identity
-                    if ["Tiger", "Leopard"].contains(self.name.stringValue) { self.name.stringValue = identity.system }
-                    self.chosen.stringValue = "Mac OS X \(identity.version) for PowerPC · \(url.lastPathComponent)"
+                    guard let f = self.form else { return }
+                    if ["Tiger", "Leopard"].contains(f.name.stringValue) { f.name.stringValue = identity.system }
+                    f.chosen.stringValue = "\(Art.fullName(identity)) (\(identity.build)) for PowerPC · \(url.lastPathComponent)"
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.chosen.stringValue = "Not a PowerPC Tiger or Leopard install DVD: \(error)"
+                    self.form?.chosen.stringValue = "Not a PowerPC Tiger or Leopard install DVD: \(error)"
                 }
             }
         }
     }
-    @objc private func diskChanged() {
-        slider.doubleValue = slider.doubleValue.rounded()
-        diskLabel.stringValue = "\(Int(slider.doubleValue)) GB"
-    }
-    @objc private func create() {
-        guard let url = installer, let identity = identity else {
+    private func create() {
+        guard let url = installer, let identity = identity, let f = form else {
             pick()
             return
         }
         var item = Installation(installer: url.path, installerIdentity: identity)
-        item.name = name.stringValue
-        item.diskGiB = Int(slider.doubleValue)
+        item.name = f.name.stringValue
+        item.diskGiB = Int(f.slider.doubleValue)
         closeSheet()
         work {
             try self.resources.validate()
@@ -386,6 +275,8 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let target = try ImageMount(
                         image: folder.appendingPathComponent("Tiger.sparsebundle"), readOnly: false)
                     try ToolsPreinstaller.install(volume: target.volume, medium: medium.volume)
+                    item.systemIdentity = try? validateSystemVolume(target.volume, installer: false)
+                    item.toolsDigest = try? resources.toolsDigest()
                     try target.close()
                     try medium.close()
                 } catch {
@@ -405,11 +296,27 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 _ = try validateSystemVolume(optical!.volume)
             }
             try ImageMount.requireDetached(folder.appendingPathComponent("Tiger.sparsebundle"))
+            /* Silent Tools update (owner, 17.11): a machine whose disk has other Tools than this Ptolemy carries gets them
+             * before it starts - the files on the disk now, the guest's own install at the next login, with no question. A
+             * failure only leaves the earlier Tools: the machine starts anyway. Before ensureBundleV1: a writable attach. */
+            if item.phase == .ready, item.toolsDigest != (try? resources.toolsDigest()) {
+                state("Updating Ptolemy Tools…")
+                do {
+                    _ = try updateTools(folder, &item, resources)
+                    state("")
+                } catch {
+                    state("Ptolemy Tools were not updated (\(error)); \(item.installerIdentity.system) starts with the Tools it has.")
+                }
+            }
+            if item.phase == .ready, try ensureBundleV1(folder.appendingPathComponent("Tiger.sparsebundle")) {
+                state("The disk had been opened in Finder; Ptolemy converted it back.")
+            }
             let child = Process()
             child.executableURL = resources.engine
             child.arguments = resources.arguments(
                 item, folder, cd: optical.map { $0.device.replacingOccurrences(of: "/dev/disk", with: "/dev/rdisk") })
-            child.environment = resources.environment(item.phase)
+            child.environment = resources.environment(item.phase, item)
+            child.environment?["PT_GUEST_SYSTEM"] = item.installerIdentity.system  // the engine's menus and messages name it
             let (logURL, log) = try openSessionLog(folder)
             child.standardOutput = log
             child.standardError = log
@@ -463,35 +370,22 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 child.terminationReason == .exit && child.terminationStatus == 0,
                 "\(item.installerIdentity.system) stopped unexpectedly. The disk is kept; see \(logURL.lastPathComponent)."
             )
+            if item.phase == .ready, let id = try? installedIdentity(folder),
+                id.version != item.systemIdentity?.version || id.build != item.systemIdentity?.build
+            {
+                item.systemIdentity = id  // an update installed in the guest shows in the window
+                try? item.save(folder)
+            }
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent("Tiger-v2.sparsebundle"))  // U1: started and stopped normally
             state(item.phase == .ready ? "" : "Installation paused. Continue Installation resumes it.")
             return
         }
     }
-    @objc private func settings() {
+    @objc func settings() {
         guard !busy, let folder = selected else { return }
         do {
             var item = try Installation.load(folder)
-            let alert = NSAlert()
-            alert.messageText = "Settings for \(item.name)"
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Cancel")
-            if item.phase != .ready { alert.addButton(withTitle: "Resume Installer") }
-            let cpu = NSPopUpButton()
-            cpu.addItems(withTitles: cpus.map { $0.name })
-            cpu.selectItem(at: cpus.firstIndex(where: { $0.id == item.cpu })!)
-            let ram = NSPopUpButton()
-            ram.addItems(withTitles: stride(from: 512, through: 2048, by: 64).map(String.init))
-            ram.selectItem(withTitle: String(item.ram))
-            let disk = NSTextField(string: String(item.diskGiB))
-            let stack = NSStackView(views: [
-                NSTextField(labelWithString: "Processor"), cpu, NSTextField(labelWithString: "Memory (MB)"), ram,
-                NSTextField(labelWithString: "Disk (GB, increase only)"), disk,
-            ])
-            stack.orientation = .vertical
-            stack.alignment = .leading
-            stack.spacing = 8
-            stack.frame = NSRect(x: 0, y: 0, width: 360, height: 220)
-            alert.accessoryView = stack
+            let (alert, cpu, ram, disk) = settingsAlert(item)
             alert.beginSheetModal(for: window) { response in
                 if response == .alertThirdButtonReturn {
                     self.work {
@@ -507,7 +401,7 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return
                 }
                 guard response == .alertFirstButtonReturn else { return }
-                item.cpu = cpus[cpu.indexOfSelectedItem].id
+                item.cpu = cpuChoices(item)[cpu.indexOfSelectedItem].id
                 item.ram = Int(ram.titleOfSelectedItem!)!
                 guard let size = Int(disk.stringValue), size >= item.diskGiB && size <= 120 else {
                     self.show(InstallError("Disk size must stay the same or increase, up to 120 GB"))
@@ -527,7 +421,7 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         } catch { show(error) }
     }
-    @objc private func remove() {
+    @objc func remove() {
         guard !busy, let folder = selected else { return }
         let a = NSAlert()
         a.messageText = "Move this \(system(folder)) machine to the Trash?"
@@ -563,6 +457,27 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             state("Waiting for \(sys) to shut down…")
         }
         return .terminateCancel
+    }
+    /* An install image dropped anywhere on the window starts a new machine with it. */
+    private func droppedImage(_ info: NSDraggingInfo) -> URL? {
+        let urls =
+            info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            as? [URL]
+        return urls?.count == 1 && !busy ? urls?[0] : nil
+    }
+    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard droppedImage(sender) != nil else { return [] }
+        ui.stage.dropTarget = true
+        return .copy
+    }
+    func draggingExited(_ sender: NSDraggingInfo?) { ui.stage.dropTarget = false }
+    func draggingEnded(_ sender: NSDraggingInfo) { ui.stage.dropTarget = false }
+    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        ui.stage.dropTarget = false
+        guard let url = droppedImage(sender) else { return false }
+        newMachine()
+        choose(url)
+        return true
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if busy {

@@ -51,9 +51,9 @@ static void pic_tests(void) {
     pt_pic_line(&p, 3, 0, 1);
     assert(pt_pic_read(&p, 0x200a0) == 0x43);
     pt_pic_write(&p, 0x200b0, 0);
-    assert(p.servicing == (1ull << 1));
+    assert(p.servicing[0] == (1ull << 1)); /* CPU 0 (dg4-01) */
     pt_pic_write(&p, 0x200b0, 0);
-    assert(!p.servicing);
+    assert(!p.servicing[0]);
     /* An edge arriving in service survives until EOI. */
     pt_pic_line(&p, 1, 0, 0);
     pt_pic_line(&p, 1, 0, 1);

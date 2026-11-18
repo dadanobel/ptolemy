@@ -9,6 +9,7 @@ static hv_return_t sink_ttbr(hv_vcpu_t v, hv_sys_reg_t r, uint64_t x) {
 #define hv_vcpu_set_sys_reg sink_ttbr
 #define PT_NO_MAIN
 #include "../epicycle/hvf.c"
+#include "../epicycle/smp.c" /* the CPUs' lock: one CPU here, every call returns at once */
 #include <assert.h>
 int jit_stats_on;
 static uint64_t entry(unsigned segment, unsigned pr, uint32_t ea) {

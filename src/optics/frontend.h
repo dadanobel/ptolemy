@@ -31,6 +31,8 @@ typedef struct {
     int failed; /* GPU/export failure: the CP stopped; only a device reset clears it */
 } OpticsFrontendStats;
 void optics_frontend_stats(const PtRadeon *, OpticsFrontendStats *);
+/* Called at the frame that ends a stall (a gap of 100 ms or more while frames stream), on the publishing thread. */
+extern void (*optics_frontend_stall_hook)(uint64_t gap_ns);
 /* Fixed ABI diagnostics, sampled on the CPU owner. A missing device reports DISABLED. */
 void optics_frontend_status(PtRadeon *, OpticsStatus *);
 #include "executor.h"

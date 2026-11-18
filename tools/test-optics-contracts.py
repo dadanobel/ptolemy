@@ -12,7 +12,6 @@ b = s / 'build/contracts'
 b.mkdir(parents=True, exist_ok=True)
 env = dict(
     os.environ,
-    OPTICS_EXACT_PITCH='0',
     OPTICS_DEPTH_CAPACITY='0',
     OPTICS_DEPTH_IO='0',
     OPTICS_2D_CONTRACT='0',
@@ -88,7 +87,7 @@ def test(name, extra=None, negative=None, args=(), cpp=False):
 
 
 run(flags + ['-std=c11', '-c', s / 'src/platform.c', '-o', b / 'platform.o'])
-test('optics-color-pitch', {'OPTICS_EXACT_PITCH': '1'}, {'OPTICS_EXACT_PITCH': '0'})
+test('optics-color-pitch')
 test('optics-draw-cleanup')
 test('optics-draw-decode')
 test('optics-2d-contract', {'OPTICS_2D_CONTRACT': '1'}, {'OPTICS_2D_CONTRACT': '0'})

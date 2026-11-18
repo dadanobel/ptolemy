@@ -5,6 +5,7 @@
 #include "input.h"
 #include "ohci.h"
 #include "usb_msc.h"
+#include "usb_uvc.h"
 #include "audio.h"
 #include "pmu.h"
 typedef struct PtDevices PtDevices;
@@ -25,6 +26,8 @@ struct PtDevices {
     PtBlock *block;
     PtScsi optical;
     PtUsbMsc storage;
+    PtUsbUvc camera; /* PT_CAMERA=1: on the fifth port of the root hub; otherwise not attached */
+    int camera_on;
     PtHid hid[3];
     PtOhci usb;
     PtPcm pcm;

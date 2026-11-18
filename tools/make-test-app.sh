@@ -18,6 +18,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Ptolemy Radeon Test</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSCameraUsageDescription</key><string>Ptolemy shows this Mac's camera to Mac OS X as a USB camera while a program there uses it.</string>
 <key>CFBundleIconFile</key><string>Ptolemy</string>
 </dict></plist>
 PLIST

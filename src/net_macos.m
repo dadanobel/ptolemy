@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* The optional vmnet network backend (shared mode, the network-shared option). The default network needs no
+ * privileges: user-mode NAT in net_user.c. */
 #import <Foundation/Foundation.h>
 #include "net.h"
 #include "net_stream.h"

@@ -664,14 +664,9 @@ static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
         d->stencil_back[3] = zs >> 21 & 7;
     } else
         memcpy(d->stencil_back, d->stencil_op, 4);
-    static int exact_pitch = -1;
-    if (exact_pitch < 0) {
-        const char *v = getenv("OPTICS_EXACT_PITCH");
-        exact_pitch = v && atoi(v) != 0;
-    }
-    /* R3xx CB:COLORPITCH 13:1 encodes two-pixel units; bits 2:1 are not padding. */
+    /* R3xx CB:COLORPITCH 13:1 encodes two-pixel units; bits 2:1 are not padding (R3xx 3D Registers, p. 14). */
     d->cb_offset = R(RB3D_COLOROFFSET0) & ~31u;
-    d->cb_pitch = pitch & (exact_pitch ? 0x3ffeu : 0x1ff8u);
+    d->cb_pitch = pitch & 0x3ffeu;
     if (!d->cb_pitch)
         return refuse(reason, "zero colour pitch");
     uint32_t tl = R(SC_SCISSORS_TL), br = R(SC_SCISSORS_BR);

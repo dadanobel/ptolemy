@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* USB mass storage (Bulk-Only Transport): command and status wrappers around the SCSI disk model (scsi.c). This is
+ * the USB volume a user attaches to a machine. */
 #include "usb_msc.h"
 #include <errno.h>
 #include <string.h>
@@ -33,6 +35,7 @@ static int nd_msc_setup(PtUsbMsc *u, const uint8_t *p, unsigned n) {
         return PT_USB_STALL;
     memcpy(u->setup, p, 8);
     u->control_position = u->control_length = 0;
+    u->control_phase = 0; /* a refused request leaves no stage of the one before it */
     memset(u->control, 0, sizeof u->control);
     unsigned type = p[0], req = p[1], value = (unsigned)pt_read_le(p + 2, 2), index = (unsigned)pt_read_le(p + 4, 2),
              limit = (unsigned)pt_read_le(p + 6, 2);

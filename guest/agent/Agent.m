@@ -26,6 +26,8 @@
 - (void)toggle:(id)sender;
 - (void)guestSleep:(id)sender;
 - (void)show:(id)sender;
+- (void)antiochus:(id)sender;
+- (void)rosettast:(id)sender;
 - (void)poll:(NSTimer *)sender;
 @end
 @implementation PtolemyAgent
@@ -104,6 +106,14 @@
     [show setTarget:self];
     NSMenuItem *stop = [menu addItemWithTitle:@"Enable / Stop" action:@selector(toggle:) keyEquivalent:@""];
     [stop setTarget:self];
+    /* Antiochus, Ptolemy's own benchmark, and its demonstration: the applications the Tools installer put beside it. */
+    NSMenu *tools = [[[NSMenu alloc] initWithTitle:@"Antiochus"] autorelease];
+    /* The ellipsis as UTF-8 bytes: GCC 4.0 does not take a non-ASCII character in an @"" literal. */
+    [[tools addItemWithTitle:[NSString stringWithUTF8String:"Run Antiochus\xe2\x80\xa6"]
+                      action:@selector(antiochus:)
+               keyEquivalent:@""] setTarget:self];
+    [[tools addItemWithTitle:@"rosettast" action:@selector(rosettast:) keyEquivalent:@""] setTarget:self];
+    [[menu addItemWithTitle:@"Antiochus" action:NULL keyEquivalent:@""] setSubmenu:tools];
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Quit Ptolemy Agent" action:@selector(terminate:) keyEquivalent:@"q"];
     [item setMenu:menu];
@@ -129,7 +139,9 @@
     [NSApp setMainMenu:main];
     /* Start in the menu bar only; the window opens from "Show status and command log", so it never covers or steals
      * focus from games at login. Access state and Stop remain visible in the menu bar. */
-    timer = [[NSTimer scheduledTimerWithTimeInterval:0.1 target:self selector:@selector(poll:) userInfo:nil
+    /* 0.5 s: reads the worker's log lines (at most 4 KiB per job) and notices its exit; 0.1 s cost more guest CPU at
+     * idle than the worker itself (t952). */
+    timer = [[NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(poll:) userInfo:nil
                                              repeats:YES] retain];
     [self toggle:nil];
 }
@@ -137,6 +149,26 @@
     (void)sender;
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+}
+/* Opens one of the Tools' applications by the installer's link (guest/tools/install.py); says so when it is not there. */
+- (void)openTool:(NSString *)name {
+    NSString *path = [[NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Ptolemy Tools/Antiochus"]
+            stringByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:path] && [[NSWorkspace sharedWorkspace] launchApplication:path])
+        return;
+    [NSApp activateIgnoringOtherApps:YES];
+    NSRunAlertPanel([name stringByAppendingString:@" could not be opened"],
+                    @"It is installed with Ptolemy Tools, in Applications/Ptolemy Tools/Antiochus in your home folder. "
+                    @"Run the Ptolemy Tools installer again to put it back.",
+                    @"OK", nil, nil);
+}
+- (void)antiochus:(id)sender {
+    (void)sender;
+    [self openTool:@"Antiochus.app"];
+}
+- (void)rosettast:(id)sender {
+    (void)sender;
+    [self openTool:@"rosettast.app"];
 }
 - (void)toggle:(id)sender {
     (void)sender;

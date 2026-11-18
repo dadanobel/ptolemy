@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * The real JIT emitter's vcmpeqfp/vcmpgefp/vcmpgtfp (and the Rc forms: CR6), vrsqrtefp, vrefp and vrfin/z/p/m (PT_VMX_FP2) against
+ * The real JIT emitter's vcmpeqfp/vcmpgefp/vcmpgtfp/vcmpbfp (and the Rc forms: CR6), vrsqrtefp, vrefp and vrfin/z/p/m (PT_VMX_FP2) against
  * the interpreter, bit for bit over the whole CPU state: zero, denormal, NaN, infinity, huge and tiny lanes, equal and
  * ordered vectors (all/none CR6), VSCR.NJ on/off, user/system mode, register aliasing. The JIT may hand a case to the
  * interpreter, untouched, only for a denormal input lane or a denormal vrefp result lane. */
@@ -30,11 +30,11 @@ int main(void) {
     uint32_t *code =
             mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
     assert(code != MAP_FAILED);
-    static const uint32_t ops[12] = {0x0c6, 0x1c6, 0x2c6, 0x4c6, 0x5c6, 0x6c6,
-                                     0x14a, 0x10a, 0x20a, 0x24a, 0x28a, 0x2ca};
+    static const uint32_t ops[14] = {0x0c6, 0x1c6, 0x2c6, 0x4c6, 0x5c6, 0x6c6, 0x3c6,
+                                     0x7c6, 0x14a, 0x10a, 0x20a, 0x24a, 0x28a, 0x2ca};
     unsigned fast = 0, slow = 0, cr_all = 0, cr_none = 0;
-    for (unsigned n = 0; n < 1200000; n++) {
-        unsigned o = n % 12, d = rnd() & 31, a = rnd() & 31, b = rnd() & 31, sys = n >> 1 & 1, rsq = o >= 6,
+    for (unsigned n = 0; n < 1400000; n++) {
+        unsigned o = n % 14, d = rnd() & 31, a = rnd() & 31, b = rnd() & 31, sys = n >> 1 & 1, rsq = o >= 8,
                  kind = rnd() & 7;
         uint32_t in = 4u << 26 | d << 21 | (rsq ? 0 : a << 16) | b << 11 | ops[o];
         CPU c = {0};
@@ -55,10 +55,15 @@ int main(void) {
                 wbe32(c.vr[a] + 4 * i, 0x40000000u + (rnd() & 0x3fffff));
                 wbe32(c.vr[b] + 4 * i, 0x3f800000u + (rnd() & 0x3fffff));
             }
+        if ((o == 6 || o == 7) && kind == 4 && a != b)
+            for (unsigned i = 0; i < 4; i++) { /* vcmpbfp: |a| < b in every lane (CR6 EQ) */
+                wbe32(c.vr[b] + 4 * i, 0x40000000u + (rnd() & 0x3fffff));
+                wbe32(c.vr[a] + 4 * i, (rnd() & 0x80000000) | (0x3f800000u + (rnd() & 0x3fffff)));
+            }
         if (rsq && kind < 3)
             for (unsigned i = 0; i < 4; i++)
                 wbe32(c.vr[b] + 4 * i, (uint32_t)(1 + rnd() % 253) << 23 | (rnd() & 0x7fffff));
-        if (o >= 8 && kind == 3)
+        if (o >= 10 && kind == 3)
             for (unsigned i = 0; i < 4; i++) { /* vrfi*: halves, quarters and integers */
                 float f = (float)((int)(rnd() % 2001) - 1000) + 0.25f * (rnd() & 3);
                 uint32_t u;
@@ -72,7 +77,7 @@ int main(void) {
             memcpy(&fb, &ub, 4);
             r = 1.0f / fb;
             memcpy(&ur, &r, 4);
-            special |= denormal(ub) | (!rsq && denormal(be32(c.vr[a] + 4 * i))) | (o == 7 && denormal(ur));
+            special |= denormal(ub) | (!rsq && denormal(be32(c.vr[a] + 4 * i))) | (o == 9 && denormal(ur));
         }
         CPU expected = c;
         assert(ppc_altivec(&expected, in));
@@ -111,7 +116,7 @@ int main(void) {
     vmx_fp2_enabled = 1;
     jmsr = MSR_750;
     assert(tr(4u << 26 | 0x14au, 0x2000) == -1 && cp == code); /* VEC off at translation: interpreter */
-    printf("VMX FP2 JIT (vcmpeqfp/gefp/gtfp[.], vrsqrtefp, vrefp, vrfin/z/p/m): %u fast + %u interpreter cases bit-exact vs interpreter "
+    printf("VMX FP2 JIT (vcmpeqfp/gefp/gtfp/bfp[.], vrsqrtefp, vrefp, vrfin/z/p/m): %u fast + %u interpreter cases bit-exact vs interpreter "
            "(CR6 all %u, none %u), switch and VEC rejection PASS.\n",
            fast, slow, cr_all, cr_none);
     return 0;

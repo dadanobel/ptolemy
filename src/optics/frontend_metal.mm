@@ -304,6 +304,22 @@ int failhard(const char **why, const char *s, NSError *e) { /* the executor itse
     return OPTICS_EXEC_FAILED;
 }
 
+/* Async shaders (owner, 17.11): while frames stream (draw defer 2), a draw whose shader is not compiled yet waits for it
+ * up to a budget - a shader Metal compiled before (its cache) comes back within a few ms - and past it is skipped while
+ * Metal compiles in the background, instead of holding the ring (and every frame) for 100-200 ms on a first use. The
+ * object shows from a frame or two later; ordering holds, a skipped draw writes nothing. A still picture or a one-shot
+ * render (defer 1) waits as before: its result may be read back. OPTICS_ASYNC_SHADERS: the budget in ms (default 10),
+ * 0 restores the wait. t988: with no budget Antiochus gpu-rosetta lost its frame marker (105 draws skipped). */
+static uint64_t async_wait_ns() {
+    static int64_t ms = -1;
+    if (ms < 0) {
+        const char *v = getenv("OPTICS_ASYNC_SHADERS");
+        ms = v ? atoi(v) : 10;
+        if (ms < 0)
+            ms = 0;
+    }
+    return (uint64_t)ms * 1000000u;
+}
 struct Exec {
     OpticsRenderOwner owner;
     PtRadeon *dev = nullptr;
@@ -317,7 +333,8 @@ struct Exec {
     unsigned since_commit = 0; /* draws batched since the last commit */
     uint64_t stats_raw_draws = 0, stats_raw_bytes = 0, stats_vte2_draws = 0;
     uint64_t stats_draws = 0, stats_imports = 0, stats_writebacks = 0, stats_commits = 0, stats_texture_hits = 0,
-             stats_texture_uploads = 0, stats_compiles = 0;
+             stats_texture_uploads = 0, stats_compiles = 0, stats_grown = 0, grown_at = 0; /* frame(): scanout growths */
+    uint64_t stats_skipped = 0; /* async shaders: draws skipped while their shader compiled */
     uint64_t upload_ns = 0;
     uint32_t upload_last[5] =
             {}; /* OPTICS_HITCH: time in texture uploads; the last one's width, height, format, bytes, VRAM */
@@ -544,7 +561,9 @@ struct Exec {
                 broken = true;
                 return false;
             }
+            int released = optics_frontend_gpu_wait_begin(dev);
             dispatch_semaphore_wait(completed, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC));
+            optics_frontend_gpu_wait_end(dev, released);
         }
     }
     bool commit(NSError **e) {
@@ -569,7 +588,9 @@ struct Exec {
         uint64_t before = finished, deadline = now() + 100 * NSEC_PER_MSEC;
         poll();
         while (finished == before && finished < committed && !broken && now() < deadline) {
+            int released = optics_frontend_gpu_wait_begin(dev);
             dispatch_semaphore_wait(completed, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(deadline - now())));
+            optics_frontend_gpu_wait_end(dev, released);
             poll();
         }
     }
@@ -1660,13 +1681,30 @@ struct Exec {
             *handle = (__bridge_retained void *)f;
             return OPTICS_FRAME_READY;
         }
-        Surface *s = nullptr;
+        Surface *s = nullptr, *part = nullptr;
         for (auto &x : owned)
             if (x.start == start && x.fmt == 6 && (!x.sel || x.sel == 0x1b) && (uint64_t)x.width * 4 == line &&
-                x.height >= h && x.width >= w) {
-                s = &x;
-                break;
+                x.width >= w) {
+                if (x.height >= h) {
+                    s = &x;
+                    break;
+                }
+                if (x.aa == 1)
+                    part = &x;
             } /* the frame shader reads B, G, R, A */
+        /* A surface that holds only the top rows of the scanout (Leopard's compositor draws its dirty rows: 1024x461 under
+         * 1024x768) grows to the scanout: written back once, imported again with its rows below from VRAM. Otherwise every
+         * frame waits for the GPU and copies VRAM on the CPU thread, ~3 ms a frame (t872). [start, start + line * h) is the
+         * buffer the CRTC shows, so the taller surface covers no other VRAM object. At most one growth per 500 ms: a CPU
+         * write into the shown buffer drops the surface (materialize), and a guest that does so every frame stays here. */
+        if (!s && part && now() - grown_at >= 500 * NSEC_PER_MSEC) {
+            const char *why = nullptr;
+            int code = 0;
+            grown_at = now();
+            if (!(s = import(part->gpu, part->width, h, 6, part->sel, &why, &code)))
+                return broken ? OPTICS_FRAME_FAILED : OPTICS_FRAME_NONE;
+            stats_grown++;
+        }
         if (!s)
             return OPTICS_FRAME_NONE; /* not GPU-owned (or another geometry): the frontend copies VRAM after materialize */
         if (s->version == published_version)
@@ -1733,9 +1771,10 @@ struct Exec {
         commit(&e);
         (void)drain();
         NSDictionary *g = owner.on([&] { return [renderer diagnostics]; });
-        NSLog(@"optics-frontend: executor draws %llu imports %llu writebacks %llu commits %llu, textures %llu uploaded %llu reused (%llu GART by content); renderer batches %@, GPU %.3f s, "
+        NSLog(@"optics-frontend: executor draws %llu imports %llu (scanout growths %llu) writebacks %llu commits %llu, textures %llu uploaded %llu reused (%llu GART by content); renderer batches %@, GPU %.3f s, "
                "submit->callback mean %@ ns max %@ ns, passes %@, programs %@ (MSL libraries %@; compiling %.1f s, of it MSL %.1f s; %@ libraries took 50 ms or more, the longest %.0f ms; in the background while draws waited: %@ libraries, %.1f s, the longest %.0f ms), backpressure %@; depth storages %zu live, %llu dropped by CPU writes, %llu CPU reads of GPU depth served from VRAM, %llu exports skipped (pending clear, another ZB_FORMAT)",
-              (unsigned long long)stats_draws, (unsigned long long)stats_imports, (unsigned long long)stats_writebacks,
+              (unsigned long long)stats_draws, (unsigned long long)stats_imports, (unsigned long long)stats_grown,
+              (unsigned long long)stats_writebacks,
               (unsigned long long)stats_commits, (unsigned long long)stats_texture_uploads,
               (unsigned long long)stats_texture_hits, (unsigned long long)stats_gart_hits, g[@"epochCompletedBatches"],
               [g[@"epochGPUSeconds"] doubleValue], g[@"epochMeanSubmitToCallbackNS"], g[@"epochMaxSubmitToCallbackNS"],
@@ -1746,6 +1785,8 @@ struct Exec {
               (unsigned long long)depth_drops, (unsigned long long)depth_reads_refused,
               (unsigned long long)clear_skips);
         NSLog(@"optics-frontend: full GPU VTE draws %llu", (unsigned long long)stats_vte2_draws);
+        NSLog(@"optics-frontend: async shaders (budget %llu ms): %llu draws skipped while their shader compiled",
+              (unsigned long long)(async_wait_ns() / 1000000u), (unsigned long long)stats_skipped);
         NSLog(@"optics-frontend: batch latency: submit->GPU start mean %@ ns, GPU end->callback mean %@ ns",
               g[@"epochMeanSubmitToStartNS"], g[@"epochMeanEndToCallbackNS"]);
         NSLog(@"optics-frontend: GPU raw vertex draws %llu, input snapshot bytes %llu",
@@ -1775,7 +1816,7 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
             return failhard(why, "executor after a GPU failure", nil);
         if (!ensure(&e))
             return fail(why, "Metal renderer unavailable", e);
-        if (d->defer && [renderer librariesCompiling])
+        if (d->defer && !(d->defer == 2 && async_wait_ns()) && [renderer librariesCompiling])
             return OPTICS_EXEC_BUSY; /* this draw's shader still compiles */
         if (!d->indices || (d->cull == 3 && cull_mode()))
             return OPTICS_EXEC_DONE; /* both faces culled: nothing to draw */
@@ -2650,7 +2691,8 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
                     /* A shader not compiled yet: compiled on Metal's threads while this draw waits in the ring and the device lock
                  * is free (a 100-200 ms first compile no longer stops the guest CPU, its sound and input); woken on completion. */
                     PtRadeon *wake = dev;
-                    if (d->defer && owner.on([&] {
+                    auto start = [&] {
+                        return owner.on([&] {
                             return [renderer startLibrariesForPVS:pvs
                                                   vertexInterface:&vi
                                                          fragment:d->us
@@ -2659,8 +2701,17 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
                                                              wake:^{
                                                                  optics_frontend_wake(wake);
                                                              }];
-                        }))
-                        return OPTICS_EXEC_BUSY;
+                        });
+                    };
+                    if (d->defer && start()) {
+                        if (!(d->defer == 2 && async_wait_ns()))
+                            return OPTICS_EXEC_BUSY;
+                        [renderer waitForLibrariesNS:async_wait_ns()];
+                        if (start()) {
+                            stats_skipped++;
+                            return OPTICS_EXEC_DONE; /* drawn from a later frame on, once its shader is ready */
+                        }
+                    }
                     program = owner.on([&] {
                         return [renderer preparePVS:pvs
                                     vertexInterface:&vi

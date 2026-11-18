@@ -1,6 +1,7 @@
 // PowerPC interpreter (750/G3 with FPU and supervisor state; 7447A/G4 additions, AltiVec through altivec.c).
 // The reference for the JIT and the fallback path for rare instructions.
 #include "ppc.h"
+#include "smp.h"
 #include <math.h>
 #include <stdio.h>
 #include <time.h>
@@ -1147,6 +1148,8 @@ int interp_step(CPU *c) {
                         goto next; // mcrf
                     case 150:
                         csync(c);
+                        if (pt_smp_cpus() > 1)
+                            __atomic_thread_fence(__ATOMIC_SEQ_CST); // isync with another CPU running (jit.c)
                         goto next; // isync
                     case 50:
                         PRIV();
@@ -1558,12 +1561,18 @@ int interp_step(CPU *c) {
             R(d) = LD(4, ea);
             c->reserve = 1;
             c->reserve_addr = ea;
+            c->reserve_val = R(d);
             break; // lwarx
         case 150:
             ea = RA0(a) + R(b);
             {
                 int ok = c->reserve && c->reserve_addr == ea;
-                if (ok)
+                if (ok && pt_smp_cpus() > 1) { // another CPU may store here: only over the word lwarx read
+                    int r = ppc_st_cond(c, ea, c->reserve_val, s);
+                    if (r == 1)
+                        return 0;
+                    ok = !r;
+                } else if (ok)
                     ST(4, ea, s);
                 c->reserve = 0;
                 cr_set_field(c, 0, (ok ? 2 : 0) | c->so);
@@ -1611,6 +1620,8 @@ int interp_step(CPU *c) {
         case 246:
         case 598:
         case 854:
+            if ((xo == 598 || xo == 854) && pt_smp_cpus() > 1)
+                __atomic_thread_fence(__ATOMIC_SEQ_CST); // sync, eieio with another CPU running
             break; // cache/barriers
         case 982: {
             ea = RA0(a) + R(b);

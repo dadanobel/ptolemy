@@ -37,9 +37,9 @@ static uint32_t u32(const uint8_t *p) {
 }
 #include "pointer_observer.h"
 #include "input_builtin.h"
-static void input_tick(uint32_t token, uint64_t now) {
+static int input_tick(uint32_t token, uint64_t now) {
     pt_pointer_guest_tick(token, now);
-    pt_input_guest_tick(token, now);
+    return pt_input_guest_tick(token, now);
 }
 /* Splits a host command request into argv strings, checking every length against the request's size. */
 static int parse(uint8_t *b, uint32_t n, char *argv[PTA_MAX_ARGS + 1], char text[PTA_MAX_REQUEST + PTA_MAX_ARGS]) {
@@ -110,12 +110,17 @@ static unsigned execute(uint32_t token, uint32_t id, uint32_t timeout, char **ar
     int log_truncated = 0;
     uint64_t deadline = ms() + timeout, killed = 0, finished = 0;
     uint8_t b[4096];
+    unsigned dry = 0; /* loops since the pipe last had data */
     while (!exited || !eof) {
         input_tick(token, ms());
+        int got = 0;
         for (unsigned chunks = 0; chunks < 16; chunks++) {
             ssize_t n = read(fd[0], b, sizeof b);
             if (n > 0) {
-                uint32_t k = PTA_MAX_OUTPUT - logged;
+                got = 1;
+                /* The menu app's window shows the first 4 KiB of a job; all of it goes to the host. Echoing more cost the
+                 * guest ~3 s of CPU per MB in NSTextView and held the job behind that pipe (t952: 1 MB in 11 s). */
+                uint32_t k = 4096 - logged;
                 if (k > (uint32_t)n)
                     k = (uint32_t)n;
                 if (k) {
@@ -123,7 +128,7 @@ static unsigned execute(uint32_t token, uint32_t id, uint32_t timeout, char **ar
                     logged += k;
                 }
                 if (k < (uint32_t)n && !log_truncated) {
-                    puts("\n[Output log truncated at 1MiB; pipe still drained]");
+                    puts("\n[Output log truncated at 4 KiB; the host gets all of it]");
                     log_truncated = 1;
                 }
                 (void)ptagent_call(PTA_OUTPUT, token, id, (uint32_t)(uintptr_t)b, (uint32_t)n, r);
@@ -155,8 +160,11 @@ static unsigned execute(uint32_t token, uint32_t id, uint32_t timeout, char **ar
             if (exited && ms() - killed >= 2200)
                 break;
         }
+        /* The pipe holds 16 KiB and the guest has one CPU: the writer refills it only while we sleep. While output flows,
+         * nap 1 ms; 20 ms once it has been dry for ~50 ms. A 20 ms nap capped output at ~0.8 MB/s (t953, t956: 1 MB in 6 s). */
+        dry = got ? 0 : dry + 1;
         if (!exited || !eof)
-            usleep(20000);
+            usleep(dry < 50 ? 1000 : 20000);
     }
     close(fd[0]); /* Descendants must not survive a completed job holding pipes. */
     kill(-child, SIGTERM);
@@ -353,8 +361,10 @@ int main(void) {
     pt_input_guest_begin(host >= 3 ? r[2] : 0);
     printf("Ptolemy development agent ON (protocol %u, host %u). Commands run as this guest user. Stop in the app to disable.\n",
            PTA_VERSION, host);
+    unsigned quiet = 0; /* empty polls since the pointer last moved or the host last sent something */
     while (!stopping) {
-        input_tick(token, ms());
+        if (input_tick(token, ms()))
+            quiet = 0;
         uint8_t request[PTA_MAX_REQUEST];
         char text[PTA_MAX_REQUEST + PTA_MAX_ARGS], *argv[PTA_MAX_ARGS + 1];
         /* Materialize writable COW/zero-fill stack pages before host copyout.
@@ -367,14 +377,19 @@ int main(void) {
             static uint8_t head[PTA_XHEAD];
             memset(head, 0, sizeof head);
             if (!ptagent_call(PTA_XBEGIN, token, (uint32_t)(uintptr_t)head, 0, 0, r)) {
+                quiet = 0;
                 (void)receive(token, r[0], head, home);
                 continue;
             }
         }
         if (rc == PTA_AGAIN) {
-            usleep(pt_pointer_guest_cap ? 20000 : 100000);
+            /* 20 ms while the pointer moves or the host is busy with us (pointer calibration, command latency), 100 ms after
+             * half a second of nothing: an idle desktop stops waking 50 times a second. The host keeps the cursor state
+             * for 1 s without a report, and reports still go out on every 100 ms poll. */
+            usleep(pt_pointer_guest_cap && quiet++ < 25 ? 20000 : 100000);
             continue;
         }
+        quiet = 0;
         if (rc) {
             fprintf(stderr, "Agent poll failed: %d\n", rc);
             break;

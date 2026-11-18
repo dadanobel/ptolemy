@@ -56,6 +56,7 @@ static void fatal(const char *why) {
 static int isa_access(void *, uint32_t, uint8_t *, unsigned, int);
 static int network_access(void *, uint32_t, uint8_t *, unsigned, int);
 static void radeon_configure(void);
+static void gpu_soon(void) {} /* dg4-09: isa_access tells the Radeon service a register was written; no service here */
 #include "network-board-functions.inc"
 static uint32_t cfg(unsigned slot, unsigned reg, unsigned size, int write, uint32_t value) {
     uint32_t port = cpu970 ? 0xf0800000 : 0xf2800000;

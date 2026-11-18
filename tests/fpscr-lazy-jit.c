@@ -20,7 +20,7 @@ static uint32_t xfp(unsigned xo, unsigned d, unsigned a, unsigned b) {
 }
 static void setup(void) {
     fp_moves_enabled = env_on("PT_FP_MOVES");
-    fp_directed_enabled = env_on("PT_FP_DIRECTED");
+    fp_directed_enabled = !getenv("PT_FP_DIRECTED") || atoi(getenv("PT_FP_DIRECTED")); /* the window's default: on */
     code = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
     memory = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     reference = calloc(1, 65536);

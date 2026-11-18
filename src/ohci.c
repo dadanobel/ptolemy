@@ -25,7 +25,7 @@ static void nd_ohci_reset(PtOhci *o) {
     o->reg[0] = 0x10;
     o->reg[13] = 0x2edf;
     o->reg[17] = 0x628;
-    o->reg[18] = 0x02000204;
+    o->reg[18] = 0x02000200 | o->nports;
     o->reg[19] = 0x000f0000;
     o->done = 0;
     o->done_delay = 7;
@@ -34,7 +34,7 @@ static void nd_ohci_reset(PtOhci *o) {
     /* A device present at reset is a new connection, so ConnectStatusChange (bit 16) is set and the root hub reports a
      * status change; otherwise Tiger never enumerates the attached HID devices. */
     int connected = 0;
-    for (unsigned k = 0; k < 4; k++) {
+    for (unsigned k = 0; k < o->nports; k++) {
         o->ports[k] = o->device[k].packet ? 0x10101 : 0x100;
         connected |= !!o->device[k].packet;
     }
@@ -49,6 +49,7 @@ void pt_ohci_init(PtOhci *o, PtRam ram, PtHid *keyboard, PtHid *mouse, PtHid *ta
     o->irq = irq;
     o->opaque = opaque;
     o->bus_master = 1;
+    o->nports = 4;
     PtHid *hid[3] = {keyboard, mouse, tablet};
     for (unsigned k = 0; k < 3; k++)
         if (hid[k])
@@ -64,10 +65,15 @@ void pt_ohci_storage(PtOhci *o, const PtUsbDevice *device) {
     o->reg[3] |= 0x40;
     nd_ohci_irq(o);
 }
+void pt_ohci_camera(PtOhci *o, const PtUsbDevice *device) {
+    o->nports = 5;
+    o->device[4] = *device;
+    nd_ohci_reset(o);
+}
 uint32_t pt_ohci_read(PtOhci *o, unsigned at) {
     if (at & 3)
         return 0;
-    if (at >= 0x54 && at < 0x64)
+    if (at >= 0x54 && at < 0x54 + 4 * o->nports)
         return o->ports[(at - 0x54) / 4];
     if (at >= 0x54)
         return 0;
@@ -78,7 +84,8 @@ uint32_t pt_ohci_read(PtOhci *o, unsigned at) {
 void pt_ohci_write(PtOhci *o, unsigned at, uint32_t v) {
     if (at & 3)
         return;
-    if (at >= 0x54 && at < 0x64) {
+    o->quiet = 0;
+    if (at >= 0x54 && at < 0x54 + 4 * o->nports) {
         unsigned k = (at - 0x54) / 4;
         uint32_t *p = &o->ports[k];
         *p &= ~(v & 0x1f0000);
@@ -146,10 +153,10 @@ void pt_ohci_write(PtOhci *o, unsigned at, uint32_t v) {
             break;
         case 20:
             if (v & 1)
-                for (unsigned k = 0; k < 4; k++)
+                for (unsigned k = 0; k < o->nports; k++)
                     o->ports[k] &= ~0x100u;
             if (v & 0x10000)
-                for (unsigned k = 0; k < 4; k++)
+                for (unsigned k = 0; k < o->nports; k++)
                     o->ports[k] |= 0x100;
             break;
         default:
@@ -158,8 +165,11 @@ void pt_ohci_write(PtOhci *o, unsigned at, uint32_t v) {
     }
     nd_ohci_irq(o);
 }
+int pt_ohci_quiet(const PtOhci *o) {
+    return o->quiet;
+}
 int pt_ohci_needs_clock(const PtOhci *o) {
-    for (unsigned k = 0; k < 4; k++)
+    for (unsigned k = 0; k < o->nports; k++)
         if (o->reset_ticks[k])
             return 1;
     return (o->reg[1] & 0xc0) == 0x80;
@@ -169,7 +179,7 @@ static PtUsbDevice *nd_ohci_device(PtOhci *o, unsigned address) {
         int k = o->default_port;
         return k >= 0 && (o->ports[k] & 3) == 3 ? &o->device[k] : NULL;
     }
-    for (unsigned k = 0; k < 4; k++)
+    for (unsigned k = 0; k < o->nports; k++)
         if ((o->ports[k] & 3) == 3 && o->device[k].address && o->device[k].address(o->device[k].opaque) == address)
             return &o->device[k];
     return NULL;
@@ -190,8 +200,10 @@ static int nd_ohci_td(PtOhci *o, uint8_t *ed, unsigned *budget) {
     uint32_t address = head & ~15u;
     int busy = 0;
     uint8_t *td = address ? pt_ram_use(o->ram, address, 16, 1, &busy) : NULL;
-    if (busy)
+    if (busy) {
+        o->waiting = 1;
         return 0;
+    }
     if (!td)
         return nd_ohci_fault(o);
     uint32_t flags = (uint32_t)pt_read_le(td, 4), cbp = (uint32_t)pt_read_le(td + 4, 4),
@@ -223,11 +235,15 @@ static int nd_ohci_td(PtOhci *o, uint8_t *ed, unsigned *budget) {
     if (direction == 3)
         return nd_ohci_fault(o);
     uint8_t *a = n ? pt_ram_use(o->ram, cbp, first, pid == PT_USB_IN, &busy) : NULL;
-    if (busy)
+    if (busy) {
+        o->waiting = 1;
         return 0;
+    }
     uint8_t *b = second ? pt_ram_use(o->ram, end & ~4095u, second, pid == PT_USB_IN, &busy) : NULL;
-    if (busy)
+    if (busy) {
+        o->waiting = 1;
         return 0;
+    }
     if ((n && !a) || (second && !b))
         return nd_ohci_fault(o);
     PtUsbDevice *device = nd_ohci_device(o, info & 127);
@@ -241,8 +257,10 @@ static int nd_ohci_td(PtOhci *o, uint8_t *ed, unsigned *budget) {
     int got = device && device->packet
                       ? device->packet(device->opaque, info >> 7 & 15, pid, packet, n, (uint16_t)o->reg[15])
                       : PT_USB_STALL;
-    if (got == PT_USB_NAK)
+    if (got == PT_USB_NAK) {
+        o->waiting = 1;
         return 0;
+    }
     unsigned code = got == PT_USB_STALL ? 4 : got < 0 ? 5 : (unsigned)got > n ? 8 : 0;
     unsigned toggle = (flags & (1u << 25)) ? (flags >> 24 & 1) : (head >> 1 & 1);
     int retire = code != 0;
@@ -291,8 +309,10 @@ static void nd_ohci_list(PtOhci *o, uint32_t address, unsigned *budget) {
     while (address && *budget && endpoints++ < 256) {
         int busy = 0;
         uint8_t *ed = pt_ram_use(o->ram, address, 16, 1, &busy);
-        if (busy)
+        if (busy) {
+            o->waiting = 1;
             return;
+        }
         if ((address & 15) || !ed) {
             nd_ohci_fault(o);
             return;
@@ -319,7 +339,9 @@ static void nd_ohci_list(PtOhci *o, uint32_t address, unsigned *budget) {
 /* One USB frame: the periodic (interrupt) lists from the HCCA, then the control and bulk lists, frame number and
  * done queue. */
 void pt_ohci_frame(PtOhci *o) {
-    for (unsigned k = 0; k < 4; k++)
+    unsigned resetting = 0;
+    o->quiet = 0;
+    for (unsigned k = 0; k < o->nports; k++)
         if (o->reset_ticks[k] && !--o->reset_ticks[k]) {
             if (o->device[k].reset)
                 o->device[k].reset(o->device[k].opaque);
@@ -327,6 +349,8 @@ void pt_ohci_frame(PtOhci *o) {
             o->default_port = (int)k;
             o->reg[3] |= 0x40;
         }
+    for (unsigned k = 0; k < o->nports; k++)
+        resetting |= o->reset_ticks[k];
     if ((o->reg[1] & 0xc0) != 0x80 || !o->bus_master) {
         nd_ohci_irq(o);
         return;
@@ -350,6 +374,7 @@ void pt_ohci_frame(PtOhci *o) {
     unsigned budget = 2048;
     if (o->reg[1] & 4)
         nd_ohci_list(o, (uint32_t)pt_read_le(hcca + (o->reg[15] & 31) * 4, 4), &budget);
+    o->waiting = 0; /* from here: the control and bulk lists */
     if (o->reg[1] & 16)
         nd_ohci_list(o, o->reg[8], &budget);
     if (o->reg[1] & 32)
@@ -361,5 +386,6 @@ void pt_ohci_frame(PtOhci *o) {
         o->reg[3] |= 2;
     } else if (o->done_delay < 7 && o->done_delay)
         o->done_delay--;
+    o->quiet = !resetting && !o->waiting && !o->done && !(o->reg[4] & 4) && budget;
     nd_ohci_irq(o);
 }

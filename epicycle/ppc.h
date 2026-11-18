@@ -5,13 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The production G3/G4 runner has one CPU owner. Pay TLS access costs only
- * in builds that can execute the experimental concurrent 970 owners. */
-#ifdef PT_ENABLE_970
+/* State of one CPU kept outside its CPU structure: each CPU runs on its own thread (two G4s, the experimental
+ * concurrent 970 owners). */
 #define PT_CPU_LOCAL _Thread_local
-#else
-#define PT_CPU_LOCAL
-#endif
 
 typedef struct {
     uint32_t base;
@@ -67,15 +63,15 @@ typedef struct CPU {
     int halted, exit_code;
     uint32_t jit_exit; // exit reason from JIT code
     uint64_t jit_link; // branch address for block linking
-    void *jit_jc; // jump cache: JC {key, code, page generation}[65536] (jit.c)
+    void *jit_jc; // jump cache: JC {key, code, page generation}[2^jc_bits] (jit.c)
     void *jit_codemap; // physical page -> 1: translated code may be there (jit.c; icbi in JIT code reads it)
     uint64_t crtab[16]; // CR nibble -> field value (for mtcrf in the JIT)
     uint64_t tb_a, tb_m; // TB in the VM: tb = tb_a + (CNTVCT * tb_m) >> 32 (mftb without an exit); tb_m = 0: none
     uint64_t dec_tbw;
     uint32_t dec_w, dec_pad; // DEC in the VM: dec = dec_w - (TB - dec_tbw)
     uint64_t ttbr[3]; // VM: TTBR0 per mode (real, DR PR=0, DR PR=1); rfi/sc in the JIT switch the mode themselves
-    uint32_t icbi_lea,
-            icbi_pad; // icbi: EA page of the previous one (| DR << 1 | 1); the same page again: the JIT does nothing
+    uint32_t icbi_lea, // icbi: EA page of the previous one (| DR << 1 | 1); the same page again: the JIT does nothing
+            reserve_val; // the word lwarx read: with a second CPU, stwcx. stores only over it (in place of a pad)
     uint32_t ttbr_k,
             srgen_ok; // VM: which one is in TTBR0 (written by the environment and JIT code); the srgen whose SRs the tables hold
     /* SR configurations the JIT code installs by itself on an rfi/mtmsr into DR=1 after mtsr in
@@ -143,6 +139,15 @@ typedef struct CPU {
     uint64_t (*env_ticks970)(struct CPU *); /* Monotonic virtual oscillator, before writable TB offset. */
     uint64_t biu_mode970;
     int (*env_ram970)(struct CPU *, uint64_t, unsigned, int); /* CPU owner: synchronize RAM before explicit accesses. */
+    uint64_t st_ind[4]; // PT_STATS: inline jump-cache lookups JIT code ran: far direct branch, blr, bctr, other (jit.c exit_ind)
+    uint64_t st_watch; // PT_STATS with PT_STATS_BLOCK=pc: passes through the start of that block's body (its loop)
+    /* The first level of the jump cache (jit.c exit_ind): 512 cells by the target's pc, each the pc (bit 0: the XER.SO
+     * variant) under the low half of jc_epoch, and the code. jc_epoch moves on every entry into JIT code and every
+     * change of mode, so a cell is good only inside the run that filled it. */
+    uint64_t jc_epoch;
+    struct {
+        uint64_t key, code;
+    } l1[512];
 } CPU;
 enum {
     MSR_POW = 1 << 18,
@@ -293,6 +298,7 @@ static inline uint8_t *pmem_write(CPU *c, uint32_t ra, uint32_t n) {
 // mmu.c: 750 address translation and memory access through it (1 = exception delivered)
 uint32_t pt_xlate(CPU *c, uint32_t ea, int acc, int pr, uint32_t *ra, int *wr);
 void ppc_mmu_fault(CPU *, uint32_t ea, int access, uint32_t reason);
+int ppc_st_cond(CPU *c, uint32_t ea, uint32_t expect, uint32_t v);
 void ppc_tlb_load(CPU *, uint32_t ea, int instruction);
 void ppc_tlb_invalidate(CPU *, uint32_t ea);
 int ppc_external(CPU *, uint32_t ea, int store, uint32_t *value);

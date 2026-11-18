@@ -239,6 +239,26 @@ int pt_nvram_set_of(PtNvram *n, const char *name, const char *value) {
     }
     return 0;
 }
+/* The firmware's OF variable as pt_nvram_set_of leaves it: 0 and its value (cut to size), or ENOENT. */
+int pt_nvram_get_of(const PtNvram *n, const char *name, char *value, size_t size) {
+    uint8_t of[4096];
+    for (unsigned k = 0; k < 4096; k++)
+        of[k] = n->data[2 * k];
+    unsigned end = 0, base = nd_nv_common(of, &end);
+    size_t key = strlen(name);
+    for (unsigned at = base; base && at < end && of[at];) {
+        const uint8_t *zero = memchr(of + at, 0, end - at);
+        if (!zero)
+            break;
+        unsigned len = (unsigned)(zero - (of + at));
+        if (len > key && of[at + key] == '=' && !memcmp(of + at, name, key)) {
+            snprintf(value, size, "%s", (const char *)of + at + key + 1);
+            return 0;
+        }
+        at += len + 1;
+    }
+    return ENOENT;
+}
 /* Tiger's flash driver can leave 0xff (the flash read-array command) in the first byte of the firmware's OF view, and
  * the firmware then refuses that NVRAM and stops: a damaged OF view gets default partitions again. The engine sets its
  * own OF variables after this. The guest's CHRP bank is left as it is. */

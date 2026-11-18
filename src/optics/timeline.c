@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* The GPU's timeline: Metal command batches and the fences after them, so the frontend can tell when the work a
+ * guest fence waits for is done (or failed, or belongs to a reset that came after it). */
 #include "timeline.h"
 #include <stdlib.h>
 #include <string.h>

@@ -85,10 +85,10 @@ uint32_t pt_xlate(CPU *c, uint32_t ea, int acc, int pr, uint32_t *ra, int *wr) {
             if (!r_ok || (st && !w_ok))
                 return prot; // a fetch is checked as a read
             uint32_t n1 = w1 | 0x100 | (st ? 0x80 : 0); // R, C
-            if (n1 != w1) {
+            if (n1 != w1) { /* only these bits: another CPU's kernel may be changing the word's other bits */
                 uint8_t *write_pte = pmem_write(c, pteg + 8 * k + 4, 4);
                 if (write_pte)
-                    wbe32(write_pte, n1);
+                    __atomic_fetch_or((uint32_t *)write_pte, __builtin_bswap32(n1 ^ w1), __ATOMIC_SEQ_CST);
             }
             *ra = (w1 & 0xFFFFF000u) | (ea & 0xFFF);
             *wr = w_ok && n1 & 0x80;
@@ -155,6 +155,18 @@ int ppc_ld(CPU *c, uint32_t ea, int n, uint64_t *v) {
         return 1;
     *v = get(b, n);
     return 0;
+}
+/* stwcx. with a second CPU running: the word at EA becomes v only if it still holds expect, in one step.
+ * 0 stored, 2 it held something else, 1 exception delivered. A device, or an unaligned word: the plain store. */
+int ppc_st_cond(CPU *c, uint32_t ea, uint32_t expect, uint32_t v) {
+    uint32_t ra;
+    if (xl(c, ea, 1, &ra))
+        return 1;
+    uint32_t *p = (uint32_t *)pmem_at(c, ra, 4, 1);
+    if (!p || (ea & 3))
+        return ppc_st(c, ea, 4, v);
+    expect = __builtin_bswap32(expect);
+    return __atomic_compare_exchange_n(p, &expect, __builtin_bswap32(v), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 0 : 2;
 }
 int ppc_st(CPU *c, uint32_t ea, int n, uint64_t v) {
 #ifdef PT_ENABLE_970
@@ -263,3 +275,7 @@ int ppc_external(CPU *c, uint32_t ea, int store, uint32_t *value) {
         *value = be32(bytes);
     return 0;
 }
+
+/* The CPUs' lock (smp.h). It belongs to every build of the engine, and so does this file, once: the build lists stay as
+ * they are. */
+#include "smp.c"

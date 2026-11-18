@@ -42,9 +42,10 @@ static inline void trampoline(uint32_t *code) {
     memcpy(POOL, (int8_t[]){15, 19, 20, 21, 22, 23, 24, 25}, 8);
     pthread_jit_write_protect_np(0);
     cp = code;
-    E(0xA9800000u | (unsigned)(-12 & 0x7f) << 15 | 30u << 10 | 31u << 5 | 29);
+    E(0xA9800000u | (unsigned)(-14 & 0x7f) << 15 | 30u << 10 | 31u << 5 | 29);
     for (unsigned i = 0; i < 5; i++)
         E(0xA9000000u | (2 + 2 * i) << 15 | (20 + 2 * i) << 10 | 31u << 5 | (19 + 2 * i));
+    E(0x6D0627E8u); /* stp d8, d9, [sp, #96]: the JIT's FP save registers */
     E(0xAA0003FBu);
     E(0xAA0103F1u);
     ldrx(MEM, ENV, OFF(vbase));
@@ -55,7 +56,8 @@ static inline void trampoline(uint32_t *code) {
     ldrw(0, ENV, OFF(jit_exit));
     for (unsigned i = 0; i < 5; i++)
         E(0xA9400000u | (2 + 2 * i) << 15 | (20 + 2 * i) << 10 | 31u << 5 | (19 + 2 * i));
-    E(0xA8C00000u | 12u << 15 | 30u << 10 | 31u << 5 | 29);
+    E(0x6D4627E8u); /* ldp d8, d9, [sp, #96] */
+    E(0xA8C00000u | 14u << 15 | 30u << 10 | 31u << 5 | 29);
     E(0xD65F03C0u);
     enter = (int (*)(CPU *, void *))(void *)code;
 }

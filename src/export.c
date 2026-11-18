@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Files from the guest to the Mac: chunks arrive in order through the agent and go to a temporary file; the file is
+ * published under its name only when it is complete, its SHA-256 matches and no file of that name exists. */
 #include "pt_export.h"
 #include "pt_sha256.h"
 #include <pthread.h>

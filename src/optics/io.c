@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Single-owner guest-memory transactions. No Metal, host waits or global state. */
 #include "io.h"
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 typedef struct {
@@ -28,7 +29,18 @@ struct PtR2Io {
     uint32_t *hash, *free_pages, free_count;
     Transfer *transfers;
     uint64_t next_id, version;
+    _Atomic uint64_t *ram_map; /* one bit per tracked guest RAM page below 4 GiB (pt_r2_io_ram_tracked) */
 };
+enum { RAM_MAP_WORDS = 1 << 14 };
+static void mark(PtR2Io *io, const Page *p, int on) {
+    if (!p->ram || p->physical >> 32)
+        return;
+    uint64_t k = p->physical >> 12, bit = UINT64_C(1) << (k & 63);
+    if (on)
+        atomic_fetch_or(&io->ram_map[k >> 6], bit);
+    else
+        atomic_fetch_and(&io->ram_map[k >> 6], ~bit);
+}
 static uint32_t hash_page(const PtR2Io *io, int ram, uint64_t physical) {
     uint64_t x = (physical >> 12) ^ (ram ? UINT64_C(0xbaddecaf12345678) : 0);
     x ^= x >> 30;
@@ -53,6 +65,7 @@ static Page *find_page(PtR2Io *io, int ram, uint64_t physical, int create) {
     uint32_t index = io->free_pages[--io->free_count];
     Page *p = &io->pages[index];
     *p = (Page){.physical = physical, .version = ++io->version, .ram = !!ram, .used = 1};
+    mark(io, p, 1);
     io->hash[at] = index + 1;
     io->stats.pages++;
     return p;
@@ -87,6 +100,7 @@ static void erase_page(PtR2Io *io, Page *p) {
         }
     }
     io->hash[hole] = 0;
+    mark(io, p, 0);
     memset(p, 0, sizeof *p);
     io->free_pages[io->free_count++] = index;
     io->stats.pages--;
@@ -222,7 +236,9 @@ PtR2Io *pt_r2_io_create(const PtR2IoConfig *c) {
     io->hash = calloc(c->pages * 2, sizeof(uint32_t));
     io->free_pages = malloc(c->pages * sizeof(uint32_t));
     io->transfers = calloc(c->transfers, sizeof(Transfer));
-    if (!io->pages || !io->hash || !io->free_pages || !io->transfers) {
+    io->ram_map = calloc(RAM_MAP_WORDS, sizeof *io->ram_map);
+    if (!io->pages || !io->hash || !io->free_pages || !io->transfers || !io->ram_map) {
+        free(io->ram_map);
         free(io->pages);
         free(io->hash);
         free(io->free_pages);
@@ -257,6 +273,8 @@ PtR2IoResult pt_r2_io_reset(PtR2Io *io) {
     io->stats.fatal = failed;
     if (failed)
         return PT_R2_IO_COHERENCE;
+    for (uint32_t i = 0; i < RAM_MAP_WORDS; i++)
+        atomic_store(&io->ram_map[i], 0);
     memset(io->pages, 0, io->config.pages * sizeof(Page));
     memset(io->hash, 0, io->config.pages * 2 * sizeof(uint32_t));
     io->stats.pages = 0;
@@ -271,12 +289,25 @@ PtR2IoResult pt_r2_io_destroy(PtR2Io *io) {
     PtR2IoResult result = pt_r2_io_reset(io);
     if (result != PT_R2_IO_OK)
         return result;
+    free(io->ram_map);
     free(io->pages);
     free(io->hash);
     free(io->free_pages);
     free(io->transfers);
     free(io);
     return PT_R2_IO_OK;
+}
+int pt_r2_io_ram_tracked(PtR2Io *io, uint64_t at, size_t n) {
+    if (!io)
+        return 1;
+    if (!n)
+        return 0;
+    if (at >> 32 || n > (UINT64_C(1) << 32) - at)
+        return 1;
+    for (uint64_t k = at >> 12, end = (at + n - 1) >> 12; k <= end; k++)
+        if ((atomic_load(&io->ram_map[k >> 6]) >> (k & 63)) & 1)
+            return 1;
+    return 0;
 }
 /* Called before the CPU or a DMA engine touches guest memory directly: BUSY while a pending GPU write owns one of the
  * pages; a write also bumps the version of tracked pages (older GPU copies become stale) and reopens their protection. */

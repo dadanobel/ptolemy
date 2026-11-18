@@ -102,9 +102,45 @@ int main(void) {
         assert(!memcmp(target + (5 + y) * DP + 30 * 4, source + (SY + y) * SP + (SX + 2) * 4, 4 * 4));
     optics_frontend_stats(d, &stats);
     assert(stats.blits == 4 && stats.packets_refused == 1);
+    /* 0x92 (CNTL_BITBLT), as Leopard's Preview scrolls (t847: GMC 52cc36f1, source given, destination the default
+     * pitch/offset, the same surface): up, then down, each overlapping its source. The result is a copy of the source
+     * rectangle as it was before the packet. */
+    enum {
+        S = DST + 64 * DP,
+        ROWS = 24,
+        RW = 20,
+        RH = 16
+    };
+    uint8_t *want = malloc(DP * ROWS), *got = malloc(DP * ROWS), *rect = malloc(RW * 4 * RH);
+    assert(want && got && rect);
+    for (unsigned i = 0; i < DP * ROWS; i++)
+        want[i] = (uint8_t)(i * 5 + (i / DP) * 11);
+    assert(optics_frontend_gpu_write(d, S, want, DP * ROWS));
+    wr(d, 0x16e0, (DP / 64) << 22 | S >> 10);
+    for (unsigned n = 0; n < 2; n++) {
+        unsigned sy = n ? 2 : 6, dy = n ? 6 : 2, at = 25 + 6 * n;
+        word(d, at, 0xc0049200);
+        word(d, at + 1, 0x52cc36f1);
+        word(d, at + 2, (DP / 64) << 22 | S >> 10);
+        word(d, at + 3, 1u << 16 | sy);
+        word(d, at + 4, 1u << 16 | dy);
+        word(d, at + 5, (unsigned)RW << 16 | RH);
+        wr(d, 0x714, at + 6);
+        for (unsigned y = 0; y < RH; y++)
+            memcpy(rect + y * RW * 4, want + (sy + y) * DP + 4, RW * 4);
+        for (unsigned y = 0; y < RH; y++)
+            memcpy(want + (dy + y) * DP + 4, rect + y * RW * 4, RW * 4);
+        assert(optics_frontend_gpu_read(d, S, got, DP * ROWS));
+        assert(!memcmp(got, want, DP * ROWS));
+    }
+    optics_frontend_stats(d, &stats);
+    assert(stats.blits == 6 && stats.packets_refused == 1);
     pt_radeon_close(d);
     free(source);
     free(target);
-    puts("PASS: 0x9B settings, default pitch/offset, XY order, multiple rectangles, canonical colour bytes, truncation, 0x1B on inherited state");
+    free(want);
+    free(got);
+    free(rect);
+    puts("PASS: 0x9B settings, default pitch/offset, XY order, multiple rectangles, canonical colour bytes, truncation, 0x1B on inherited state, 0x92 overlapping scrolls");
     return 0;
 }

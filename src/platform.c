@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * OpenPIC 1.2 Register Interface Specification (AMD 19725, 1995), sections 4-5.
  * Firmware-port values follow the maintained OpenBIOS fork ABI.
- * This implementation does not implement MPIC timers or IPIs. */
+ * This implementation does not implement MPIC timers. */
 #include "platform.h"
 #include "pt_boot_mode.h"
 #include <string.h>
@@ -57,13 +57,17 @@ int pt_bus_access(PtBus *b, uint32_t addr, uint8_t *buf, unsigned n, int write) 
     return -1;
 }
 
-/* OpenPIC 1.2, sections 4.1/4.2/5.2: single destination CPU, external sources.
+/* OpenPIC 1.2, sections 4.1/4.2/5.2: external sources, one or two destination CPUs, four interprocessor channels.
  * Pending events and eligible routing are bitsets; output reads do no arbitration.
- * Timer/IPI register banks remain outside this board's exposed contract. */
+ * A source goes to the lowest CPU of its destination mask. An interrupt is numbered 0..63 for a source and 64..67 for
+ * an interprocessor channel. The timer bank remains outside this board's exposed contract. */
 static uint64_t pic_events(const PtPic *p) {
     return (p->pending & ~p->level_mask) | (p->asserted & p->level_mask);
 }
-static int pic_winner(const PtPic *p, uint64_t candidates, unsigned threshold) {
+static unsigned pic_rank(const PtPic *p, int i) {
+    return (i < (int)PT_NSRC ? p->vp[i] : p->ipi_vp[i - PT_NSRC]) >> 16 & 15;
+}
+static int pic_winner(const PtPic *p, uint64_t candidates, unsigned ipis, unsigned threshold) {
     int winner = -1;
     while (candidates) {
         unsigned i = (unsigned)__builtin_ctzll(candidates);
@@ -74,51 +78,74 @@ static int pic_winner(const PtPic *p, uint64_t candidates, unsigned threshold) {
             winner = (int)i;
         }
     }
+    for (int i = 0; i < 4; i++)
+        if ((ipis >> i & 1) && pic_rank(p, PT_NSRC + i) > threshold) {
+            threshold = pic_rank(p, PT_NSRC + i);
+            winner = PT_NSRC + i;
+        }
     return winner;
 }
 static void pic_reset(PtPic *p) {
-    p->ctpr = 15;
     p->spurious = 255;
     p->gcr = 0;
-    p->pending = p->servicing = 0;
-    p->level_mask = p->asserted = p->eligible = 0;
+    p->pending = 0;
+    p->level_mask = p->asserted = 0;
     p->line_output = 0;
     memset(p->wires, 0, sizeof p->wires);
     for (unsigned i = 0; i < PT_NSRC; i++) {
         p->vp[i] = PT_MASK | PT_DISTRIBUTED;
         p->dest[i] = 0;
     }
-}
-static int pic_next(const PtPic *p) {
-    unsigned threshold = p->ctpr;
-    int serving = pic_winner(p, p->servicing, 0);
-    if (serving >= 0) {
-        unsigned rank = p->vp[serving] >> 16 & 15;
-        if (rank > threshold)
-            threshold = rank;
+    for (unsigned i = 0; i < 4; i++)
+        p->ipi_vp[i] = PT_MASK;
+    for (unsigned i = 0; i < PT_NCPU; i++) {
+        p->ctpr[i] = 15;
+        p->servicing[i] = p->eligible[i] = 0;
+        p->ipi_pending[i] = p->ipi_servicing[i] = 0;
     }
-    return pic_winner(p, pic_events(p) & p->eligible & ~p->servicing, threshold);
+}
+static int pic_next(const PtPic *p, unsigned cpu) {
+    unsigned threshold = p->ctpr[cpu], ipis = 0;
+    int serving = pic_winner(p, p->servicing[cpu], p->ipi_servicing[cpu], 0);
+    if (serving >= 0 && pic_rank(p, serving) > threshold)
+        threshold = pic_rank(p, serving);
+    for (unsigned i = 0; i < 4; i++)
+        if (!(p->ipi_vp[i] & PT_MASK))
+            ipis |= 1u << i;
+    uint64_t busy = 0;
+    for (unsigned i = 0; i < p->cpus; i++)
+        busy |= p->servicing[i];
+    return pic_winner(p, pic_events(p) & p->eligible[cpu] & ~busy, ipis & p->ipi_pending[cpu] & ~p->ipi_servicing[cpu],
+                      threshold);
 }
 static void pic_unlock(PtPic *p, int old) {
-    p->line_output = pic_next(p) >= 0;
-    void (*wake)(void *) = old != p->line_output ? p->notify : NULL;
-    void *context = p->notify_opaque;
+    p->line_output = 0;
+    for (unsigned i = 0; i < p->cpus; i++)
+        p->line_output |= (pic_next(p, i) >= 0) << i;
+    int changed = old ^ p->line_output;
     pthread_mutex_unlock(&p->lock);
-    if (wake)
-        wake(context);
+    for (unsigned i = 0; i < PT_NCPU; i++)
+        if ((changed >> i & 1) && p->notify[i])
+            p->notify[i](p->notify_opaque[i]);
 }
 void pt_pic_init(PtPic *p) {
     memset(p, 0, sizeof *p);
     if (pthread_mutex_init(&p->lock, NULL))
         abort();
+    p->cpus = 1;
     pic_reset(p);
 }
 void pt_pic_destroy(PtPic *p) {
     pthread_mutex_destroy(&p->lock);
 }
 void pt_pic_set_notify(PtPic *p, void (*fn)(void *), void *context) {
-    p->notify = fn;
-    p->notify_opaque = context;
+    p->notify[0] = fn;
+    p->notify_opaque[0] = context;
+}
+void pt_pic_add_cpu(PtPic *p, void (*fn)(void *), void *context) {
+    p->cpus = 2;
+    p->notify[1] = fn;
+    p->notify_opaque[1] = context;
 }
 /* A device raises or lowers its interrupt line on the OpenPIC; the CPU's external interrupt follows the highest-
  * priority pending source. */
@@ -141,21 +168,31 @@ void pt_pic_line(PtPic *p, unsigned source, unsigned producer, int high) {
         p->pending |= bit;
     pic_unlock(p, old);
 }
-int pt_pic_output(PtPic *p) {
+int pt_pic_output_cpu(PtPic *p, unsigned cpu) {
     pthread_mutex_lock(&p->lock);
-    int high = p->line_output;
+    int high = p->line_output >> cpu & 1;
     pthread_mutex_unlock(&p->lock);
     return high;
 }
-/* OpenPIC register reads: feature and version, the acknowledge register (takes the winning source), task priority
- * and the source registers. */
+int pt_pic_output(PtPic *p) {
+    return pt_pic_output_cpu(p, 0);
+}
+/* The per-CPU registers repeat every 0x1000 from 0x20000: the CPU of such an address, the address as CPU 0's. */
+static unsigned pic_cpu(const PtPic *p, uint32_t *address) {
+    unsigned cpu = *address >= 0x20000 && *address < 0x20000 + p->cpus * 0x1000u ? (*address - 0x20000) >> 12 : 0;
+    *address -= cpu << 12;
+    return cpu;
+}
+/* OpenPIC register reads: feature and version, the acknowledge register (takes the winning interrupt), task priority
+ * and the source and interprocessor vector registers. */
 uint32_t pt_pic_read(PtPic *p, uint32_t address) {
     pthread_mutex_lock(&p->lock);
     int old = p->line_output;
     uint32_t result = 0;
+    unsigned cpu = pic_cpu(p, &address);
     switch (address) {
     case 0x1000:
-        result = (PT_NSRC - 1u) << 16 | 2;
+        result = (PT_NSRC - 1u) << 16 | (p->cpus - 1) << 8 | 2;
         break;
     case 0x1020:
         result = p->gcr;
@@ -163,16 +200,26 @@ uint32_t pt_pic_read(PtPic *p, uint32_t address) {
     case 0x10e0:
         result = p->spurious;
         break;
+    case 0x10a0:
+    case 0x10b0:
+    case 0x10c0:
+    case 0x10d0:
+        result = p->ipi_vp[(address - 0x10a0) / 16];
+        break;
     case 0x20080:
-        result = p->ctpr;
+        result = p->ctpr[cpu];
         break;
     case 0x200a0: {
-        int i = pic_next(p);
+        int i = pic_next(p, cpu);
         result = p->spurious;
-        if (i >= 0) {
+        if (i >= (int)PT_NSRC) {
+            result = p->ipi_vp[i - PT_NSRC] & 255;
+            p->ipi_servicing[cpu] |= 1u << (i - PT_NSRC);
+            p->ipi_pending[cpu] &= ~(1u << (i - PT_NSRC));
+        } else if (i >= 0) {
             uint64_t bit = UINT64_C(1) << i;
             result = p->vp[i] & 255;
-            p->servicing |= bit;
+            p->servicing[cpu] |= bit;
             if (!(p->level_mask & bit))
                 p->pending &= ~bit;
         }
@@ -188,8 +235,10 @@ uint32_t pt_pic_read(PtPic *p, uint32_t address) {
                     const char *v = getenv("PT_PIC_ACTIVITY");
                     exact = v && atoi(v) != 0;
                 }
-                uint64_t active =
-                        (pic_events(p) & bit & ~(p->vp[i] & PT_MASK ? bit : 0)) | (exact ? p->servicing & bit : 0);
+                uint64_t busy = 0;
+                for (unsigned n = 0; n < p->cpus; n++)
+                    busy |= p->servicing[n];
+                uint64_t active = (pic_events(p) & bit & ~(p->vp[i] & PT_MASK ? bit : 0)) | (exact ? busy & bit : 0);
                 result = p->vp[i] | (active ? PT_ACTIVE : 0);
             } else if ((address & 31) == 16)
                 result = p->dest[i];
@@ -198,11 +247,12 @@ uint32_t pt_pic_read(PtPic *p, uint32_t address) {
     pic_unlock(p, old);
     return result;
 }
-/* OpenPIC register writes: global configuration and reset, task priority, end of interrupt and the source
- * vector/priority registers. */
+/* OpenPIC register writes: global configuration and reset, task priority, end of interrupt, the source
+ * vector/priority and destination registers, and the interprocessor vector and dispatch registers. */
 void pt_pic_write(PtPic *p, uint32_t address, uint32_t value) {
     pthread_mutex_lock(&p->lock);
     int old = p->line_output;
+    unsigned cpu = pic_cpu(p, &address);
     switch (address) {
     case 0x1020:
         if (value & 0x80000000u)
@@ -213,13 +263,29 @@ void pt_pic_write(PtPic *p, uint32_t address, uint32_t value) {
     case 0x10e0:
         p->spurious = value & 255;
         break;
+    case 0x10a0:
+    case 0x10b0:
+    case 0x10c0:
+    case 0x10d0:
+        p->ipi_vp[(address - 0x10a0) / 16] = value & (PT_MASK | 0x000f00ffu);
+        break;
+    case 0x20040:
+    case 0x20050:
+    case 0x20060:
+    case 0x20070: /* dispatch: the channel becomes pending on every CPU of the mask */
+        for (unsigned i = 0; i < p->cpus; i++)
+            if (value >> i & 1)
+                p->ipi_pending[i] |= 1u << ((address - 0x20040) / 16);
+        break;
     case 0x20080:
-        p->ctpr = value & 15;
+        p->ctpr[cpu] = value & 15;
         break;
     case 0x200b0: {
-        int i = pic_winner(p, p->servicing, 0);
-        if (i >= 0)
-            p->servicing &= ~(UINT64_C(1) << i);
+        int i = pic_winner(p, p->servicing[cpu], p->ipi_servicing[cpu], 0);
+        if (i >= (int)PT_NSRC)
+            p->ipi_servicing[cpu] &= ~(1u << (i - PT_NSRC));
+        else if (i >= 0)
+            p->servicing[cpu] &= ~(UINT64_C(1) << i);
         break;
     }
     default:
@@ -229,15 +295,16 @@ void pt_pic_write(PtPic *p, uint32_t address, uint32_t value) {
             if (!(address & 31))
                 p->vp[i] = value & (PT_MASK | PT_DISTRIBUTED | PT_POLARITY | PT_LEVEL | 0x000f00ffu);
             else if ((address & 31) == 16)
-                p->dest[i] = value & 1;
+                p->dest[i] = value & ((1u << p->cpus) - 1);
             if (p->vp[i] & PT_LEVEL)
                 p->level_mask |= bit;
             else
                 p->level_mask &= ~bit;
-            if (!(p->vp[i] & PT_MASK) && (p->dest[i] & 1))
-                p->eligible |= bit;
-            else
-                p->eligible &= ~bit;
+            for (unsigned n = 0; n < PT_NCPU; n++)
+                if (!(p->vp[i] & PT_MASK) && p->dest[i] && (unsigned)__builtin_ctz(p->dest[i]) == n)
+                    p->eligible[n] |= bit;
+                else
+                    p->eligible[n] &= ~bit;
         }
     }
     pic_unlock(p, old);
@@ -344,9 +411,27 @@ void pt_event_signal(PtEvent *e) {
     pthread_cond_broadcast(&e->cond);
     pthread_mutex_unlock(&e->lock);
 }
+void pt_event_poll(PtEvent *e, uint64_t max_ns) {
+    e->poll_max = max_ns;
+    e->poll_ns = 0;
+}
+static uint64_t monotonic_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
 /* Waits until the event's generation moves past observed, or the timeout (0: no wait, UINT64_MAX: forever). */
 int pt_event_wait(PtEvent *e, uint64_t observed, uint64_t ns) {
     struct timespec ts;
+    uint64_t began = e->poll_max ? monotonic_ns() : 0;
+    int slept = 0;
+    for (uint64_t look = e->poll_ns; look && monotonic_ns() - began < look;) { /* pt_event_poll */
+        if (atomic_load_explicit(&e->generation, memory_order_acquire) != observed)
+            return 1;
+#if defined(__aarch64__)
+        __asm__ volatile("isb"); /* a pause between two looks */
+#endif
+    }
     clock_gettime(CLOCK_MONOTONIC, &ts);
     if (ns != UINT64_MAX) {
         ts.tv_sec += ns / 1000000000;
@@ -359,6 +444,7 @@ int pt_event_wait(PtEvent *e, uint64_t observed, uint64_t ns) {
     pthread_mutex_lock(&e->lock);
     int rc = 0;
     while (e->generation == observed && !rc) {
+        slept = 1;
         if (ns == UINT64_MAX) {
             rc = pthread_cond_wait(&e->cond, &e->lock);
             continue;
@@ -380,6 +466,12 @@ int pt_event_wait(PtEvent *e, uint64_t observed, uint64_t ns) {
     }
     int changed = e->generation != observed;
     pthread_mutex_unlock(&e->lock);
+    if (e->poll_max && slept) { /* only a wait that slept says whether a longer look would have saved the sleep */
+        if (changed && monotonic_ns() - began <= e->poll_max)
+            e->poll_ns = !e->poll_ns ? e->poll_max / 32 : e->poll_ns * 2 > e->poll_max ? e->poll_max : e->poll_ns * 2;
+        else
+            e->poll_ns = 0;
+    }
     return changed ? 1 : rc == ETIMEDOUT ? 0 : -1;
 }
 

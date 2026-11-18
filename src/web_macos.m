@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -131,6 +132,7 @@ static NSURLSessionConfiguration *configuration(void) {
     NSError *_error;
     dispatch_semaphore_t _done;
     long long _sent;
+    int _profile; /* the guest browser (pt_web_profile) */
 }
 - (instancetype)initWithSocket:(int)fd {
     if ((self = [super init])) {
@@ -279,6 +281,7 @@ static NSURLSessionConfiguration *configuration(void) {
         free(head);
         return;
     }
+    _profile = pt_web_profile(pt_web_header(&q, "User-Agent"));
     NSString *host = nil, *path = nil;
     const char *target = q.target;
     if (!strncasecmp(target, "http://", 7)) {
@@ -309,7 +312,7 @@ static NSURLSessionConfiguration *configuration(void) {
     NSString *name = [host hasPrefix:@"["] ? host : [host componentsSeparatedByString:@":"].firstObject;
     if (local_host([[name stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"[]"]]
                 UTF8String])) {
-        answer(_fd, 403, @"The Mac itself is not reachable from Tiger.");
+        answer(_fd, 403, @"The Mac itself is not reachable from here.");
         free(head);
         return;
     }
@@ -388,8 +391,8 @@ static NSURLSessionConfiguration *configuration(void) {
         trace = pt_env_flag("PT_WEB_TRACE");
     if (trace || (_error && _response &&
                   !_short)) /* a failure after the head reaches the session log; PT_WEB_TRACE=1: every request */
-        NSLog(@"web: %@ %@ -> %ld %@, %lld bytes streamed%@", _request.HTTPMethod, _request.URL.absoluteString,
-              (long)_response.statusCode, _response.MIMEType ?: @"-", _sent,
+        NSLog(@"web: %@ %@ (browser profile %d) -> %ld %@, %lld bytes streamed%@", _request.HTTPMethod,
+              _request.URL.absoluteString, _profile, (long)_response.statusCode, _response.MIMEType ?: @"-", _sent,
               _error ? [@", error: " stringByAppendingString:_error.localizedDescription] : @"");
     if (!_response) {
         answer(_fd, 502,
@@ -407,8 +410,16 @@ static NSURLSessionConfiguration *configuration(void) {
             body = t;
         else
             type = nil;
-    } else if (!(_body.length >= 6 && !memcmp(_body.bytes, "bplist", 6)))
+    } else if (!(_body.length >= 6 && !memcmp(_body.bytes, "bplist", 6))) {
         _body.length = pt_web_downgrade(_body.mutableBytes, _body.length); /* a binary plist has counted strings */
+        static int edit = -1; /* PT_WEB_EDIT=0: pages as before (A/B) */
+        if (edit < 0)
+            edit = !getenv("PT_WEB_EDIT") || atoi(getenv("PT_WEB_EDIT")) != 0;
+        size_t m = 0;
+        uint8_t *h = edit && [mime isEqualToString:@"text/html"] ? pt_web_html(_body.bytes, _body.length, _profile, &m) : NULL;
+        if (h) /* lazy images and <noscript>: the page's scripts will not run in an old Safari */
+            body = [NSData dataWithBytesNoCopy:h length:m freeWhenDone:YES];
+    }
     if ([self sendHead:(long long)body.length type:type])
         send_all(_fd, body.bytes, body.length);
 }
