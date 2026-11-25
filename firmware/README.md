@@ -10,12 +10,14 @@ IEEE 1275 Open Firmware, licensed GPL-2.0. The fork starts from upstream commit
 |---|---|
 | `Makefile.target`, `config/scripts/ptolemy-build-date.py` | The banner's build date comes from `SOURCE_DATE_EPOCH`, so builds are reproducible |
 | `arch/ppc/qemu/init.c` | The board signature `PTOL`; a 1.25 GiB PCI memory window (the Radeon's 256 MiB VRAM BAR fits); the 7447A's L2 cache node; `altivec` and `data-streams` on the G4 cpu node, as Apple's firmware has them (Classic compares them with Gestalt) |
+| `arch/ppc/qemu/init.c` | A second G4's cpu node (`reg` 1, `state` `stopped`) when the board reports two CPUs (`FW_CFG_NB_CPUS`); with one, the tree is as before |
 | `drivers/macio.c` | The Screamer sound node Tiger's audio driver expects |
 | `drivers/pmu.c` | The VIA handshake is left as Apple's firmware leaves it before the OS starts |
 | `drivers/pci.c`, `drivers/pci_database.c` | The Radeon 9700 (`1002:4e44`, `ATY,R300`) gets the boot display FCode below |
 | `drivers/ptolemy-radeon.fs`, `drivers/build.xml`, `arch/ppc/build.xml`, `arch/ppc/ppc.fs` | Boot display FCode for the Radeon model: a linear 32-bit framebuffer set up by the host, and the ATI identity properties Tiger's Radeon driver reads |
 | `forth/admin/banner.fs` | The banner names the fork |
 | `arch/ppc/qemu/init.c`, `arch/ppc/qemu/ofmem.c`, `drivers/macio.c`, `drivers/pci.c`, `libopenbios/bindings.c` | An experimental PowerPC 970MP/U3 board description for future G5 work; unused by Ptolemy 1.0 beta 3, which runs G3/G4 Macs only |
+| `arch/build.xml`; 389 files removed | Reduced to what the PowerPC build reads: the other architectures (`arch/` and `include/arch/`), the other PowerPC boards, documentation, utilities and the drivers, file systems and Forth sources no PowerPC configuration builds. `arch/build.xml` includes `ppc` only. The ROM is byte for byte the same as before (every object of the build is) |
 
 ## Building the ROM
 

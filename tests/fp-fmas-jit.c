@@ -99,6 +99,12 @@ int main(void) {
                        kind != 6); /* the cases these paths exist for stay in the JIT */
                 slow++;
             } else {
+#if defined(__x86_64__) /* the container's unicorn run: x86's fenv sees tininess after rounding (PPC and ARM: before), so an
+                         * exact value just under 2^-126 that rounds to it raises no UX in the interpreter there */
+                if (fabs(expected.fpr[d]) == 0x1p-126 && !((c.fpscr ^ expected.fpscr) & ~0x88000000u) &&
+                    (c.fpscr ^ expected.fpscr) & c.fpscr & 0x08000000u)
+                    expected.fpscr = c.fpscr;
+#endif
                 if (memcmp(c.fpr, expected.fpr, sizeof c.fpr) || c.fpscr != expected.fpscr) {
                     fprintf(stderr,
                             "MISMATCH direct=%u n=%u in=%08x kind=%u a=%a b=%a c=%a fpscr %08x jit %a/%08x interp %a/%08x\n",

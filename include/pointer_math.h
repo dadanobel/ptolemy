@@ -4,9 +4,9 @@
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
-/* Precise AppKit deltas are pixels; legacy HID wheel units are lines. */
-static inline double pt_pointer_scroll(double delta, int precise) {
-    return isfinite(delta) ? delta / (precise ? 10.0 : 1.0) : 0;
+/* A scroll delta (AppKit: pixels when precise, else lines) in the guest mouse's scroll counts. */
+static inline double pt_pointer_scroll(double delta, double counts_per_unit) {
+    return isfinite(delta) ? delta * counts_per_unit : 0;
 }
 static inline int32_t pt_pointer_whole(double *value) {
     if (!isfinite(*value)) {

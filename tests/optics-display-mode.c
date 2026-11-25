@@ -63,7 +63,7 @@ int main(void) {
     frame(d, 60000000, 1000, 32);
     assert(pt_radeon_display_mode(d, 1000, 700, 24, NULL) == EINVAL &&
            pt_radeon_display_mode(d, 1004, 700, 32, NULL) == EINVAL &&
-           pt_radeon_display_mode(d, 4096, 700, 8, NULL) == EINVAL && pt_radeon_palette(d, 255, 2, rgb) == EINVAL);
+           pt_radeon_display_mode(d, 4104, 700, 8, NULL) == EINVAL /* wider than the R300 CRTC */ && pt_radeon_palette(d, 255, 2, rgb) == EINVAL);
     scanout(d, 1000, 700, 32, 4000, 3);
     pt_radeon_close(d);
     puts("PASS: display modes 8/16/32 bpp, pitch, framebuffer aperture and swap, colour table; bad requests refused");

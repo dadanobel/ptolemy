@@ -30,8 +30,8 @@ static void audio_mouse_dma(void) {
     pt_hid_pointer(&h, 1, 2, 0, 0);
     pt_hid_pointer(&h, 0, 3, 0, 0);
     assert(h.count == 2);
-    assert(pt_hid_packet(&h, 1, PT_USB_IN, report, 8, 0) == 4 && report[0] == 1);
-    assert(pt_hid_packet(&h, 1, PT_USB_IN, report, 8, 0) == 4 && !report[0]);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, report, 8, 0) == 5 && report[0] == 1);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, report, 8, 0) == 5 && !report[0]);
     pt_hid_pointer(&h, 0, INT32_MAX, 0, 0);
     pt_hid_pointer(&h, 0, INT32_MAX, 0, 0);
     assert(h.events[h.head].x == INT32_MAX);

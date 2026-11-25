@@ -50,6 +50,19 @@ enum {
     PTA_EXPORT_CHUNK,
     PTA_EXPORT_COMMIT
 };
+/* Video (pt_video.h): for any process of the guest, without the agent's token, and with no agent at all.
+ * r4 session, r5 frame, r6 address, r7 length unless noted; results in r3 and, where noted, r4 and r5.
+ * PROBE: -> r4 PTV_VERSION, r5 1 when a decoder is there. OPEN: r5 width << 16 | height, r6/r7 the avcC -> r4 session.
+ * DECODE: r6/r7 the compressed frame (up to PTV_MAX_FRAME). FETCH: r6 the 2vuy buffer, r7 its bytes per row.
+ * DROP: r5 a frame or PTV_ALL. CLOSE. */
+enum {
+    PTA_VIDEO_PROBE = 32,
+    PTA_VIDEO_OPEN,
+    PTA_VIDEO_DECODE,
+    PTA_VIDEO_FETCH,
+    PTA_VIDEO_DROP,
+    PTA_VIDEO_CLOSE
+};
 #define PTA_CAP_INPUT 1u
 #define PTA_CAP_EXPORT 2u
 #define PTA_CAP_POINTER 4u

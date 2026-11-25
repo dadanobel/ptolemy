@@ -167,6 +167,28 @@ func productSelfTest() throws {
             "Explicit CPU launch contract")
         try check((resources.environment(.ready, chosen)["PT_CPUS"] == "2") == (cpu.id == "7447a-dual"), "Dual G4 asks the engine for two CPUs")
     }
+    try check(legacy.display == nil && resources.environment(.ready, legacy)["PT_EDID_MODE"] == "screen", "No display mode: the screen's size")
+    var wide = legacy
+    wide.display = "1920x1080"
+    try check(resources.environment(.ready, wide)["PT_EDID_MODE"] == "1920x1080", "A chosen display mode reaches the engine")
+    wide.display = "1366x768"
+    try reject { try wide.validate() }  // not in the driver's catalog
+    try check(resources.environment(.ready, legacy)["PT_UPSCALE"] == "1", "MetalFX scaling on without a setting")
+    var plain = legacy
+    plain.upscale = false
+    try check(resources.environment(.ready, plain)["PT_UPSCALE"] == "0", "MetalFX scaling off when the setting says so")
+    try check(
+        resources.environment(.ready, legacy)["OPTICS_INTERNAL"] == defaultRenderScale && defaultRenderScale == "1.5",
+        "3D at 1.5x without a setting")
+    for choice in renderScales {
+        var sharp = legacy
+        sharp.renderScale = choice
+        try sharp.validate()
+        try check(resources.environment(.ready, sharp)["OPTICS_INTERNAL"] == choice, "A chosen 3D resolution reaches the engine")
+    }
+    var blurred = legacy
+    blurred.renderScale = "3"
+    try reject { try blurred.validate() }  // not one of the engine's
     let oldFast = getenv("PT_CPU_FAST").map { String(cString: $0) }
     setenv("PT_CPU_FAST", "0", 1)
     try check(resources.environment(.ready)["PT_CPU_FAST"] == "0", "CPU profile opt-out survives launcher")

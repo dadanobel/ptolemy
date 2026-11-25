@@ -105,8 +105,8 @@ int main(int argc, char **argv) {
                                 int ok = optics_draw_build(&d, regs, state, immd ? 0x35 : 0x34, p,
                                                            immd ? 1 + 3 * (width + 3) : 1, &aos, fetch, NULL, &why);
                                 if (type >= 4 && sign && norm &&
-                                    (method == 3 || (method == 2 && (!getenv("OPTICS_VAP_NORM2") ||
-                                                                     !atoi(getenv("OPTICS_VAP_NORM2")))))) {
+                                    (method == 3 || (method == 2 && getenv("OPTICS_VAP_NORM2") &&
+                                                                     !atoi(getenv("OPTICS_VAP_NORM2"))))) {
                                     assert(!ok && !d.vertex && !d.raw_vertex);
                                     continue;
                                 }

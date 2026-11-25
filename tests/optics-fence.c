@@ -81,12 +81,13 @@ static void ring(PtRadeon *d, uint32_t w) {
     uint8_t b[4] = {(uint8_t)w, (uint8_t)(w >> 8), (uint8_t)(w >> 16), (uint8_t)(w >> 24)};
     assert(!pt_radeon_vram(d, RB + 4 * wptr++, b, 4, 1));
 }
-/* One type-0 packet from DST_HEIGHT_WIDTH through SCRATCH_REG0: zeros, then the scratch value. */
+/* One type-0 packet from DST_HEIGHT_WIDTH through SCRATCH_REG0: a 1 x 1 rectangle (refused: no 2D state; an empty
+ * one would draw nothing and count nothing), zeros, then the scratch value. */
 static void packet(PtRadeon *d, uint32_t value) {
     uint32_t n = (SCRATCH_REG0 - DST_HEIGHT_WIDTH) / 4 + 1;
     ring(d, (n - 1) << 16 | DST_HEIGHT_WIDTH >> 2);
     for (uint32_t i = 0; i + 1 < n; i++)
-        ring(d, 0);
+        ring(d, i ? 0 : 0x00010001);
     ring(d, value);
 }
 int main(int argc, char **argv) {

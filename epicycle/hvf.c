@@ -99,6 +99,7 @@ static struct {
     uint64_t ns;
     uint32_t ppc, lr;
 } mmio_h[256]; // PT_STATS: JIT device accesses by 32-bit register and direction (pg = address >> 2 << 1 | store), time since the last snapshot
+/* One EL1 system register of this CPU's vCPU. */
 static uint64_t sreg(hv_sys_reg_t r) {
     uint64_t v;
     hv_vcpu_get_sys_reg(vcpu, r, &v);
@@ -125,12 +126,15 @@ static PT_CPU_LOCAL uint64_t clear_gen = 1, slot_tick, flushes;
 static uint64_t slot_hit, slot_miss;
 #define ENVC ((CPU *)(eng + O_ENV))
 #define cur (ENVC->vs_cur) // the installed slot: the VM's JIT code switches it too
+/* Page n of SR slot s in the engine area: its roots 1 and 2, then its live L2 tables. */
 static uint8_t *slot_page(int s, int n) {
     return eng + O_SLOT + 0x1000 * (SLOT_PAGES * s + n);
 }
+/* Translation root k: 0 the table for DR=0, 1 and 2 the installed slot's DR=1 roots for supervisor and user. */
 static uint64_t *root(int k) {
     return (uint64_t *)(k ? slot_page(cur, k - 1) : eng + O_PT);
 }
+/* The VM's address (IPA) of a pointer into the engine area. */
 static uint64_t ipa(const void *p) {
     return eng_va + (uint64_t)((const uint8_t *)p - eng);
 }
@@ -194,15 +198,20 @@ static void unmark(uint32_t q) {
     if (pt_smp_cpus() > 1 && !(any >> (q & 63) & 1))
         anymap[q >> 6] &= ~(1ull << (q & 63));
 }
+/* Slot s's live L2 table for root k (1 or 2) and the 1 GB region g. */
 static uint64_t *live_at(int s, int k, int g) {
     return (uint64_t *)slot_page(s, 2) + 512 * (2 * g + k - 1);
 }
+/* live_at() for the installed slot. */
 static uint64_t *live(int k, int g) {
     return live_at(cur, k, g);
 }
+/* The engine-area pointer of the L3 table an L2 descriptor points to. */
 static uint64_t *l3tab(uint64_t d) {
     return (uint64_t *)(eng + ((d & 0xFFFFFFFFF000ull) - eng_va));
 }
+/* TTBR0 for the MSR now (root 0 for DR=0, the slot's supervisor or user root for DR=1) with its ASID; all three are
+ * kept in CPU for the JIT's rfi and sc. */
 static void set_ttbr(CPU *c) {
     int k = c->msr & MSR_DR ? 1 + !!(c->msr & MSR_PR) : 0;
     c->ttbr[0] = ipa(root(0)) | (uint64_t)(asid_base + 1) << 48; // also for rfi/sc in the JIT
@@ -298,6 +307,7 @@ static int queue_page(const struct St *s, uint32_t q) {
     e->tlbi_va[e->tlbi_n++] = (va + (4ull << 30)) >> 12;
     return 1;
 }
+/* The JIT's map hook: on a flush every table goes, then TTBR0 follows the MSR. */
 static void vm_dmap(CPU *c, int flush) {
     if (flush)
         flush_maps();
@@ -349,19 +359,25 @@ static void drop_pages(CPU *c, const uint32_t *ea, int n) { // remove the EA pag
             else
                 d_other++;
         }
-        unmark(q);
+        /* A DBAT move (bit 0) changes its block's EAs only, segment included: the same page number in other
+         * segments keeps its entries (12-13% of all fills were these, K4), and then the page its mark. */
+        int kept = 0;
         for (int j = 0; j < chn[b]; j++)
             for (int k = 0; k < 2; k++) {
                 uint64_t d = st[chl[b][j]].l2[k][b];
                 if (d & 1) {
                     uint64_t *e = l3tab(d) + p;
-                    if (*e & 1) {
+                    if (*e & 1 && ea[i] & 1 && st[chl[b][j]].seg != ea[i] >> 28)
+                        kept = 1;
+                    else if (*e & 1) {
                         *e = 0;
                         if (!queue_page(&st[chl[b][j]], q))
                             cleared = 1;
                     }
                 }
             }
+        if (!kept)
+            unmark(q);
     }
     /* Every removal of a valid entry gets new ASIDs, so no TLB holds a translation of a page that no table maps. */
     if (cleared) {
@@ -380,6 +396,9 @@ static void drop_pages(CPU *c, const uint32_t *ea, int n) { // remove the EA pag
 static struct {
     uint32_t n, ea[512];
 } left[PT_SMP_MAX];
+/* tlbie of n EA pages (n < 0: everything): out of this CPU's tables, and handed to every other CPU whose tables may
+ * hold one, which runs them at its next entry; the world stops once so that no CPU keeps running across a removed
+ * page. */
 static void vm_dtlbie(CPU *c, const uint32_t *ea, int n) {
     if (n > 0)
         drop_pages(c, ea, n);
@@ -520,6 +539,8 @@ static int vm_prof = -1;
 void jit_prof_sample(CPU *c, uint64_t pc);
 void jit_prof_outside(void);
 static hv_vcpu_t prof_vcpu;
+/* PT_PROF: every millisecond, a vCPU inside the VM is made to exit for a sample; time outside the VM is counted
+ * apart. */
 static void *prof_tick(void *u) {
     (void)u;
     for (;;) {
@@ -793,6 +814,7 @@ CPU *pt_hv_add_cpu(void) {
     jit_smp = 1;
     return (CPU *)(eng_of[1] + O_ENV);
 }
+/* This thread runs CPU n: its vCPU and its own tables. */
 void pt_hv_cpu_thread(int n) {
     cpu_attach(n);
 }
@@ -800,6 +822,7 @@ void pt_hv_cpu_thread(int n) {
 void pt_hv_map(void *host, uint32_t base, uint64_t size, int ro) {
     CK(hv_vm_map(host, base, size, HV_MEMORY_READ | HV_MEMORY_EXEC | (ro ? 0 : HV_MEMORY_WRITE)));
 }
+/* Removes guest memory from the VM; the IPA range becomes a device again. */
 void pt_hv_unmap(uint32_t base, uint64_t size) {
     CK(hv_vm_unmap(base, size));
 }
@@ -815,6 +838,7 @@ int pt_hv_protect(uint64_t ipa, uint64_t size, unsigned prot) {
  * the caller's now, another CPU's before its next guest instruction (vm_enter) or reading of its counter. */
 static _Atomic uint64_t shift_all;
 static PT_CPU_LOCAL uint64_t shift_mine;
+/* This vCPU's counter offset takes up the pauses added since it last looked (pt_hv_vtimer_shift). */
 static void vtimer_catch_up(void) {
     uint64_t all = atomic_load(&shift_all), off = 0;
     if (all == shift_mine)

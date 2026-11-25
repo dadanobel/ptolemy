@@ -57,6 +57,7 @@ enum {
 typedef struct {
     uint32_t type, dwords, skip, dst, ext;
 } Stream;
+/* A draw that is not built: the reason for the log, and 0. */
 static int refuse(const char **reason, const char *why) {
     if (reason)
         *reason = why;
@@ -70,6 +71,7 @@ float optics_draw_depth_clear(uint32_t value, uint32_t format) {
 unsigned optics_draw_clear_mask(unsigned planes, uint32_t format) {
     return (planes & 2) && (format & 15) == 2 ? planes | 4 : planes;
 }
+/* A register's bits as a float. */
 static float f32(uint32_t v) {
     float f;
     memcpy(&f, &v, 4);
@@ -112,7 +114,8 @@ void optics_texture_unswap(const OpticsTexture *t, uint8_t *p, size_t n) {
     optics_unswap(t->swap, p, n);
 }
 /* Signed method 2 follows AMD's endpoint/zero examples and OpenGL 1.5/2.1
- * table 2.9: (2*c+1)/(2^n-1). Unverified with a guest, so opt-in (OPTICS_VAP_NORM2=1). */
+ * table 2.9: (2*c+1)/(2^n-1). Unverified with a guest; on since 22.11 (a refused draw is wrong for sure), OPTICS_VAP_NORM2=0
+ * refuses those draws again. */
 static void decode_stream(uint32_t t, unsigned method, const uint32_t w[4], float raw[4]) {
     unsigned type = t & 15, sign = t >> 14 & 1, norm = t >> 15 & 1;
     raw[0] = raw[1] = raw[2] = 0;
@@ -365,6 +368,8 @@ static unsigned bank_used(const PtR2ShaderIR *ir, unsigned bank) {
             }
     return n;
 }
+/* The decoded vertex (PVS) or fragment (US) program in the registers now: the last one again while its state is
+ * unchanged, else one of the 16 kept for its stage, else decoded now. Its id, constants and inputs come back too. */
 static const PtR2ShaderIR *program(const struct OpticsR300State *st, PtR2ShaderStage stage, uint64_t *id,
                                    unsigned *constants, unsigned *inputs, const char **reason) {
     unsigned k = stage == PT_R2_SHADER_PVS;
@@ -382,8 +387,10 @@ static const PtR2ShaderIR *program(const struct OpticsR300State *st, PtR2ShaderS
          * memory; the captured words are its active ranges and node addresses are relative to them. Without them one
          * program at another place is the same program (with them Doom 3 gave 1 082 US ids and filled the Metal
          * program cache). */
-        if (!k && p.count > 2)
+        if (!k && p.count > 2) {
             p.words[2] &= ~(63u | 31u << 13);
+            pt_r2_shader_us_canonical(p.words, p.count); /* nor do instructions the nodes do not run make another program */
+        }
         Program **slot = NULL;
         for (unsigned i = 0; i < 16 && !hit; i++) {
             Program *c = programs[k][i];
@@ -470,6 +477,8 @@ int optics_draw_passthrough(unsigned n, PtR2ShaderIR *ir) {
     return pt_r2_shader_decode(PT_R2_SHADER_PVS, PT_R2_SHADER_FP32_SEPARATE, w, 2 + 4 * n, 0, ir, &e) ==
            PT_R2_SHADER_OK;
 }
+/* One draw packet (IMMD_2, VBUF_2 or INDX_2) with the register state into an OpticsDraw: target, scissor, viewport,
+ * programs, constants, textures, blending, depth and stencil, vertices and indices. 0: refused, with the reason. */
 static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR300State *st, uint8_t opcode,
                       const uint32_t *payload, uint32_t words, const OpticsAos *aos, OpticsFetch fetch,
                       void *fetch_context, const char **reason) {
@@ -561,6 +570,8 @@ static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
     d->cb_bpp = cbytes[format];
     d->cb_format = (uint8_t)format;
     d->cb_select = (uint8_t)(R(US_OUT_FMT_0) >> 8);
+    d->cb_fp16 = (R(US_OUT_FMT_0) & 31) == 18; /* r300_reg.h R300_US_OUT_FMT_C4_16_FP (Leopard: 0x3912, u195 #8) */
+    d->cb_rgb10a2 = (R(US_OUT_FMT_0) & 31) == 13; /* C_2_10_10_10: Tiger's GL_RGB10_A2 FBO, 0x390d (u202 #22) */
     d->cb_endian = (uint8_t)(pitch >> 19 & 3);
     /* Fixed-function units (draw.h). FG_FOG_BLEND bit 0 enable; FG_FOG_COLOR_R/G/B 10-bit; GA_FOG_SCALE/OFFSET floats;
      * GB_SELECT [2:0] the fog input. VAP_CLIP_CNTL [5:0] user plane enables, bit 16 CLIP_DISABLE. RB3D_ROPCNTL bit 2
@@ -806,7 +817,8 @@ static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
             return refuse(reason, "vertex stream list without LAST_VEC");
     }
     /* Index list for INDX_2: 16-bit pairs (low half first) or 32-bit, after the VF_CNTL word. */
-    uint32_t *indices = NULL, nvert = count;
+    uint32_t *indices = NULL, nvert = count, first = count ? UINT32_MAX : 0;
+    OpticsAos from;
     if (opcode == 0x36) {
         int wide = vf >> 11 & 1;
         uint32_t need = wide ? count : (count + 1) / 2;
@@ -825,6 +837,19 @@ static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
             }
             if (indices[i] + 1 > nvert)
                 nvert = indices[i] + 1;
+            if (indices[i] < first)
+                first = indices[i];
+        }
+        /* The arrays are read from the lowest index on, not from vertex 0: UT2004 draws ranges of one large array,
+         * and each draw copied 58 KiB of vertices on average (47.8 GiB a run). */
+        if (first) {
+            from = *aos;
+            for (unsigned s = 0; s < 16; s++)
+                from.array[s].offset += (uint64_t)first * from.array[s].stride * 4;
+            aos = &from;
+            for (uint32_t i = 0; i < count; i++)
+                indices[i] -= first;
+            nvert -= first;
         }
     }
     if (nvert > OPTICS_DRAW_MAX_VERTICES ||
@@ -832,9 +857,29 @@ static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
         free(indices);
         return refuse(reason, "vertex size/count inconsistent with the packet");
     }
+    /* 3D_LOAD_VBPNTR arrays give each vertex one sequence of dwords that the streams take in order (their dwords, then
+     * SKIP_DWORDS), so one array may feed several streams: Cro-Mag Rally's terrain (Tiger's driver) is one 6-dword array
+     * for FLOAT_3, BYTE and FLOAT_2 streams. Each stream then reads a view into its array; a stream across two arrays is
+     * refused. Arrays matching the streams one to one are read as before. */
+    OpticsAos view;
     if (opcode != 0x35 && aos->count < ns) {
-        free(indices);
-        return refuse(reason, "fewer vertex arrays than streams");
+        view = *aos;
+        view.local = 0;
+        for (unsigned s = 0, a = 0, at = 0; s < ns; s++) {
+            while (a < aos->count && at >= aos->array[a].components)
+                at -= aos->array[a++].components;
+            if (a == aos->count || at + stream[s].dwords > aos->array[a].components) {
+                free(indices);
+                return refuse(reason, "vertex stream across arrays or past the last array");
+            }
+            view.array[s] = aos->array[a];
+            view.array[s].offset += 4u * at;
+            view.array[s].components -= at;
+            view.local |= (aos->local >> a & 1) << s;
+            at += stream[s].dwords + stream[s].skip;
+        }
+        view.count = ns;
+        aos = &view;
     }
     d->vertices = nvert;
     for (unsigned s = 0; s < ns; s++)
@@ -862,7 +907,7 @@ static int draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
     static int norm2 = -1;
     if (norm2 < 0) {
         const char *v = getenv("OPTICS_VAP_NORM2");
-        norm2 = v && atoi(v) != 0;
+        norm2 = !v || atoi(v) != 0;
     }
     for (unsigned s = 0; s < ns; s++)
         if ((stream[s].type & 0xc00f) >> 14 == 3 && (stream[s].type & 15) >= 4) {
@@ -1682,6 +1727,7 @@ int optics_draw_build(OpticsDraw *d, const uint32_t *reg, const struct OpticsR30
         optics_draw_free(d);
     return ok;
 }
+/* Frees the arrays a built (or half-built) draw owns. */
 void optics_draw_free(OpticsDraw *d) {
     if (d) {
         free(d->vertex);

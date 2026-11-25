@@ -45,6 +45,7 @@ static BOOL UnpackClassic(NSString *binary, NSString *path) {
 }
 @interface Antiochus : NSObject {
     NSWindow *window; NSTextField *status, *numbers; NSButton *start, *classic, *reveal;
+    NSTask *graphicsTask; NSMenuItem *graphicsMenu;
     NSTask *task; NSTimer *timer; NSDate *began; NSString *report, *caseDirectory, *nonce;
     NSMutableArray *records; NSMutableDictionary *classicResult; AntResult results[ANT_CASE_COUNT];
     unsigned index; BOOL running, stopping, cancelled, timedOut, classicRunning, reportFailed; double stopTime;
@@ -81,11 +82,50 @@ static BOOL UnpackClassic(NSString *binary, NSString *path) {
     [window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
     NSMenu *menu = [[[NSMenu alloc] initWithTitle:@""] autorelease]; NSMenuItem *appItem = [[[NSMenuItem alloc] initWithTitle:@"Antiochus" action:NULL keyEquivalent:@""] autorelease];
     NSMenu *appMenu = [[[NSMenu alloc] initWithTitle:@"Antiochus"] autorelease];
+    [appMenu setAutoenablesItems:NO];
+    graphicsMenu=[appMenu addItemWithTitle:@"Run on-screen OpenGL checks (Piglit fork)" action:@selector(graphics:) keyEquivalent:@"g"];
+    [graphicsMenu setTarget:self];
     [appMenu addItemWithTitle:@"Quit Antiochus" action:@selector(terminate:) keyEquivalent:@"q"];
     [appItem setSubmenu:appMenu]; [menu addItem:appItem]; [NSApp setMainMenu:menu];
 }
+- (void)graphics:(id)sender {
+    (void)sender;
+    if(running || graphicsTask) return;
+    char path[4096];
+    NSString *desktop=[NSSearchPathForDirectoriesInDomains(NSDesktopDirectory,NSUserDomainMask,YES) objectAtIndex:0];
+    NSString *pattern=[desktop stringByAppendingPathComponent:@"Antiochus-Graphics-XXXXXX"];
+    if(![pattern getFileSystemRepresentation:path maxLength:sizeof path] || !mkdtemp(path)) {
+        [status setStringValue:@"Cannot create the graphics report directory."]; return;
+    }
+    [report release]; report=[[NSString stringWithUTF8String:path] copy];
+    NSString *res=[[NSBundle mainBundle] resourcePath];
+    graphicsTask=[[NSTask alloc] init]; [graphicsTask setLaunchPath:@"/usr/bin/perl"];
+    [graphicsTask setArguments:[NSArray arrayWithObjects:[res stringByAppendingPathComponent:@"graphics-report.pl"],
+        @"--run",report,[res stringByAppendingPathComponent:@"antiochus-worker"],nil]];
+    @try { [graphicsTask launch]; }
+    @catch(NSException *e) { [graphicsTask release];graphicsTask=nil;[status setStringValue:[e reason]];return; }
+    [graphicsMenu setEnabled:NO]; [classic setEnabled:NO];[reveal setEnabled:YES];[start setTitle:@"Stop checks"];
+    [numbers setStringValue:@"OpenGL checks"];[status setStringValue:@"Starting the visible graphics suite."];
+    timer=[[NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(graphicsPoll:) userInfo:nil repeats:YES] retain];
+}
+- (void)graphicsPoll:(NSTimer *)sender {
+    (void)sender;
+    if([graphicsTask isRunning]) {
+        NSString *s=[NSString stringWithContentsOfFile:[report stringByAppendingPathComponent:@"current.tsv"]
+            encoding:NSUTF8StringEncoding error:NULL];
+        if(s) [status setStringValue:s]; return;
+    }
+    int rc=[graphicsTask terminationStatus]; [graphicsTask release]; graphicsTask=nil;
+    [timer invalidate];[timer release];timer=nil;
+    NSString *summary=[NSString stringWithContentsOfFile:[report stringByAppendingPathComponent:@"summary.tsv"]
+        encoding:NSUTF8StringEncoding error:NULL];
+    [numbers setStringValue:@"OpenGL checks"];[status setStringValue:rc==0 && summary?
+        [[summary componentsSeparatedByString:@"\n"] componentsJoinedByString:@"   "]:@"Run incomplete. See the saved report."];
+    [start setTitle:@"Run"];[classic setEnabled:YES];[graphicsMenu setEnabled:YES];
+}
 - (void)begin:(id)sender {
     (void)sender;
+    if(graphicsTask) { if([graphicsTask isRunning]) [graphicsTask terminate]; return; }
     if (running) {
         if (classicRunning) { [status setStringValue:@"Close the Classic test window to cancel it."]; return; }
         stopping = YES; cancelled = YES; stopTime = [NSDate timeIntervalSinceReferenceDate]; [task terminate]; return;
@@ -118,7 +158,7 @@ static BOOL UnpackClassic(NSString *binary, NSString *path) {
     if(![fm copyPath:[resource stringByAppendingPathComponent:@"build-manifest.txt"] toPath:[report stringByAppendingPathComponent:@"build-manifest.txt"] handler:nil])reportFailed=YES;
     if(![environment writeToFile:[report stringByAppendingPathComponent:@"environment.plist"] atomically:YES])reportFailed=YES;
     memset(results,0,sizeof results); index=0;running=YES;stopping=NO;cancelled=NO;timedOut=NO;classicRunning=NO;
-    [classic setEnabled:NO];[start setTitle:@"Cancel"];[reveal setEnabled:YES];
+    [graphicsMenu setEnabled:NO];[classic setEnabled:NO];[start setTitle:@"Cancel"];[reveal setEnabled:YES];
     [numbers setStringValue:@"CPU        -\nGPU        -\nOverall    -"];
     [self save:NO];if(reportFailed){cancelled=YES;[self finish];return;}
     timer=[[NSTimer scheduledTimerWithTimeInterval:0.2 target:self selector:@selector(poll:) userInfo:nil repeats:YES] retain];
@@ -228,12 +268,17 @@ static BOOL UnpackClassic(NSString *binary, NSString *path) {
         [numbers setStringValue:[NSString stringWithFormat:@"CPU        %.0f\nGPU        %.0f\nOverall    %.0f",score.cpu,score.gpu,score.total]];
         [status setStringValue:[NSString stringWithFormat:@"GPU checks %d/%d; speed (valid tests) %.0f\nFailures %d, diagnostics %d; Classic: %@",score.gpu_passed,score.gpu_checked,score.gpu_speed,score.failed+score.optional_failed,score.diagnostic_failed,[classicResult objectForKey:@"status"]]];
     } else [status setStringValue:reportFailed?@"Report write failed. No accepted overall score.":@"Incomplete run. Partial data saved; no overall score."];
-    [start setTitle:@"Run again"];[classic setEnabled:YES];
+    [graphicsMenu setEnabled:YES];[start setTitle:@"Run again"];[classic setEnabled:YES];
 }
 - (void)reveal:(id)sender { (void)sender;if(report)[[NSWorkspace sharedWorkspace] selectFile:report inFileViewerRootedAtPath:@""]; }
 - (BOOL)windowShouldClose:(id)sender { (void)sender;[NSApp terminate:nil];return NO; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
     (void)app;
+    if(graphicsTask && [graphicsTask isRunning]) {
+        if(NSRunAlertPanel(@"Stop OpenGL checks?",@"Completed evidence will be kept.",@"Stop",@"Continue",nil)!=NSAlertDefaultReturn)
+            return NSTerminateCancel;
+        [graphicsTask terminate];
+    }
     if(running) {
         int answer=NSRunAlertPanel(@"Stop Antiochus?",@"The current run will be incomplete. Its report will be kept.",@"Stop",@"Continue",nil);
         if(answer!=NSAlertDefaultReturn)return NSTerminateCancel;

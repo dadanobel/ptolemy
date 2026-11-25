@@ -142,7 +142,7 @@ static void hid(void) {
             assert(pt_read_le(data + 8, 2) == 0x05ac && pt_read_le(data + 10, 2) == 0x020b);
         assert(descriptor(&h, 0x80, 0x0200, cfg) == 34 && pt_read_le(cfg + 2, 2) == 34);
         unsigned n = descriptor(&h, 0x81, 0x2200, data);
-        assert(n == pt_read_le(cfg + 25, 2) && report_bytes(data, n) == (kind == 0 ? 8 : kind == 1 ? 4 : 6));
+        assert(n == pt_read_le(cfg + 25, 2) && report_bytes(data, n) == (kind == 0 ? 8 : kind == 1 ? 5 : 6));
         if (!kind)
             assert(cfg[22] == 33 && cfg[16] == 1);
         h.configuration = 1;

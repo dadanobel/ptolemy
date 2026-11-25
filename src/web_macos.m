@@ -106,6 +106,7 @@ static NSData *transcode(NSData *d, NSString **type) {
     *type = alpha ? @"image/png" : @"image/jpeg";
     return out;
 }
+enum { WEB_BUFFER_MAX = 64 << 20 }; /* a body rewritten in memory (pages, scripts, catalogs, images to transcode) */
 static NSURLSessionConfiguration *configuration(void) {
     static NSURLSessionConfiguration *c;
     static dispatch_once_t once;
@@ -226,9 +227,19 @@ static NSURLSessionConfiguration *configuration(void) {
 }
 - (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)t didReceiveData:(NSData *)d {
     (void)s;
-    if (_buffer) {
+    if (_buffer && _body.length + d.length <= WEB_BUFFER_MAX) {
         [_body appendData:d];
         return;
+    }
+    if (_buffer) { /* too large to rewrite in memory: what came so far and the rest go through as they are */
+        _buffer = NO;
+        if (![self sendHead:-1 type:nil] || !send_all(_fd, _body.bytes, _body.length)) {
+            _short = YES;
+            [t cancel];
+            return;
+        }
+        _sent = (long long)_body.length;
+        _body = [NSMutableData data];
     }
     __block BOOL ok = YES;
     [d enumerateByteRangesUsingBlock:^(const void *p, NSRange r, BOOL *stop) {
@@ -309,13 +320,6 @@ static NSURLSessionConfiguration *configuration(void) {
     }
     if ([host hasSuffix:@":80"])
         host = [host substringToIndex:host.length - 3];
-    NSString *name = [host hasPrefix:@"["] ? host : [host componentsSeparatedByString:@":"].firstObject;
-    if (local_host([[name stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"[]"]]
-                UTF8String])) {
-        answer(_fd, 403, @"The Mac itself is not reachable from here.");
-        free(head);
-        return;
-    }
     NSString *text = [NSString stringWithFormat:@"https://%@%@", host, path];
     NSURL *url = [NSURL URLWithString:text];
     if (!url) {
@@ -323,8 +327,16 @@ static NSURLSessionConfiguration *configuration(void) {
         [ok addCharactersInString:@"%#"];
         url = [NSURL URLWithString:[text stringByAddingPercentEncodingWithAllowedCharacters:ok]];
     }
-    if (!url) {
+    if (!url.host.length) {
         answer(_fd, 400, @"The address could not be read.");
+        free(head);
+        return;
+    }
+    /* The host the request will reach, as NSURL reads it: a Host or address with a user part ("x@127.0.0.1") names its
+     * host after the @. Unverified: a name that resolves elsewhere now and to the Mac later (DNS rebinding) passes. */
+    if (local_host([url.host stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"[]"]]
+                           .UTF8String)) {
+        answer(_fd, 403, @"The Mac itself is not reachable from here.");
         free(head);
         return;
     }

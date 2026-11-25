@@ -884,6 +884,13 @@ static int fp_exec(CPU *c, uint32_t in) {
             r = fp_compute(c, fn, x1, x2, x3, sgl);
             if (xo5 == 24 || xo5 == 26)
                 c->fpscr &= ~FR; // estimates: FR undefined, 0
+            if (xo5 == 26 && !sgl) { /* frsqrte: an estimate (the G4's has 5-12 bits), given as a single when it is a normal
+                                       * one - else the single ops of the Newton step that follows leave the JIT for a
+                                       * non-single operand (UT2004: 12M exits per minute); FI as computed */
+                float s = (float)b2d(r);
+                if (isfinite(s) && fabsf(s) >= FLT_MIN)
+                    r = d2b((double)s);
+            }
             if ((xo5 == 18 || xo5 == 24 || xo5 == 26) && fb == 0 && c->fpscr & ZE)
                 goto frc; // ZE=1: FRT unchanged
             if (neg)
@@ -1040,6 +1047,13 @@ void ppc_fp_settle(CPU *c) {
     s.is970 = c->is970;
     s.fpscr = c->fpscr;
     memcpy(s.fpr, c->fs_x, 3 * sizeof(double));
+    if (k & 0x40) { /* the inputs as singles at fs_x + 0, 4, 8 (every input of the operation was one) */
+        float f[3];
+        memcpy(f, c->fs_x, sizeof f);
+        for (int i = 0; i < 3; i++)
+            s.fpr[i] = f[i];
+        k &= 0x3f;
+    }
     if (fp_exec(&s, (k & 0x20 ? 59u : 63u) << 26 | 3u << 21 | 0u << 16 | 1u << 11 | 2u << 6 | (k & 31) << 1))
         abort();
     uint32_t keep = FR | FI | (c->fs_kind >> 8 ? 0x10000u : FPRF);

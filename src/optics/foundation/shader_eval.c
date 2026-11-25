@@ -230,12 +230,20 @@ PtR2ShaderStatus pt_r2_shader_execute(const PtR2ShaderIR *p, const PtR2ShaderInt
         for (unsigned j = 0; j < 4; ++j)
             io->output[j][3] = 1.0f;
     if (p->stage == PT_R2_SHADER_US)
-        memcpy(t, io->input, iface->input_count * sizeof(t[0]));
+        for (unsigned j = 0; j < iface->input_count; ++j)
+            for (unsigned c = 0; c < 4; ++c)
+                t[j][c] = pt_r2_fp24(io->input[j][c]); /* shader_fp.h */
+    bool written[128] = {false}; /* as shader_msl.c: a TEX on an unwritten input reads it whole */
     for (unsigned k = 0; k < p->step_count; ++k) {
         const PtR2ShaderStep *s = &p->step[k];
         if (s->kind == PT_R2_STEP_TEX) {
             float coordinate[4], result[4];
-            memcpy(coordinate, t[s->u.tex.src], sizeof(coordinate));
+            unsigned src = s->u.tex.src;
+            memcpy(coordinate,
+                   p->stage == PT_R2_SHADER_US && src < iface->input_count && !written[src] ? io->input[src] : t[src],
+                   sizeof(coordinate));
+            if (s->u.tex.op != 2)
+                written[s->u.tex.dst] = true;
             if (s->u.tex.op == 2) {
                 for (unsigned j = 0; j < 4; ++j)
                     if (pt_r2_fp_in(coordinate[j], profile) < 0.0f)
@@ -299,6 +307,8 @@ PtR2ShaderStatus pt_r2_shader_execute(const PtR2ShaderIR *p, const PtR2ShaderInt
             }
             if (u->alpha_mask)
                 t[u->alpha_temp][3] = ar[0];
+            written[u->rgb_temp] |= u->rgb_mask != 0;
+            written[u->alpha_temp] |= u->alpha_mask != 0;
             if (u->alpha_output_mask)
                 io->output[u->alpha_output][3] = ar[0];
             if (u->depth_mask)
@@ -320,6 +330,20 @@ PtR2ShaderStatus pt_r2_shader_execute(const PtR2ShaderIR *p, const PtR2ShaderInt
                 result[0] = result[3] = 1.0f;
                 result[1] = b > 0.0f ? b : 0.0f;
                 result[2] = b > 0.0f ? pt_r2_fp_out(powf(a > 0.0f ? a : 0.0f, c), profile) : 0.0f;
+            } else if (v->op == PT_R2_OP_EXP_DX) {
+                float a = args[0][0], f = pt_r2_fp_floor(a, profile);
+                result[0] = pt_r2_fp_exp2(f, profile);
+                result[1] = a > 128.0f ? 0.0f : pt_r2_fp_sub(a, f, profile);
+                result[2] = pt_r2_fp_exp2(a, profile);
+                result[3] = 1.0f;
+            } else if (v->op == PT_R2_OP_LOG_DX) {
+                float a = fabsf(pt_r2_fp_in(args[0][0], profile));
+                int x = 0;
+                float m = frexpf(a, &x); /* exact: a = m 2^x, m in [0.5,1) */
+                result[0] = a == 0.0f ? -FLT_MAX : (float)(x - 1);
+                result[1] = a == 0.0f ? 1.0f : 2.0f * m;
+                result[2] = a == 0.0f ? -FLT_MAX : pt_r2_fp_log2(a, profile);
+                result[3] = 1.0f;
             } else {
                 arithmetic(v->op, lanes, args[0], args[1], args[2], dp, 0.0f, result, profile);
                 if (lanes == 1)

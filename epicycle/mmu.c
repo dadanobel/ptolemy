@@ -145,11 +145,36 @@ static uint64_t get(const uint8_t *p, int n) {
         x = x << 8 | p[i];
     return x;
 }
+/* Little-endian mode (MSR[LE], G3/G4; Virtual PC runs its x86 code so): the CPU does not reorder bytes, it munges the
+ * address. An n-byte scalar at offset o of a doubleword is the big-endian n bytes at offset 8 - o - n (XOR 7/6/4 for an
+ * aligned byte/halfword/word, nothing for a doubleword), so aligned scalars read as little-endian. The 7447A takes
+ * misaligned ones too, without an alignment interrupt: across a doubleword, two such pieces, the low-order bytes first.
+ * ponytail: lmw/stmw and the string forms take an alignment interrupt on hardware; here they run munged, word by word. */
+static int le(CPU *c, uint32_t ea, int n, uint64_t *v, int st) {
+    int o = ea & 7, n0 = o + n > 8 ? 8 - o : n, n1 = n - n0;
+    uint32_t a0 = (ea & ~7u) + 8 - o - n0, a1 = (ea & ~7u) + 16 - n1, ra;
+    uint8_t b[8], h[8];
+    if (st) {
+        uint64_t x = *v;
+        for (int i = n0 - 1; i >= 0; i--, x >>= 8)
+            b[i] = (uint8_t)x;
+        for (int i = n1 - 1; i >= 0; i--, x >>= 8)
+            h[i] = (uint8_t)x;
+        /* both pieces translate before either is stored */
+        return (n1 && xl(c, a1, 1, &ra)) || acc(c, a0, b, n0, 1) || (n1 && acc(c, a1, h, n1, 1));
+    }
+    if (acc(c, a0, b, n0, 0) || (n1 && acc(c, a1, h, n1, 0)))
+        return 1;
+    *v = (n1 ? get(h, n1) << 8 * n0 : 0) | get(b, n0);
+    return 0;
+}
 int ppc_ld(CPU *c, uint32_t ea, int n, uint64_t *v) {
 #ifdef PT_ENABLE_970
     if (c->is970)
         return ppc970_ld(c, ea, n, v);
 #endif
+    if (c->msr & MSR_LE)
+        return le(c, ea, n, v, 0);
     uint8_t b[8];
     if (acc(c, ea, b, n, 0))
         return 1;
@@ -160,7 +185,7 @@ int ppc_ld(CPU *c, uint32_t ea, int n, uint64_t *v) {
  * 0 stored, 2 it held something else, 1 exception delivered. A device, or an unaligned word: the plain store. */
 int ppc_st_cond(CPU *c, uint32_t ea, uint32_t expect, uint32_t v) {
     uint32_t ra;
-    if (xl(c, ea, 1, &ra))
+    if (xl(c, ea ^ (c->msr & MSR_LE ? 4 : 0), 1, &ra))
         return 1;
     uint32_t *p = (uint32_t *)pmem_at(c, ra, 4, 1);
     if (!p || (ea & 3))
@@ -173,7 +198,8 @@ int ppc_st(CPU *c, uint32_t ea, int n, uint64_t v) {
     if (c->is970)
         return ppc970_st(c, ea, n, v);
 #endif
-
+    if (c->msr & MSR_LE)
+        return le(c, ea, n, &v, 1);
     uint8_t b[8];
     for (int i = n - 1; i >= 0; i--, v >>= 8)
         b[i] = (uint8_t)v;
@@ -197,7 +223,7 @@ int ppc_ifetch(CPU *c, uint32_t pc, uint32_t *in) {
             return 1;
         }
     }
-    uint8_t *p = pmem(c, ra, 4);
+    uint8_t *p = pmem(c, ra ^ (c->msr & MSR_LE ? 4 : 0), 4); /* little-endian mode: munged as a word load */
     if (!p) {
         ppc_exception(c, 0x200, pc, 0);
         return 1;

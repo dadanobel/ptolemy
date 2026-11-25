@@ -274,11 +274,82 @@ def check_install(tmp, antiochus_payload):
     print('remove: a LaunchAgent that is not the installer\'s stays')
 
 
+def check_shim(tmp):
+    """The DrawSprocket shim stays in the installed version (Ptolemy Agent starts games with it); the session's
+    environment is not touched, except to take away the pair an earlier build wrote to ~/.MacOSX."""
+    top = medium(tmp / 'medium-shim', None, b'shim')
+    (top / 'payload/ptdsp.dylib').write_bytes(MACHO + b'shim')
+    with (top / 'manifest.sha1').open('a') as f:
+        f.write(f"{hashlib.sha1(MACHO + b'shim').hexdigest()} 0644 ptdsp.dylib\n")
+    home = tmp / 'home-shim'
+    home.mkdir()
+    it = Installer(home)
+    it.run(top)
+    it.run(top)  # again: nothing changes
+    installed = home / 'Library/Application Support/Ptolemy/current/ptdsp.dylib'
+    assert installed.read_bytes() == MACHO + b'shim' and not (home / '.MacOSX').exists()
+    print('shim: installed with the version, the environment left alone')
+    old = tmp / 'home-old'  # what an earlier build wrote: library, its environment.plist, the switch
+    (old / '.MacOSX').mkdir(parents=True)
+    library = old / '.MacOSX/ptdsp.dylib'
+    library.write_bytes(MACHO + b'old')
+    (old / '.MacOSX/ptdsp.off').write_bytes(b'')
+    (old / '.MacOSX/environment.plist').write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>DYLD_INSERT_LIBRARIES'
+        '</key><string>' + str(library) + '</string></dict></plist>\n')
+    Installer(old).run(top)
+    assert not (old / '.MacOSX').exists()
+    print('shim: an earlier build\'s environment.plist and library are taken away')
+    own = tmp / 'home-own'
+    (own / '.MacOSX').mkdir(parents=True)
+    theirs = plistlib.dumps({'DYLD_INSERT_LIBRARIES': str(own / '.MacOSX/ptdsp.dylib'), 'PATH': '/opt/bin'})
+    (own / '.MacOSX/environment.plist').write_bytes(theirs)
+    (own / '.MacOSX/ptdsp.dylib').write_bytes(MACHO + b'theirs')
+    keep = Installer(own)
+    keep.run(top)
+    keep.run(remove=True)
+    assert (own / '.MacOSX/environment.plist').read_bytes() == theirs
+    assert (own / '.MacOSX/ptdsp.dylib').is_file()  # their environment names it: without it no program would start
+    print('shim: someone else\'s environment.plist stays, and the library it names')
+
+
+def check_video(tmp):
+    """Ptolemy Video: a link in ~/Library/QuickTime to the current version's component; removal takes it away; someone
+    else's component of that name stops the installation."""
+    top = medium(tmp / 'medium-video', None, b'video')
+    files = {'Ptolemy Video.component/Contents/MacOS/Ptolemy Video': MACHO + b'video',
+             'Ptolemy Video.component/Contents/Info.plist': b'plist'}
+    with (top / 'manifest.sha1').open('a') as f:
+        for name, data in files.items():
+            (top / 'payload' / name).parent.mkdir(parents=True, exist_ok=True)
+            (top / 'payload' / name).write_bytes(data)
+            f.write(f"{hashlib.sha1(data).hexdigest()} {'0755' if '/MacOS/' in name else '0644'} {name}\n")
+    home = tmp / 'home-video'
+    home.mkdir()
+    it = Installer(home)
+    it.run(top)
+    it.run(top)  # again: nothing changes
+    link = home / 'Library/QuickTime/Ptolemy Video.component'
+    root = home / 'Library/Application Support/Ptolemy'
+    assert link.is_symlink() and os.readlink(link) == str(root / 'current/Ptolemy Video.component')
+    assert (link / 'Contents/MacOS/Ptolemy Video').read_bytes() == MACHO + b'video'
+    it.run(remove=True)
+    assert not os.path.lexists(link)
+    print('video: linked from ~/Library/QuickTime to the current version, removed with the Tools')
+    own = tmp / 'home-video-own'
+    (own / 'Library/QuickTime/Ptolemy Video.component').mkdir(parents=True)
+    refused(Installer(own), top, "someone else's Ptolemy Video.component")
+    assert (own / 'Library/QuickTime/Ptolemy Video.component').is_dir()
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix='ptolemy-tools-check-'))
     try:
         payload = check_media(tmp)
         check_install(tmp, payload / 'Antiochus')
+        check_shim(tmp)
+        check_video(tmp)
     finally:
         shutil.rmtree(tmp)
     print('PASS')

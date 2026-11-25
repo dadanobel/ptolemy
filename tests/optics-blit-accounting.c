@@ -3,6 +3,7 @@
 #include "frontend.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 static void wr(PtRadeon *d, unsigned a, uint32_t v) {
     uint8_t b[4];
     for (unsigned i = 0; i < 4; i++)
@@ -21,6 +22,15 @@ int main(void) {
     wr(d, 0x15b0, 256);
     wr(d, 0x1434, 0);
     wr(d, 0x1438, 0);
+    {
+        OpticsFrontendStats empty; /* no rows, no columns (the GL driver's empty part of an upload): nothing, no refusal */
+        wr(d, 0x15ac, 0x1000);
+        wr(d, 0x1404, 0x2000);
+        wr(d, 0x143c, 0u << 16 | 1780u);
+        wr(d, 0x143c, 3u << 16 | 0u);
+        optics_frontend_stats(d, &empty);
+        assert(!empty.blits && !empty.blit_bytes && !empty.blits_refused);
+    }
     for (unsigned bad = 0; bad < 2; bad++) {
         wr(d, 0x15ac, bad ? 0x1000 : 0x40000000);
         wr(d, 0x1404, bad ? 0x40000000 : 0x2000);
@@ -37,7 +47,19 @@ int main(void) {
     OpticsFrontendStats stats;
     optics_frontend_stats(d, &stats);
     assert(stats.blits == 1 && stats.blit_bytes == 4);
+    /* The kext's form of a rectangle: X and DST_HEIGHT, then SRC_Y, DST_Y and DST_WIDTH start it. */
+    uint8_t px[4] = {1, 2, 3, 4}, got[4];
+    assert(optics_frontend_gpu_write(d, 0x1000 + 2 * 256 + 3 * 4, px, 4));
+    wr(d, 0x1414, 3);
+    wr(d, 0x141c, 5);
+    wr(d, 0x1410, 1);
+    wr(d, 0x1418, 2);
+    wr(d, 0x1420, 7);
+    wr(d, 0x140c, 1);
+    optics_frontend_stats(d, &stats);
+    assert(stats.blits == 2 && stats.blits_refused == 2);
+    assert(optics_frontend_gpu_read(d, 0x2000 + 7 * 256 + 5 * 4, got, 4) && !memcmp(got, px, 4));
     pt_radeon_close(d);
-    puts("PASS: failed source/destination do not increment completed blits");
+    puts("PASS: failed source/destination do not increment completed blits; a DST_WIDTH rectangle is copied");
     return 0;
 }

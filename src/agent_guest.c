@@ -3,13 +3,14 @@
  * mappings, write permission) before a command is read or answered. */
 #include "ppc.h"
 #include "pt_agent.h"
+#include "pt_video.h"
 #include "platform.h"
 #include "optics/diagnostics.h"
 _Static_assert(PTA_OPTICS == OPTICS_AGENT_OPCODE, "Optics agent opcode ABI");
 /* Validate ALL pages before consuming a command. RAM only, user translation,
- * write permissions and COW faults respected; no device/VRAM host pointers. */
-static int pages(CPU *c, uint32_t ea, uint32_t n, int write, uint32_t physical[17]) {
-    if (!n || n > PTA_MAX_REQUEST || (uint64_t)ea + n > 0x100000000ull || !c->npreg || c->preg[0].base ||
+ * write permissions and COW faults respected; no device/VRAM host pointers. physical: a word for each page of n. */
+static int pages_within(CPU *c, uint32_t ea, uint32_t n, uint32_t limit, int write, uint32_t *physical) {
+    if (!n || n > limit || (uint64_t)ea + n > 0x100000000ull || !c->npreg || c->preg[0].base ||
         c->preg[0].read_only || !c->preg[0].host)
         return PTA_FAULT;
     unsigned i = 0;
@@ -30,9 +31,12 @@ static int pages(CPU *c, uint32_t ea, uint32_t n, int write, uint32_t physical[1
     }
     return PTA_OK;
 }
-/* Copies between a host buffer and guest memory through the guest's pre-translated physical pages (the request may
- * span 17 pages). */
-static void copy_pages(CPU *c, uint32_t ea, void *b, uint32_t n, int write, const uint32_t physical[17]) {
+static int pages(CPU *c, uint32_t ea, uint32_t n, int write, uint32_t physical[17]) {
+    return pages_within(c, ea, n, PTA_MAX_REQUEST, write, physical);
+}
+/* Copies between a host buffer and guest memory through the guest's pre-translated physical pages (an agent request
+ * may span 17 pages; physical[0] is the address of ea itself, the rest are pages). */
+static void copy_pages(CPU *c, uint32_t ea, void *b, uint32_t n, int write, const uint32_t *physical) {
     if (write)
         c->reserve = 0; /* Successful host copyout invalidates a guest reservation. */
     unsigned i = 0;
@@ -50,16 +54,83 @@ static void copy_pages(CPU *c, uint32_t ea, void *b, uint32_t n, int write, cons
         n -= k;
     }
 }
+/* Video (pt_video.h). A compressed frame and a picture are far larger than an agent request, so their pages are
+ * counted for the call; the rule is the same: every page is validated before a byte moves. */
+typedef struct {
+    CPU *c;
+    uint32_t ea, row_bytes;
+} VideoTarget;
+enum { VIDEO_ROW_SLACK = 4096 }; /* a row's padding: bounds the picture's span in guest memory */
+static int video_write(void *o, const uint8_t *rows, uint32_t stride, uint32_t width, uint32_t height) {
+    VideoTarget *t = o;
+    uint32_t row = 2 * width;
+    if (t->row_bytes < row || t->row_bytes > row + VIDEO_ROW_SLACK)
+        return PTA_INVALID;
+    uint32_t span = (height - 1) * t->row_bytes + row; /* at most 2304 rows of 12288 bytes */
+    uint32_t *physical = malloc(((size_t)span / 4096 + 2) * sizeof *physical);
+    if (!physical)
+        return PTA_BUSY;
+    int rc = pages_within(t->c, t->ea, span, span, 1, physical);
+    if (!rc)
+        t->c->reserve = 0; /* as copy_pages: a host copyout invalidates a guest reservation */
+    for (uint32_t y = 0; !rc && y < height; y++) { /* a row starts anywhere in its page: physical[] gives the page */
+        const uint8_t *from = rows + (size_t)y * stride;
+        for (uint32_t ea = t->ea + y * t->row_bytes, left = row, k; left; from += k, ea += k, left -= k) {
+            k = 4096 - (ea & 4095) < left ? 4096 - (ea & 4095) : left;
+            memcpy(pmem_write(t->c, (physical[(ea >> 12) - (t->ea >> 12)] & ~4095u) | (ea & 4095), k), from, k);
+        }
+    }
+    free(physical);
+    return rc;
+}
+static int video(CPU *c, uint32_t op) {
+    uint32_t session = c->gpr[4], frame = c->gpr[5], ea = c->gpr[6], n = c->gpr[7];
+    if (op == PTA_VIDEO_PROBE) {
+        c->gpr[4] = PTV_VERSION;
+        c->gpr[5] = (uint32_t)pt_video_enabled();
+        return PTA_OK;
+    }
+    if (op == PTA_VIDEO_OPEN || op == PTA_VIDEO_DECODE) {
+        uint32_t limit = op == PTA_VIDEO_OPEN ? PTA_MAX_REQUEST : PTV_MAX_FRAME;
+        if (!n || n > limit)
+            return PTA_INVALID;
+        uint32_t *physical = malloc(((size_t)n / 4096 + 2) * sizeof *physical);
+        uint8_t *b = malloc(n);
+        int rc = physical && b ? pages_within(c, ea, n, limit, 0, physical) : PTA_BUSY;
+        if (!rc) {
+            copy_pages(c, ea, b, n, 0, physical);
+            if (op == PTA_VIDEO_DECODE)
+                rc = pt_video_decode(session, frame, b, n);
+            else if (!(rc = pt_video_open(b, n, frame >> 16, frame & 0xffff, &session)))
+                c->gpr[4] = session;
+        }
+        free(b);
+        free(physical);
+        return rc;
+    }
+    if (op == PTA_VIDEO_FETCH) {
+        VideoTarget t = {c, ea, n};
+        return pt_video_fetch(session, frame, video_write, &t);
+    }
+    return op == PTA_VIDEO_DROP ? pt_video_drop(session, frame) : pt_video_close(session);
+}
 /* The Tools agent's hypercall: validates every guest buffer in full, then dispatches hello, pull, transfers,
- * export, input, pointer and Optics status. */
+ * export, input, pointer and Optics status; the video calls need no agent. */
 int pt_agent_hypercall(CPU *c, uint32_t instruction, PtAgent *a) {
-    if (!a || instruction != PTA_INSN || c->gpr[0] != PTA_MAGIC)
+    if (instruction != PTA_INSN || c->gpr[0] != PTA_MAGIC)
         return 0;
     unsigned need = MSR_PR | MSR_IR | MSR_DR;
     int rc = PTA_DENIED;
     uint32_t token = c->gpr[4], id = c->gpr[5], op = c->gpr[3];
+    int is_video = op >= PTA_VIDEO_PROBE && op <= PTA_VIDEO_CLOSE;
+    if (!a && !is_video)
+        return 0;
     if (!c->sys || (c->msr & need) != need) {
         c->gpr[3] = rc;
+        return 1;
+    }
+    if (is_video) {
+        c->gpr[3] = (uint32_t)video(c, op);
         return 1;
     }
     uint8_t b[PTA_MAX_REQUEST];

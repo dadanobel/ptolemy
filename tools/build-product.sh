@@ -35,6 +35,8 @@ done
 if [ -n "${PT_PRODUCT_ENGINE:-}" ]; then cp -X "$PT_PRODUCT_ENGINE" build/Ptolemy.app/Contents/Resources/ptolemy-engine; fi
 if [ -n "${PT_PRODUCT_ROM:-}" ]; then cp -X "$PT_PRODUCT_ROM" build/Ptolemy.app/Contents/Resources/openbios-ppc; fi
 if [ -n "${PT_PRODUCT_TOOLS:-}" ]; then cp -X "$PT_PRODUCT_TOOLS" build/Ptolemy.app/Contents/Resources/PtolemyTools.dmg; fi
+# The program store's seed (renderer.mm): the system's own Optics programs, compiled in the background at the first start.
+if [ -n "${PT_PRODUCT_SEED:-}" ]; then cp -X "$PT_PRODUCT_SEED" build/Ptolemy.app/Contents/Resources/optics-programs.bin; fi
 codesign --force --sign - build/Ptolemy.app
 if [ "${1:-}" = --test ]; then build/Ptolemy.app/Contents/MacOS/Ptolemy --self-test; fi
 # --snapshot DIR: the launcher's states as PNG files, drawn off screen (product/Snapshot.swift).

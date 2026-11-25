@@ -251,6 +251,16 @@ int main(void) {
                 assert(o[7][c] == (x[v] ? 1.0f / x[v] : 0.0f) &&
                        o[9][c] == (ws[v] ? 1.0f / sqrtf(fabsf(ws[v])) : 0.0f));
             }
+            { /* EXP/LOG DX: four components (R5xx Acceleration 1.5; u195 #137 got log2 in every lane) */
+                const float y = in[1], a = fabsf(ws[v]), *ex = o[11], *lg = o[12];
+                int k = 0;
+                const float m = frexpf(a, &k);
+                assert(ex[0] == exp2f(floorf(y)) && ex[1] == y - floorf(y) && ex[2] == exp2f(y) && ex[3] == 1.0f);
+                if (a == 0.0f)
+                    assert(lg[0] == -FLT_MAX && lg[1] == 1.0f && lg[2] == -FLT_MAX && lg[3] == 1.0f);
+                else
+                    assert(lg[0] == (float)(k - 1) && lg[1] == 2.0f * m && lg[2] == log2f(a) && lg[3] == 1.0f);
+            }
             {
                 const float *l = o[10];
                 float y = in[1];
@@ -258,8 +268,7 @@ int main(void) {
                        l[2] == (x[v] > 0 ? y * y : 0.0f));
             }
             for (unsigned c = 0; c < 4; ++c) {
-                assert(o[11][c] == exp2f(in[1]) && o[12][c] == log2f(fabsf(ws[v])) &&
-                       o[13][c] == exp2f(in[2] * 1.44269504f));
+                assert(o[13][c] == exp2f(in[2] * 1.44269504f));
                 assert(o[14][c] == exp2f(2.0f * log2f(in[1])) && o[15][c] == sinf(in[2]) && o[16][c] == cosf(in[2]));
                 const float b = ws[v] < 0.0f   ? 0.0f
                                 : ws[v] > 1.0f ? 1.0f

@@ -102,7 +102,11 @@ typedef enum {
     PT_R2_OP_ARL,
     PT_R2_OP_ARR,
     /* ME_POWER_FUNC_FF_CLAMP_01: POW with the base and the result clamped to [0,1] (Tiger's fog factor). */
-    PT_R2_OP_POW01
+    PT_R2_OP_POW01,
+    /* ME_EXP_BASE2_DX (2^floor(A), A > 128 ? 0 : frac(A), 2^A, 1) and ME_LOG_BASE2_DX (exponent of |A|, its mantissa in
+     * [1,2), log2|A|, 1; A = 0: -FLT_MAX, 1, -FLT_MAX, 1) of the W operand (R5xx Acceleration 1.5, 7.x math engine). */
+    PT_R2_OP_EXP_DX,
+    PT_R2_OP_LOG_DX
 } PtR2ShaderOp;
 typedef struct {
     PtR2ShaderOperand rgb_source[3], alpha_source[3];
@@ -156,6 +160,9 @@ typedef struct {
  * Nonzero flow control is rejected, not assumed absent by the compiler. */
 PtR2ShaderStatus pt_r2_shader_decode(PtR2ShaderStage stage, PtR2ShaderPrecision precision, const uint32_t *words,
                                      size_t count, uint32_t pvs_flow_control, PtR2ShaderIR *ir, PtR2ShaderError *error);
+/* US words: what pt_r2_shader_decode does not read (unused nodes, instructions outside the nodes' ranges) set to zero,
+ * in place, so one program has one word image. */
+void pt_r2_shader_us_canonical(uint32_t *words, size_t count);
 PtR2ShaderStatus pt_r2_shader_validate(const PtR2ShaderIR *ir, const PtR2ShaderInterface *interface,
                                        PtR2ShaderError *error);
 /* The interface half of pt_r2_shader_validate only, for an IR that is canonical by construction (the

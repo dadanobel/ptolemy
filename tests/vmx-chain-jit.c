@@ -23,12 +23,15 @@ static uint32_t chain[] = {
     VX(1220, 0, 0, 6), /* vxor v0 ^= v6: a cached register written outside vmx_fp */
     VX(74, 2, 8, 0), /* vsubfp v2 = v8 - v0 */
     VX(1604, 0, 0, 9), /* mtvscr v9: NJ off - denormals count from here */
+    VX(10, 16, 15, 9), /* vaddfp v16 = v15 + 0: denormals kept (NJ off) */
     VA(46, 14, 15, 9, 1), /* vmaddfp v14 = v15*v1 + 0: now with the denormals */
     VX(1034, 11, 2, 1), /* vmaxfp v11 = max(v2, v1) */
     VA(47, 2, 11, 0, 1), /* vnmsubfp v2 = -(v11*v1 - v0) */
     VX(1604, 0, 0, 10), /* mtvscr v10: NJ on */
+    VA(46, 16, 16, 9, 1), /* vmaddfp v16 = v16*v1 + 0: an FP result read back after mtvscr is flushed again */
     VX(1098, 12, 2, 11), /* vminfp v12 = min(v2, v11) */
     VX(1220, 13, 13, 14), /* vxor v13 ^= v14: both products bit for bit */
+    VX(1220, 13, 13, 16), /* vxor v13 ^= v16 */
     0xfc21102a, 0xfc21102a, /* fadd f1,f1,f2 twice: the FPR cache takes its registers first */
     MEM(231, 7, 5, 9), MEM(231, 2, 6, 9), MEM(231, 12, 7, 9), MEM(231, 13, 8, 9), /* stvx v7, v2, v12, v13 */
     0x39290010, 0, 0}; /* addi r9,r9,16; bdnz; b END (main) */
@@ -36,11 +39,30 @@ enum { CHAIN = sizeof chain / 4 };
 /* Geekbench's Dot Product (vector) in small: one vmaddfp a pass, its sum carried by the loop. */
 static const uint32_t dot[] = {MEM(103, 0, 3, 9), MEM(103, 1, 4, 9), VA(46, 7, 0, 7, 1), 0x39290010, 0x4200fff0,
                                MEM(231, 7, 5, 9), 0x48000000u | (END - 0x1018)}; /* ...; stvx v7; b END */
+/* vDSP's radix-4 pass with twiddles (Tiger's libvDSP, __fft_z_vmx 0x9209870c, middle_weight_loop): 8 lvx, 12 vmaddfp,
+ * 12 vnmsubfp, 8 stvx a pass and 32 VRs live, which is what Xbench's vecLib FFT spends its time in. r25 counts down
+ * by 16; lvx from r27 + r5..r14, stvx to r27 + r15..r22. */
+static uint32_t vdsp[] = {0x1131cd6e, 0x7ccdd8ce, 0x1151e5ae, 0x1171edef, 0x7d0fd9ce, 0x1191c52f, 0x11b1cd6f, 0x7ceed8ce,
+                          0x11d1e5af, 0x7d30d9ce, 0x11f1edee, 0x7c49d8ce, 0x3739fff0, 0x7c6ad8ce, 0x3b7b0010, 0x1292292e,
+                          0x12b2216f, 0x7c8bd8ce, 0x12d239ae, 0x7d53d9ce, 0x12f231ef, 0x7d74d9ce, 0x1313052e, 0x13330d6f,
+                          0x7cacd8ce, 0x135315ae, 0x13731def, 0x7d91d9ce, 0x1393052f, 0x13b30d6e, 0x7c05d8ce, 0x13d315af,
+                          0x7db2d9ce, 0x13f31dee, 0x1290d6ee, 0x12b0deaf, 0x7c26d8ce, 0x12d0ffaf, 0x7dd5d9ce, 0x12f0f7ee,
+                          0x7df6d9ce, 0x1111c52e, 0x4082ff58, 0x48000000u | (END - 0x1000 - 4 * 43)};
+/* Geekbench 2's Stream Scale and Add, vector (geekbench_ppc_32 0x2b4f4, 0x2b528; r3, r4, r5 for its r11/r8, r10, r11):
+ * an lvx read by the next VMX operation, which loads all 16 bytes at once. bdz out, b back. */
+static const uint32_t scale[] = {0x39200000, VX(1220, 1, 1, 1), MEM(103, 13, 0, 4), 0x60000000, MEM(103, 0, 3, 9),
+                                 VA(46, 0, 0, 1, 13), MEM(231, 0, 5, 9), 0x39290010, 0x42400008, 0x4bffffec,
+                                 0x48000000u | (END - 0x1028)}; /* li r9,0; vxor v1; lvx v13,0,r4; nop; lvx; vmaddfp; stvx */
+static const uint32_t sadd[] = {0x38400000, MEM(103, 1, 3, 2), MEM(103, 0, 4, 2), VX(10, 0, 1, 0), MEM(231, 0, 5, 2), 0x38420010,
+                                0x42400008, 0x4bffffe8, 0x48000000u | (END - 0x1020)}; /* li r2,0; lvx; lvx; vaddfp; stvx */
+static int vdsp_on; /* the program now run is vdsp: initial() sets its registers */
 static const struct {
     const char *name;
     const uint32_t *code;
     unsigned n, gain; /* gain: A64 instructions the VR cache takes off a pass of the loop, at least */
-} programs[] = {{"the butterfly", loop, sizeof loop / 4, 20}, {"the chain", chain, CHAIN, 20}, {"the dot product", dot, sizeof dot / 4, 10}};
+} programs[] = {{"the butterfly", loop, sizeof loop / 4, 20}, {"the chain", chain, CHAIN, 20}, {"the dot product", dot, sizeof dot / 4, 10},
+                {"vDSP radix-4", vdsp, sizeof vdsp / 4, 20}, {"Stream Scale", scale, sizeof scale / 4, 0},
+                {"Stream Add", sadd, sizeof sadd / 4, 0}};
 enum { PROGRAMS = sizeof programs / sizeof *programs };
 static CPU initial(uint8_t *mem) {
     CPU c = {0};
@@ -76,6 +98,22 @@ static CPU initial(uint8_t *mem) {
         c.vr[6][i] = (uint8_t)(i * 7 + 3);
     c.fpr[1] = 1.0;
     c.fpr[2] = 0x1p-10;
+    if (vdsp_on) {
+        static const unsigned in[8] = {5, 6, 9, 10, 11, 12, 13, 14};
+        for (unsigned i = 0; i < 8; i++) {
+            c.gpr[in[i]] = 0x2000u * i; /* lvx: within A and B */
+            c.gpr[15 + i] = 0x40000u + 0x4000u * i; /* stvx: OUT and on */
+        }
+        c.gpr[27] = A;
+        c.gpr[25] = 16 * (N / 4);
+        for (unsigned v = 0; v < 32; v++)
+            for (unsigned i = 0; i < 4; i++) {
+                float f = (v >= 16 && v < 20) ? 0.7071f - 0.1f * i : 0.5f + 0.01f * (v * 4 + i);
+                uint32_t w;
+                memcpy(&w, &f, 4);
+                wbe32(c.vr[v] + 4 * i, w);
+            }
+    }
     return c;
 }
 static unsigned steps, words; /* instructions left to the interpreter; a pass of the loop in A64 instructions */
@@ -156,6 +194,7 @@ int main(int argc, char **argv) {
     unsigned size[PROGRAMS][2];
     for (int p = 0; p < PROGRAMS; p++) {
         memset(memory + 0x1000, 0, 0x100);
+        vdsp_on = programs[p].code == vdsp;
         for (unsigned i = 0; i < programs[p].n; i++)
             wbe32(memory + 0x1000 + 4 * i, programs[p].code[i]);
         if (bench) {
@@ -193,9 +232,10 @@ int main(int argc, char **argv) {
         assert(size[p][0] >= size[p][1] + programs[p].gain); /* the cache is at work, on the registers worth it */
     }
     if (!bench)
-        printf("vmx-chain: %u passes of 3 loops equal to the interpreter (registers, VSCR, memory), lvx storing in one piece "
+        printf("vmx-chain: %u passes of 6 loops equal to the interpreter (registers, VSCR, memory), lvx storing in one piece "
                "and in two, the VR cache and the FPR cache on and off; a pass in A64 instructions, without the VR cache "
-               "and with: %u -> %u, %u -> %u, %u -> %u PASS\n",
-               (unsigned)N, size[0][0], size[0][1], size[1][0], size[1][1], size[2][0], size[2][1]);
+               "and with: %u -> %u, %u -> %u, %u -> %u, %u -> %u, %u -> %u, %u -> %u PASS\n",
+               (unsigned)N, size[0][0], size[0][1], size[1][0], size[1][1], size[2][0], size[2][1], size[3][0], size[3][1],
+               size[4][0], size[4][1], size[5][0], size[5][1]);
     return 0;
 }

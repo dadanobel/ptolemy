@@ -229,7 +229,8 @@ static int nd_ohci_td(PtOhci *o, uint8_t *ed, unsigned *budget) {
         first = 4096 - (cbp & 4095);
     unsigned second = n - first;
     unsigned direction = info >> 11 & 3;
-    if (!direction)
+    if (!direction || direction == 3) /* ED D 00b and 11b both take the direction from the TD (OHCI 1.0a, 4.2.1); Open
+                                         Firmware's USB stack writes 11b, and every one of its transfers raised UE */
         direction = flags >> 19 & 3;
     unsigned pid = direction == 0 ? PT_USB_SETUP : direction == 1 ? PT_USB_OUT : PT_USB_IN;
     if (direction == 3)

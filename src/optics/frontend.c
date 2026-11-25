@@ -49,6 +49,7 @@ enum {
     CRTC_STATUS = 0x005c,
     CRTC_GEN_CNTL = 0x0050,
     CONFIG_MEMSIZE = 0x00f8,
+    CONFIG_APER_SIZE = 0x0108,
     MC_FB_LOCATION = 0x0148,
     MC_AGP_LOCATION = 0x014c,
     AGP_BASE = 0x0170,
@@ -207,6 +208,10 @@ struct PtRadeon {
     unsigned zpass_draws, zpass_empty;
     int zpass_open;
     uint32_t zpass_query; /* occlusion query: open since ZB_ZPASS_DATA, its id */
+    struct {
+        uint32_t base, pitch, end; /* bytes */
+    } macro[8]; /* macro-tiled 32-bit colour targets (macro_tiled), oldest first */
+    unsigned macros;
     /* Session log: host time between published new frames (pace), and device entries that waited 10 ms or more for the lock */
     uint64_t pace_ns, pace_gap, pace_frames, pace_time, pace_max, pace_bucket[7], lock_waits, lock_wait_ns,
             lock_wait_max, service_skips;
@@ -250,11 +255,14 @@ struct PtRadeon {
     uint32_t *imm_data;
     size_t imm_words, imm_cap;
     uint8_t *imm_edge;
+    uint32_t indx_vf; /* a 3D_DRAW_INDX_2 that came without index data: its VF_CNTL, until INDX_BUFFER brings them */
+    int indx_pending;
     int imm_edge_seen; /* each vertex's edge flag (VAP_VTX_EDGE_FLAG when it was emitted); seen: written since the begin */
 };
 
 static OpticsFrameStorage storage;
 static OpticsExecutor exec_ops;
+/* Installs the executor that runs draws: Metal's at load time (frontend_metal.mm), a test's own in tests. */
 void optics_frontend_set_executor(const OpticsExecutor *e) {
     exec_ops = e ? *e : (OpticsExecutor){0};
 }
@@ -285,6 +293,7 @@ static int try_take(PtRadeon *d) { /* 0: held; otherwise the holder is in a long
     }
     return -1;
 }
+/* Takes the device lock: a short spin first, then blocks. */
 static void take(PtRadeon *d) {
     if (try_take(d))
         pthread_mutex_lock(&d->lock);
@@ -326,6 +335,7 @@ static void enter_at(PtRadeon *d, uint32_t line, int light) {
     atomic_fetch_sub_explicit(&d->want, 1, memory_order_relaxed);
 }
 #define enter(d) enter_at((d), __LINE__, 0)
+/* Lets go of the device lock enter() took. */
 static void leave(PtRadeon *d) {
     if (d->cp_async)
         pthread_mutex_unlock(&d->lock);
@@ -361,6 +371,8 @@ int optics_frontend_gpu_wait_begin(PtRadeon *d) {
     pthread_mutex_unlock(&d->lock);
     return 1;
 }
+/* Ends a GPU wait: takes the lock back if begin let it go, wakes the entries that waited for the packet, counts the
+ * wait. */
 void optics_frontend_gpu_wait_end(PtRadeon *d, int released) {
     if (released) {
         take(d);
@@ -374,16 +386,18 @@ void optics_frontend_gpu_wait_end(PtRadeon *d, int released) {
     if (t > w[2])
         w[2] = t;
 }
-/* OPTICS_TRACE=1: development traces (first register accesses, CRTC/2D/HOST_DATA, surfaces, per-target statistics). */
+/* The host's monotonic clock in nanoseconds. */
 static uint64_t mono_ns(void) {
     return clock_gettime_nsec_np(CLOCK_MONOTONIC);
 }
+/* OPTICS_RATE=1 (development): rate and timing lines - write-backs, work per second, waits. */
 static int rate_on(void) {
     static int on = -1;
     if (on < 0)
         on = getenv("OPTICS_RATE") && atoi(getenv("OPTICS_RATE"));
     return on;
 }
+/* OPTICS_TRACE=1: development traces (first register accesses, CRTC/2D/HOST_DATA, surfaces, per-target statistics). */
 int optics_trace(void) {
     static int on = -1;
     if (on < 0)
@@ -391,7 +405,7 @@ int optics_trace(void) {
     return on;
 }
 /* OPTICS_REG_LOG=FILE (development): while FILE.on exists (polled every 50 ms), one line per write to the SURFACE and 2D
- * registers (0x0b00..0x0b8c, 0x1400..0x16ff without scratch), per blit with its resolved operands and per 3D draw with
+ * registers (0x0b00..0x0b8c, 0x1400..0x1707 without scratch), per blit with its resolved operands and per 3D draw with
  * RB3D_COLOROFFSET0/PITCH0 and TX_OFFSET/FORMAT0..2 of each enabled unit, per 3D register write and CPU read (0x2000..0x4fff),
  * and per refused packet3 with its words;
  * host monotonic seconds; at most 400000 lines.
@@ -429,6 +443,7 @@ static FILE *reg_log(int always) {
     fprintf(f, "%.6f ", t / 1e9);
     return f;
 }
+/* The device fails (logged once): the command processor stops until a reset. */
 static void failed(PtRadeon *d, const char *why) {
     if (!d->stats.failed)
         fprintf(stderr, "optics-frontend: device failed (%s): command processor stopped until reset\n", why);
@@ -462,6 +477,8 @@ static void lanes(uint8_t *view, uint8_t *vram, size_t n, unsigned x, int to_vie
         memcpy(dst + i, &v, 4);
     }
 }
+/* Copies one granule between VRAM and the CPU's view of it (to_view: VRAM to view), with the byte lanes of its
+ * aperture or SURFACE region. */
 static void view_copy(PtRadeon *d, size_t g, int to_view) {
     uint64_t lo = (uint64_t)g * GRANULE;
     if (!region_in(d, lo, lo + GRANULE)) {
@@ -515,6 +532,7 @@ static int own_check(PtRadeon *d, uint64_t off, uint64_t n, int write) {
     failed(d, "GPU result export");
     return -1;
 }
+/* How published frames get their pixel memory (Metal buffers in the product, malloc otherwise). */
 void optics_frontend_set_frame_storage(const OpticsFrameStorage *s) {
     storage = s ? *s : (OpticsFrameStorage){0};
 }
@@ -522,6 +540,7 @@ static OpticsCpuFault cpu_fault; /* HVF route for guarded VRAM faults (cpu_guard
 void optics_frontend_set_cpu_fault(OpticsCpuFault f) {
     cpu_fault = f;
 }
+/* The device's VRAM and GART page tracker, for the executor. */
 PtR2Io *optics_frontend_io(PtRadeon *d) {
     return d ? d->io : NULL;
 }
@@ -547,6 +566,7 @@ static int guard_apply(void *ctx, int ram, uint64_t group, size_t granule, PtR2I
     }
     return 1;
 }
+/* The CPU's bytes in VRAM [off, off+n) come back from its view (view_sync). */
 int optics_frontend_cpu_sync(PtRadeon *d, uint64_t off, uint64_t n) {
     return d ? view_sync(d, off, n) : -1;
 }
@@ -587,6 +607,7 @@ static void io_written(void *ctx, int ram, uint64_t physical, size_t n) { /* byt
     } else
         d->vram_writes++;
 }
+/* Withdraws the CPU view: VRAM accesses trap again. */
 static void view_unmap(PtRadeon *d) {
     d->config.vram_guard(d->config.map_opaque, NULL, NULL);
     d->config.direct_map(d->config.map_opaque, NULL, 0, 0);
@@ -654,15 +675,18 @@ void pt_radeon_remap(PtRadeon *d) {
     leave(d);
 }
 
+/* Loads a little-endian word. */
 static uint32_t rd32le(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
+/* Stores a little-endian word. */
 static void wr32le(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v;
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
 }
+/* One development line on stderr, at most LOG_LIMIT of them. */
 static void note(PtRadeon *d, const char *fmt, uint32_t a, uint32_t b) {
     if (d->logged++ < LOG_LIMIT) {
         fprintf(stderr, "optics-frontend: ");
@@ -675,6 +699,7 @@ static void note(PtRadeon *d, const char *fmt, uint32_t a, uint32_t b) {
 static int window(uint32_t location, uint64_t *base, uint64_t *length) {
     return optics_r300_memory_window(location, base, length);
 }
+/* Guest RAM at a physical address, or NULL when [pa, pa+n) is not all RAM. */
 static uint8_t *ram_at(PtRadeon *d, uint64_t pa, size_t n) {
     PtRam r = d->config.ram;
     return pa <= r.size && n <= r.size - pa ? r.bytes + pa : NULL;
@@ -776,6 +801,8 @@ void optics_frontend_set_writeback_hook(OpticsWritebackHook h, void *opaque) {
     wb_hook = h;
     wb_opaque = opaque;
 }
+/* Writes a word into GPU memory as the CP does (RPTR, scratch, fences), after its earlier writes, and tells the
+ * write-back hook. */
 static void writeback(PtRadeon *d, uint32_t gpu, uint32_t value) {
     /* A CP thread's earlier device writes become visible to a guest polling this value in RAM no later than it. */
     atomic_thread_fence(memory_order_release);
@@ -789,9 +816,11 @@ static void writeback(PtRadeon *d, uint32_t gpu, uint32_t value) {
         wb_hook(wb_opaque, s.ram ? (uint64_t)(s.p - d->config.ram.bytes) : UINT64_MAX, value);
 }
 
+/* Reads GPU memory (VRAM, PCI GART or AGP) with GPU results exported first. 0: an address is not mapped. */
 int optics_frontend_gpu_read(PtRadeon *d, uint64_t gpu, void *buf, size_t n) {
     return gpu_copy(d, gpu, buf, n, 0);
 }
+/* Writes GPU memory; nothing is written unless every page of it is mapped. 0: not written. */
 int optics_frontend_gpu_write(PtRadeon *d, uint64_t gpu, const void *buf, size_t n) {
     return gpu_copy(d, gpu, (void *)buf, n, 1);
 }
@@ -822,6 +851,7 @@ static int cpu_region(const PtRadeon *d, uint32_t off) {
     }
     return -1;
 }
+/* The byte-lane XOR for a CPU access at VRAM offset off: its SURFACE region's swap, else the aperture's. */
 static unsigned cpu_xor(const PtRadeon *d, int ap1, uint32_t off) {
     int i = cpu_region(d, off);
     if (i < 0)
@@ -868,6 +898,7 @@ static void boot_mode(PtRadeon *d, unsigned w, unsigned h, unsigned bpp, unsigne
     d->fb_ap = 0;
     direct_update(d);
 }
+/* Bochs VBE: an enabled mode with a size becomes the boot display mode. */
 static void vbe_mode(PtRadeon *d) {
     if ((d->vbe[4] & 1) && d->vbe[1] && d->vbe[2])
         boot_mode(d, d->vbe[1], d->vbe[2], d->vbe[3], d->vbe[6]);
@@ -884,7 +915,7 @@ int pt_radeon_display_mode(PtRadeon *d, unsigned w, unsigned h, unsigned depth, 
     unsigned pitch = depth == 32 && w == d->config.width && h == d->config.height
                              ? w
                              : (w * (depth / 8) + 255) / 256 * 256 / (depth / 8); /* the boot mode keeps its pitch */
-    if ((depth != 8 && depth != 16 && depth != 32) || w < 320 || w > 2560 || w % 8 || h < 200 || h > 1600 ||
+    if ((depth != 8 && depth != 16 && depth != 32) || w < 320 || w > 4096 || w % 8 || h < 200 || h > 4096 ||
         (uint64_t)pitch * (depth / 8) * h > d->vram_bytes)
         return EINVAL;
     enter(d);
@@ -934,6 +965,8 @@ int pt_radeon_palette(PtRadeon *d, unsigned start, unsigned count, const uint32_
     leave(d);
     return 0; /* a new colour table republishes the frame */
 }
+/* The scanout the CRTC shows: size, bits, pitch in bytes and VRAM offset from its registers. 0: off or outside
+ * VRAM. */
 static int scanout_mode(const PtRadeon *d, uint32_t *w, uint32_t *h, uint32_t *bpp, uint32_t *line, uint32_t *offset) {
     uint32_t gen = d->reg[CRTC_GEN_CNTL / 4];
     *bpp = crtc_bpp(gen);
@@ -951,6 +984,7 @@ static unsigned dst_bytes(unsigned datatype) {
     return datatype == 2 || datatype == 7 ? 1 : datatype == 3 || datatype == 4 ? 2 : datatype == 6 ? 4 : 0;
 }
 static int strict(void);
+/* OPTICS_2D_CONTRACT=1 (development): the 2D engine checks its operands against the acceleration guide's contract. */
 static int exact_2d(void) {
     static int on = -1;
     if (on < 0) {
@@ -959,6 +993,7 @@ static int exact_2d(void) {
     }
     return on;
 }
+/* A 2D operation that was not executed: counted, written to the register log; with OPTICS_STRICT the device fails. */
 static void blit_refused(PtRadeon *d, const char *reason) {
     d->stats.blits_refused++;
     d->stats.last_refused_gmc = d->reg[DP_GUI_MASTER_CNTL / 4];
@@ -970,6 +1005,90 @@ static void blit_refused(PtRadeon *d, const char *reason) {
     }
     if (strict())
         failed(d, reason);
+}
+/* OPTICS_DIAG=1 (development): is the linear VRAM of this model exact? VRAM is linear here for the CPU, the 2D engine
+ * and the 3D engine alike, which is exact while whoever writes a surface and whoever reads it name the same tiling: the
+ * card's permutation of the bytes is then seen by no one. A surface written with one tiling and read with another is
+ * where a real tile layout would be needed. tiling: bit 0 macro, bit 1 micro.
+ * Writers, by the surface's first 4 KiB page of VRAM (the last one wins): a draw's colour target (RB3D_COLORPITCH0 bit
+ * 16, bits 18:17), the 2D engine's destination, and the CPU through a SURFACE region (INFO bits 16, 17; every page of
+ * the region that no GPU write claimed). Readers: a texture (TX_OFFSET bit 2, bits 4:3), a 2D source, and a SURFACE
+ * region opened over a surface the GPU wrote. The 2D engine's tiling is what the driver named last: PITCH_OFFSET bits
+ * 30, 31, or DST_TILE 0x1700 / SRC_TILE 0x1704, which Apple's drivers write beside DST/SRC_OFFSET and _PITCH (the
+ * kext's ATIR300Surface::write_2dblit_cmds_for_copy_buffer_using_DMA, the GL driver's texture upload; SRC_TILE is 0
+ * or 1 there, so a source named through it compares as tiled or not). Unverified: that DST_TILE's two low bits are
+ * macro and micro in this order.
+ * A page nobody is seen writing holds the CPU's bytes from outside every region - linear on a real card too, so a
+ * tiled read of it is a difference. The CPU's direct writes are not seen (no trap): a page keeps a stale writer after
+ * its memory was reused, so a difference is a place to look at, not a verdict.
+ * The first sixteen differences are printed; all are counted (frontend.h, the exit statistics). */
+enum {
+    DIAG_NOBODY,
+    DIAG_DRAW,
+    DIAG_2D,
+    DIAG_HOST,
+    DIAG_CPU,
+    DIAG_WRITERS,
+    DIAG_BOOL = 4 /* with a reader's tiling: tiled or not is all it names */
+};
+static const char *const diag_by[DIAG_WRITERS] = {"nobody seen", "a draw", "the 2D engine", "2D host data",
+                                                  "the CPU in a SURFACE region"};
+static uint8_t diag_page[1 << 16]; /* per 4 KiB page of VRAM (256 MiB): writer << 2 | tiling */
+static uint8_t diag_dst, diag_src; /* the 2D engine's tiling as named last (diag_src: DIAG_BOOL through SRC_TILE) */
+static int diag_on(void) {
+    static int on = -1;
+    if (on < 0)
+        on = getenv("OPTICS_DIAG") && atoi(getenv("OPTICS_DIAG"));
+    return on;
+}
+/* OPTICS_DIAG: records a writer's tiling for a 4 KiB page of VRAM, or compares a reader's with it. */
+static void surface_use(PtRadeon *d, uint64_t off, unsigned tiling, unsigned writer, const char *who) {
+    static unsigned printed;
+    if (off >> 12 >= sizeof diag_page)
+        return;
+    uint8_t *s = &diag_page[off >> 12];
+    unsigned was = *s >> 2;
+    if (writer && (writer != DIAG_CPU || was == DIAG_NOBODY || was == DIAG_CPU)) {
+        *s = (uint8_t)(writer << 2 | (tiling & 3));
+        return;
+    }
+    d->stats.diag_reads[was]++;
+    if ((tiling & DIAG_BOOL) ? ((*s & 3) != 0) != ((tiling & 3) != 0) : (*s & 3u) != (tiling & 3)) {
+        d->stats.diag_differs[was]++;
+        if (printed++ < 16)
+            fprintf(stderr, "optics-diag: %s at VRAM %#llx names tiling %u%s, last written by %s with %u\n", who,
+                    (unsigned long long)off, tiling & 3, (tiling & DIAG_BOOL) ? " (tiled or not)" : "", diag_by[was],
+                    *s & 3u);
+    }
+}
+/* OPTICS_DIAG for a GPU address: surface_use in VRAM; in GART only counts tiled reads. */
+static void surface_gpu(PtRadeon *d, uint32_t gpu, unsigned tiling, unsigned writer, const char *who) {
+    uint64_t off;
+    if (!diag_on())
+        return;
+    if (optics_frontend_vram_offset(d, gpu, &off))
+        surface_use(d, off, tiling, writer, who);
+    else if (!writer) /* GART: the driver's own memory, no tiling expected */
+        d->stats.diag_gart_tiled += (tiling & 3) != 0;
+}
+static void diag_write(PtRadeon *d, uint32_t a, uint32_t v) { /* a register write, before the value is stored */
+    if (a == DST_PITCH_OFFSET)
+        diag_dst = (uint8_t)(v >> 30);
+    else if (a == 0x1700)
+        diag_dst = v & 3;
+    else if (a == SRC_PITCH_OFFSET)
+        diag_src = (uint8_t)(v >> 30);
+    else if (a == 0x1704)
+        diag_src = (uint8_t)(DIAG_BOOL | (v & 3));
+    else if (a >= 0x0b0c && a < 0x0b8c && (a - 0x0b0c) % 16 == 0) { /* SURFACE INFO, written after the bounds */
+        uint32_t lo = d->reg[(a - 8) / 4], hi = d->reg[(a - 4) / 4];
+        if (hi <= lo)
+            return;
+        surface_use(d, lo, v >> 16, DIAG_CPU, "a SURFACE region");
+        for (uint64_t p = (lo >> 12) + 1; p <= hi >> 12 && p < sizeof diag_page; p++)
+            if (diag_page[p] >> 2 == DIAG_NOBODY || diag_page[p] >> 2 == DIAG_CPU)
+                diag_page[p] = (uint8_t)(DIAG_CPU << 2 | (v >> 16 & 3));
+    }
 }
 /* Executes a 2D engine operation (the registers' or a CP rectangle): solid fills, screen-to-screen copies and host-
  * data uploads with raster op, brush, clipping and byte swapping. */
@@ -1013,6 +1132,7 @@ static void blit(PtRadeon *d, int cp_rectangle) {
             blit_refused(d, "2D host data allocation failed");
             return;
         }
+        surface_gpu(d, doff, (gmc & 2) ? diag_dst : def >> 30, DIAG_HOST, "2D host data");
         d->hd.offset = doff;
         d->hd.pitch = dpitch;
         d->hd.dx = dx;
@@ -1030,11 +1150,19 @@ static void blit(PtRadeon *d, int cp_rectangle) {
         }
         return;
     }
+    /* A rectangle without rows or columns draws nothing. Apple's GL driver sends one with every small buffer upload:
+     * the full rows first, 0 of them, then the last partial row (the upload beside gldAllocVertexBuffer). Not a
+     * refusal: four of them in a Leopard session were its whole count of refused blits. */
+    if (!w || !h)
+        return;
     int copy = rop == 0xcc && src_source == 2, fill = (rop == 0xf0 && brush == 13) || rop == 0x00 || rop == 0xff;
     if (!bpp || !w || !h || !(copy || fill) || (gmc & 0xc) || (swap && bpp != 4 && !(swap == 1 && bpp == 2)) ||
         (d->reg[DP_WRITE_MASK / 4] != 0xffffffffu && bpp == 4)) {
         blit_refused(d, "unsupported 2D operation");
-        note(d, "2D refused: GMC %08x HW %08x", gmc, hw);
+        if (d->logged++ < LOG_LIMIT)
+            fprintf(stderr,
+                    "optics-frontend: 2D refused: GMC %08x HW %08x at %08x from %08x, %#x pitch %u <- %#x pitch %u%s\n",
+                    gmc, hw, dyx, syx, doff, dpitch, soff, spitch, cp_rectangle ? " (CP rectangle)" : "");
         return;
     }
     uint32_t direction = d->reg[0x16c0 / 4];
@@ -1092,6 +1220,9 @@ static void blit(PtRadeon *d, int cp_rectangle) {
             fputc('\n', f);
         }
     }
+    if (copy)
+        surface_gpu(d, soff, (gmc & 1) ? diag_src : def >> 30, 0, "a 2D source");
+    surface_gpu(d, doff, (gmc & 2) ? diag_dst : def >> 30, DIAG_2D, "2D destination");
     size_t row = (size_t)w * bpp, allocation = cp_rectangle ? row * h : row;
     if (allocation > (64u << 20)) {
         blit_refused(d, "2D rectangle snapshot exceeds budget");
@@ -1217,10 +1348,12 @@ static void rb_setup(PtRadeon *d) {
         d->ring_words = words;
     }
 }
+/* Writes the ring's read pointer to its write-back address, unless the driver turned that off. */
 static void cp_writeback_rptr(PtRadeon *d) {
     if (!(d->reg[CP_RB_CNTL / 4] & RB_NO_UPDATE) && d->reg[CP_RB_RPTR_ADDR / 4])
         writeback(d, d->reg[CP_RB_RPTR_ADDR / 4] & ~3u, d->reg[CP_RB_RPTR / 4]);
 }
+/* Raises or lowers the interrupt line from the pending and enabled sources (VBLANK, VBLANK2, software). */
 static void irq_update(PtRadeon *d) {
     int level = (d->int_status & d->reg[GEN_INT_CNTL / 4] & (INT_VBLANK | INT_VBLANK2 | INT_SW)) != 0;
     if (level != d->irq_level) {
@@ -1292,6 +1425,7 @@ static void zpass_draw(PtRadeon *d, const OpticsDraw *dr) {
     }
     free(vo);
 }
+/* Logs an occlusion query's result: the first six, then one in 65536. */
 static void query_counted(PtRadeon *d, uint32_t id, uint64_t n) {
     static unsigned shown, total, seen;
     total++;
@@ -1435,7 +1569,9 @@ static void reg_write(PtRadeon *d, uint32_t a, uint32_t v, int from_cp) {
             fprintf(stderr, "optics-frontend: first write %#06x = %08x%s\n", a, v, from_cp ? " (CP)" : "");
         }
     }
-    if ((a >= 0x0b00 && a < 0x0b90) || (a >= 0x1400 && a < 0x1700 && (a < SCRATCH_REG0 || a >= SCRATCH_REG0 + 32)) ||
+    if (diag_on())
+        diag_write(d, a, v);
+    if ((a >= 0x0b00 && a < 0x0b90) || (a >= 0x1400 && a < 0x1708 && (a < SCRATCH_REG0 || a >= SCRATCH_REG0 + 32)) ||
         a == MC_FB_LOCATION || a == MC_AGP_LOCATION || a == AGP_BASE || (a >= AIC_CNTL && a < AIC_CNTL + 0x18) ||
         a == PCIGART_PT_BASE) {
         FILE *f = reg_log(a < 0x1400);
@@ -1458,8 +1594,9 @@ static void reg_write(PtRadeon *d, uint32_t a, uint32_t v, int from_cp) {
         if (n++ < 96)
             fprintf(stderr, "optics-frontend: display %#x %#x -> %#x%s\n", a, d->reg[a / 4], v, from_cp ? " (CP)" : "");
     }
-    if (d->view_count &&
-        d->reg[a / 4] != v) { /* lanes change: the CPU's bytes there go back with the old lanes first */
+    /* The driver's first SURFACE_CNTL write ends the boot console's lanes whatever value it writes (aperture_xor). */
+    if (d->view_count && (d->reg[a / 4] != v || (a == SURFACE_CNTL && !d->surface_written))) {
+        /* lanes change: the CPU's bytes there go back with the old lanes first */
         if (a == SURFACE_CNTL)
             view_sync(d, 0, d->vram_bytes);
         else if (a >= 0x0b04 && a < 0x0b84 &&
@@ -1538,6 +1675,24 @@ static void reg_write(PtRadeon *d, uint32_t a, uint32_t v, int from_cp) {
         d->src_pitch = (v >> 22 & 0xff) * 64;
         break;
     case DST_HEIGHT_WIDTH:
+        blit(d, 0);
+        break;
+    case 0x140c: /* DST_WIDTH starts a rectangle of DST_X/Y, SRC_X/Y and DST_HEIGHT (0x141c, 0x1420, 0x1414, 0x1418,
+                  * 0x1410): Apple's kext copies between a surface and its backing store this way
+                  * (ATIR300Surface::write_2dblit_cmds_for_copy_buffer_using_DMA: X and DST_HEIGHT once, then SRC_Y,
+                  * DST_Y and DST_WIDTH per rectangle - so nothing advances by itself). Executed as the same rectangle
+                  * through DST_Y_X, SRC_Y_X and DST_HEIGHT_WIDTH. Unverified: DST endian 0x15d0 (not applied). */
+        if (optics_trace() && d->logged++ < LOG_LIMIT)
+            fprintf(stderr,
+                    "optics-frontend: 2D DST_WIDTH %u x %u at %u,%u from %u,%u, GMC %08x, %#x pitch %u <- %#x pitch "
+                    "%u, tile %x <- %x, endian %x <- %x%s\n",
+                    v, d->reg[0x1410 / 4], d->reg[0x141c / 4], d->reg[0x1420 / 4], d->reg[0x1414 / 4],
+                    d->reg[0x1418 / 4], d->reg[DP_GUI_MASTER_CNTL / 4], d->dst_offset, d->dst_pitch, d->src_offset,
+                    d->src_pitch, d->reg[0x1700 / 4], d->reg[0x1704 / 4], d->reg[0x15d0 / 4], d->reg[SRC_ENDIAN / 4],
+                    from_cp ? " (CP)" : "");
+        d->reg[DST_Y_X / 4] = (d->reg[0x1420 / 4] & 0x3fff) << 16 | (d->reg[0x141c / 4] & 0x3fff);
+        d->reg[SRC_Y_X / 4] = (d->reg[0x1418 / 4] & 0x3fff) << 16 | (d->reg[0x1414 / 4] & 0x3fff);
+        d->reg[DST_HEIGHT_WIDTH / 4] = (d->reg[0x1410 / 4] & 0x3fff) << 16 | (v & 0x3fff);
         blit(d, 0);
         break;
     case 0x16c0:
@@ -1621,6 +1776,9 @@ static uint32_t reg_read_value(PtRadeon *d, uint32_t a) {
     case CONFIG_MEMSIZE:
         return (uint32_t)(d->vram_bytes -
                           (4u << 20)); /* Unverified: 4 MiB less than the VRAM, an observed value the driver accepts */
+    case CONFIG_APER_SIZE: /* each of the two CPU apertures holds all of the VRAM. Linux's radeon takes its visible VRAM
+                            * from this (r100_get_accessible_vram); 0 left it none: "Fatal error during GPU init", -12 */
+        return (uint32_t)d->vram_bytes;
     case RBBM_STATUS: /* GUI_ACTIVE (bit 31, radeon_reg.h RBBM_ACTIVE) until the CP and every earlier GPU command are done */
         if (!d->cp_async && cp_pending(d))
             cp_run(d, 0); /* a CP thread reports its progress instead */
@@ -1653,6 +1811,7 @@ static int optics_ring_read(void *o, uint32_t first, uint32_t words, void *le) {
     cp_swap(d, le, 4ull * words);
     return 0;
 }
+/* Reads indirect-buffer words for the command stream, swapped as CP_RB_CNTL asks. */
 static PtR2IoResult ib_read(void *o, uint64_t a, void *le, size_t n) {
     PtRadeon *d = o;
     if (!gpu_copy(d, a, le, n, 0))
@@ -1660,6 +1819,7 @@ static PtR2IoResult ib_read(void *o, uint64_t a, void *le, size_t n) {
     cp_swap(d, le, n);
     return PT_R2_IO_OK;
 }
+/* The draw builder's reads of vertices and indices from GPU memory. */
 static int fetch_gpu(void *o, uint64_t gpu, void *buf, size_t n) {
     return gpu_copy(o, gpu, buf, n, 0);
 }
@@ -1674,6 +1834,7 @@ static int completion_register(uint32_t a, uint32_t v) {
 static int ordered_completion(uint32_t a, uint32_t v) {
     return completion_register(a, v) || a == GEN_INT_STATUS;
 }
+/* OPTICS_STRICT=1 (development): any refused packet, draw or blit fails the device instead of being skipped. */
 static int strict(void) {
     static int on = -1;
     if (on < 0)
@@ -1931,6 +2092,8 @@ static int defer_query(PtRadeon *d, uint32_t address, uint32_t query) {
     d->cp_wait = 1;
     return 0;
 }
+/* OPTICS_EARLY_FENCE=0 (diagnostic): completions wait for the GPU instead of being published when the CP reaches
+ * them. */
 static int early_completion(void) {
     static int early = -1;
     if (early < 0) {
@@ -1994,6 +2157,44 @@ static int admit_completion(PtRadeon *d, unsigned writes) {
 /* One draw: built from the packet payload (IMMD_2/VBUF_2/INDX_2 words) against the register state and run by the
  * executor. 0, or 2 to stop the CP (a GPU failure; OPTICS_STRICT=1 also for a refused draw); with defer (a whole draw
  * packet), 1 while its shader compiles: the packet stays and the CP waits on cp_wait without the lock. */
+/* A macro-tiled surface is stored in tiles of 8 rows; VRAM here is linear, row after row. The driver names a part of a
+ * tiled surface by its tiled address: Tiger's window server samples a 2560-pixel-wide target as two textures (R300 reads
+ * at most 2048 texels a row), the right one at +0x8000 = two tiles of 2048 bytes x 8 rows = x 1024. Read linearly that is
+ * row 3, x 512: right of x 1024 the screen showed the picture moved by (+512, -3) (GitHub report, u252c-u253). A
+ * macro-tiled 32-bit texture inside a macro-tiled 32-bit colour target of the same pitch moves to the linear address of
+ * the same pixel. Unverified: tiles of 8 rows for the other pixel sizes; whole-tile offsets only (the driver's splits). */
+static void macro_tiled(PtRadeon *d, OpticsDraw *w) {
+    for (unsigned u = 0; u < OPTICS_DRAW_TEXTURES; u++) {
+        OpticsTexture *t = &w->texture[u];
+        if (!(w->texture_mask >> u & 1) || t->absent || t->tile != 1 || t->bpp != 4)
+            continue;
+        uint32_t p = t->pitch * 4;
+        for (unsigned i = 0; i < d->macros; i++)
+            if (d->macro[i].pitch == p && t->offset > d->macro[i].base && t->offset < d->macro[i].end) {
+                uint32_t at = t->offset - d->macro[i].base, rem = at % (8 * p);
+                if (!(rem & 7))
+                    t->offset += rem / 8 - rem; /* rem / 8: the x in bytes, in the first row of its tile row */
+                break;
+            }
+    }
+    if (!(d->reg[0x4e38 / 4] >> 16 & 1) || w->cb_bpp != 4) /* RB3D_COLORPITCH0 bit 16: macro tile */
+        return;
+    uint32_t b = w->cb_offset, p = w->cb_pitch * 4, end = b + p * ((w->height + 7) & ~7u);
+    for (unsigned i = 0; i < d->macros;)
+        if (d->macro[i].base < end && b < d->macro[i].end) { /* the same target again, or memory used anew */
+            if (d->macro[i].base == b && d->macro[i].pitch == p && d->macro[i].end > end)
+                end = d->macro[i].end;
+            memmove(&d->macro[i], &d->macro[i + 1], (--d->macros - i) * sizeof d->macro[0]);
+        } else
+            i++;
+    if (d->macros == 8)
+        memmove(&d->macro[0], &d->macro[1], --d->macros * sizeof d->macro[0]);
+    d->macro[d->macros].base = b;
+    d->macro[d->macros].pitch = p;
+    d->macro[d->macros++].end = end;
+}
+/* Builds one draw from the registers and the packet's vertices or indices and hands it to the executor. 1: busy, a
+ * shader still compiles (the packet comes again); 2: the device failed; 0: drawn, or refused and counted. */
 static int run_draw(PtRadeon *d, uint8_t opcode, const uint32_t *payload, uint32_t words, const uint8_t *edge,
                     int defer) {
     if (defer && d->draw_wait && exec_ops.compiling && exec_ops.compiling(d->exec))
@@ -2025,6 +2226,8 @@ static int run_draw(PtRadeon *d, uint8_t opcode, const uint32_t *payload, uint32
     uint64_t t1 = t0 ? mono_ns() : 0;
     d->rate_build += t1 - t0;
     draw.query = d->zpass_open ? d->zpass_query : 0;
+    if (built)
+        macro_tiled(d, &draw);
     d->in_executor = 1;
     int result = OPTICS_EXEC_REFUSED;
     if (built && exec_ops.draw && draw.polyline && split) {
@@ -2034,6 +2237,7 @@ static int run_draw(PtRadeon *d, uint8_t opcode, const uint32_t *payload, uint32
             aos.faces = 2;
             if (optics_draw_build(&back, d->reg, d->r300, opcode, payload, words, &aos, fetch_gpu, d, &why)) {
                 back.query = draw.query;
+                macro_tiled(d, &back);
                 result = exec_ops.draw(d->exec, d, &back, &why);
                 optics_draw_free(&back);
             } else
@@ -2084,6 +2288,18 @@ static int run_draw(PtRadeon *d, uint8_t opcode, const uint32_t *payload, uint32
         d->stats.approx_aniso += draw.approx & OPTICS_APPROX_ANISO ? 1 : 0;
         d->stats.approx_tiled += draw.approx & OPTICS_APPROX_TILED ? 1 : 0;
         d->stats.approx_signed += draw.approx & OPTICS_APPROX_SIGNED ? 1 : 0;
+        d->stats.approx_yuv += draw.approx & OPTICS_APPROX_YUV601 ? 1 : 0;
+        d->stats.approx_wide += draw.approx & OPTICS_APPROX_WIDE ? 1 : 0;
+        d->stats.approx_fixed += draw.approx & OPTICS_APPROX_FIXED ? 1 : 0;
+        for (unsigned u = 0; u < OPTICS_DRAW_TEXTURES; u++)
+            if ((draw.texture_mask >> u & 1) && !draw.texture[u].absent) {
+                unsigned t = draw.texture[u].tile;
+                surface_gpu(d, draw.texture[u].offset, (t & 1) | (t >> 1 ? 2 : 0), 0, "a texture");
+            }
+        { /* RB3D_COLORPITCH0 */
+            uint32_t p = d->reg[0x4e38 / 4];
+            surface_gpu(d, draw.cb_offset, (p >> 16 & 1) | ((p >> 17 & 3) ? 2 : 0), DIAG_DRAW, "colour target");
+        }
     }
     if (payload)
         optics_draw_free(&draw); /* the builder zeroes first: a failed build is freed too */
@@ -2158,6 +2374,8 @@ static int run_draw(PtRadeon *d, uint8_t opcode, const uint32_t *payload, uint32
 static int execute(PtRadeon *d, const PtR2Pm4Packet *p) {
     if (d->stats.failed)
         return 2;
+    if (p->type != 3 || p->opcode != 0x33)
+        d->indx_pending = 0; /* only the packet right after a 3D_DRAW_INDX_2 without indices is its INDX_BUFFER */
     if (p->type == 0) {
         unsigned writes = 0;
         int defer = 0; /* early completion admits every packet at once: nothing to count (one pass, not two) */
@@ -2209,14 +2427,16 @@ static int execute(PtRadeon *d, const PtR2Pm4Packet *p) {
      * reads the clear value. The hardware reads ZB_DEPTHCLEARVALUE / RB3D_COLOR_CLEAR_VALUE when a cleared tile is
      * used, not when the mask is written, so the executor applies the clear lazily with the values in force at that
      * use. HiZ is a conservative acceleration structure: its clear has no visible effect here. Unverified: the mask covers
-     * the whole buffer (count = its 8x8 tiles at 4 bits each, as observed for 1088x768). */
+     * the whole buffer (count = its 8x8 tiles at 4 bits each, as observed for 1088x768). The range may start past 0: the
+     * driver gives each buffer its own part of the mask RAM (UT2004: dword 0x6000, 0x600 dwords = every tile of 1024x768);
+     * u069 refused 24076 of those, so the depth buffer kept the last frame's values. */
     if (p->type == 3 && (p->opcode == 0x32 || p->opcode == 0x37 || p->opcode == 0x38) && p->words == 3) {
         uint32_t w[3];
         for (uint32_t i = 0; i < 3; i++)
             pt_r2_pm4_word(p, i, &w[i]);
         if (p->opcode == 0x37)
             return 0;
-        if (!w[0] && !w[2] && exec_ops.clear &&
+        if (!w[2] && exec_ops.clear &&
             !exec_ops.clear(d->exec, d, (p->opcode == 0x32 ? d->reg[0x4f20 / 4] : d->reg[0x4e28 / 4]) & ~31u,
                             p->opcode == 0x32 ? 2 : 1))
             return 0;
@@ -2229,6 +2449,49 @@ static int execute(PtRadeon *d, const PtR2Pm4Packet *p) {
         for (uint32_t i = 1; i < n; i++)
             reg_write(d, 0x20c4 + 4 * (i - 1), w[i], 1);
         return 0;
+    }
+    /* Indices from a buffer, as Mesa's r300 draws (OS X's driver sends them in the packet): 3D_DRAW_INDX_2 with the
+     * VF_CNTL word alone, then INDX_BUFFER - ONE_REG_WR | VAP_PORT_IDX0 >> 2, the indices' GPU address, their number
+     * of dwords. They are fetched here and the pair runs as the INDX_2 draw it stands for. As for vertex arrays
+     * (draw.c), dwords in system memory take VAP_CNTL_STATUS's VC_SWAP and those in VRAM are read as stored
+     * (unverified for indices). */
+    if (p->type == 3 && p->opcode == 0x36 && p->words == 1) {
+        uint32_t vf = 0;
+        pt_r2_pm4_word(p, 0, &vf);
+        if ((vf >> 4 & 3) == 1 && vf >> 16) {
+            d->indx_vf = vf;
+            d->indx_pending = 1;
+            return 0;
+        }
+    }
+    if (p->type == 3 && p->opcode == 0x33 && p->words == 3 && d->indx_pending) {
+        uint32_t w[3] = {0, 0, 0}, vf = d->indx_vf, count = vf >> 16, need = vf >> 11 & 1 ? count : (count + 1) / 2;
+        for (uint32_t i = 0; i < 3; i++)
+            pt_r2_pm4_word(p, i, &w[i]);
+        /* SKIP_COUNT (bits 18:16) dwords are discarded at the start of the buffer, whose base is dword-aligned
+         * (BUFFER_BASE[31:2]); R5xx Acceleration 1.5, 6.2.3.11. Leopard's driver sends a 16-bit run starting at a
+         * buffer's second halfword as base + 2 with one dword more ("for misaligned data, this number must be increased
+         * by 1"), and an offset of one 32-bit index as SKIP_COUNT 1 (u195: cf-elements-short-vbo, cf-elements-int-vbo). */
+        uint32_t off = (w[1] & 3) + 4 * (w[0] >> 16 & 7), bytes = (vf >> 11 & 1 ? 4 : 2) * count,
+                 all = (off + bytes + 3) & ~3u;
+        uint8_t *b = (w[0] & ~(7u << 16)) == 0x80000810 && off + bytes <= 4 * (uint64_t)w[2] ? calloc(1, all + 4) : NULL;
+        uint32_t *payload = b ? malloc((1 + (size_t)need) * 4) : NULL;
+        d->indx_pending = 0;
+        if (payload && fetch_gpu(d, w[1] & ~3u, b, all)) {
+            uint64_t local;
+            if (!optics_frontend_vram_offset(d, w[1], &local))
+                optics_unswap(d->reg[0x2140 / 4] & 3, b, all);
+            for (uint32_t i = 0; i < need; i++)
+                payload[1 + i] = rd32le(b + off + 4 * i); /* past the last index: zeros (calloc) */
+            payload[0] = vf;
+            int r = run_draw(d, 0x36, payload, 1 + need, NULL, 1);
+            free(payload);
+            free(b);
+            d->indx_pending = r == 1; /* its shader compiles: this packet comes again */
+            return r;
+        }
+        free(payload); /* another form, too few dwords or indices outside GPU memory: refused below, with its words */
+        free(b);
     }
     if (effect == OPTICS_EFFECT_DRAW) {
         uint32_t *payload = malloc((p->words ? p->words : 1) * 4u);
@@ -2266,6 +2529,7 @@ static int execute(PtRadeon *d, const PtR2Pm4Packet *p) {
     /* DEGRADED default: the CP progresses past the refusal, which is counted and logged, never reported as executed. */
     return strict() ? 2 : 0;
 }
+/* Executes one ring or indirect-buffer packet and counts the CP's progress. */
 static int cp_execute(void *o, const PtR2Pm4Packet *p) {
     int r = execute(o, p);
     if (!r)
@@ -2304,6 +2568,8 @@ static void ledger(const PtRadeon *d, uint64_t now, uint64_t v[8]) {
     v[7] = d->stats.draws;
 }
 void (*optics_frontend_stall_hook)(uint64_t gap_ns);
+/* A frame came 100 ms or more after the one before it: what the device was busy with meanwhile is kept for the exit
+ * report. */
 static void stall_note(PtRadeon *d, uint64_t now, uint64_t gap, const uint64_t v[8]) {
     uint64_t dv[9];
     for (int k = 0; k < 8; k++)
@@ -2330,6 +2596,7 @@ static void stall_note(PtRadeon *d, uint64_t now, uint64_t gap, const uint64_t v
 }
 /* kicked: a WPTR write (the RPTR write-back follows every kick, as before); a resumed CP writes RPTR back only when it moved. */
 static void cp_run_body(PtRadeon *d, int kicked);
+/* Runs the command processor over the ring (and the IBs it launches), timed with OPTICS_RATE. */
 static void cp_run(PtRadeon *d, int kicked) {
     cp_state(d, 3);
     if (!rate_on() || d->rate_depth)
@@ -2434,6 +2701,7 @@ static int cp_pending(const PtRadeon *d) {
     return d->cp_kicked || d->cp_wait ||
            (d->ring_ready && !d->ring_stalled && (d->ring.rptr != d->ring.wptr || optics_stream_pending(d->stream)));
 }
+/* Is the CP running or has it work left? RBBM_STATUS GUI_ACTIVE. */
 static int cp_busy(const PtRadeon *d) {
     return d->cp_running || cp_pending(d);
 } /* RBBM_STATUS GUI_ACTIVE */
@@ -2550,6 +2818,7 @@ int pt_radeon_create(PtRadeon **out, const PtRadeonConfig *c) {
     *out = d;
     return 0;
 }
+/* The board's PCI configuration and AGP state, as the device sees them. */
 void pt_radeon_config(PtRadeon *d, const uint8_t pci[256], const PtAgp *agp) {
     if (d) {
         enter(d);
@@ -2722,6 +2991,7 @@ static void slot_drop(Slot *s) {
         exec_ops.frame_release(s->native);
     s->native = s->texture = NULL;
 }
+/* Frees a frame slot's pixel memory and its native frame. */
 static void slot_free(Slot *s) {
     slot_drop(s);
     if (s->handle) {
@@ -3050,7 +3320,7 @@ void pt_radeon_stats(PtRadeon *d, FILE *f) {
     fprintf(f,
             "optics-frontend: draws %llu packets %llu type0 %llu IBs %llu blits %llu (%llu bytes) refused: draws %llu packets %llu blits %llu; "
             "faults %llu (last %08x) writebacks %llu frames %llu (native %llu copied %llu) fence waits %llu completions deferred %llu RBBM reads %llu export failures %llu; "
-            "VRAM %s (switches %llu), CPU view faults %llu (late syncs %llu, written granules returned %llu); approximated draws: mip %llu border %llu aniso %llu tiled %llu signed %llu%s%s\n",
+            "VRAM %s (switches %llu), CPU view faults %llu (late syncs %llu, written granules returned %llu); approximated draws: mip %llu border %llu aniso %llu tiled %llu signed %llu yuv %llu wide %llu fixed %llu%s%s\n",
             (unsigned long long)s.draws, (unsigned long long)s.packets, (unsigned long long)s.type0_words,
             (unsigned long long)s.ib_launches, (unsigned long long)s.blits, (unsigned long long)s.blit_bytes,
             (unsigned long long)s.draws_refused, (unsigned long long)s.packets_refused,
@@ -3062,8 +3332,16 @@ void pt_radeon_stats(PtRadeon *d, FILE *f) {
             (unsigned long long)s.direct_switches, (unsigned long long)s.guard_faults,
             (unsigned long long)s.guard_emulated, (unsigned long long)s.guard_groups, (unsigned long long)s.approx_mip,
             (unsigned long long)s.approx_border, (unsigned long long)s.approx_aniso, (unsigned long long)s.approx_tiled,
-            (unsigned long long)s.approx_signed, s.failed ? "; FAILED" : "",
+            (unsigned long long)s.approx_signed, (unsigned long long)s.approx_yuv, (unsigned long long)s.approx_wide,
+            (unsigned long long)s.approx_fixed, s.failed ? "; FAILED" : "",
             strict() ? "; strict" : "; DEGRADED (refusals continue)");
+    if (diag_on()) {
+        fprintf(f, "optics-diag: reads by the surface's last writer (all/naming another tiling):");
+        for (int i = 0; i < DIAG_WRITERS; i++)
+            fprintf(f, " %s %llu/%llu,", diag_by[i], (unsigned long long)s.diag_reads[i],
+                    (unsigned long long)s.diag_differs[i]);
+        fprintf(f, " tiled reads of GART %llu\n", (unsigned long long)s.diag_gart_tiled);
+    }
 }
 static int reset(PtRadeon *d);
 int pt_radeon_reset(PtRadeon *d) {
@@ -3115,6 +3393,7 @@ static int reset(PtRadeon *d) {
     uint32_t fb = (uint32_t)(((d->vram_bytes >> 16) - 1) << 16);
     memset(d->reg, 0, sizeof d->reg);
     d->reg[MC_FB_LOCATION / 4] = fb;
+    d->macros = 0;
     d->reg[DP_WRITE_MASK / 4] = 0xffffffffu;
     d->direction_written = 0;
     d->epoch++;
@@ -3234,19 +3513,23 @@ size_t optics_frontend_scanout(PtRadeon *d, uint8_t *out, size_t cap, uint32_t *
 unsigned optics_frontend_cpu_view_xor(const PtRadeon *d) {
     return d ? aperture_xor(d, (int)d->fb_ap) : 0;
 }
+/* Issues the next timeline job (a draw's GPU work) and remembers it as the newest. */
 uint64_t optics_frontend_job(PtRadeon *d) {
     uint64_t s = d && d->tl ? pt_r2_timeline_issue(d->tl) : 0;
     if (s)
         d->issued = s;
     return s;
 }
+/* The executor submits the newest job's GPU work. Nonzero: accepted. */
 int optics_frontend_timeline_submit(PtRadeon *d, PtR2TimelineToken *t) {
     return d && d->tl && pt_r2_timeline_submit(d->tl, d->issued, t) == PT_R2_READY;
 }
+/* The GPU finished a job (success or not). */
 void optics_frontend_timeline_complete(PtRadeon *d, PtR2TimelineToken t, int success) {
     if (d && d->tl)
         (void)pt_r2_timeline_complete(d->tl, t, success);
 }
+/* Is the CP idle (no work queued or running)? */
 int optics_frontend_idle(PtRadeon *d) {
     if (!d)
         return 0;
@@ -3265,6 +3548,7 @@ int optics_frontend_ram_before(PtRadeon *d, uint64_t at, size_t n, int write) {
     leave(d);
     return r == PT_R2_IO_OK ? 0 : r == PT_R2_IO_BUSY ? EAGAIN : EIO;
 }
+/* A GPU address inside the frame-buffer window: its VRAM offset in *off. 0: not VRAM. */
 int optics_frontend_vram_offset(const PtRadeon *d, uint64_t gpu, uint64_t *off) {
     uint64_t base, len;
     if (!optics_r300_memory_window(d->reg[MC_FB_LOCATION / 4], &base, &len) || gpu < base || gpu - base >= len ||

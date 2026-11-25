@@ -272,12 +272,23 @@ func ensureBundleV1(_ bundle: URL, execute: (String, [String]) throws -> Data = 
 enum InstallPhase: String, Codable { case installer, toolsPending, ready }
 let cpus = [(id: "750", name: "G3 750"), (id: "7400", name: "G4 7400"), (id: "7447a", name: "G4 7447A"), (id: "7447a-dual", name: "Dual G4 7447A")]  // a machine's processors: id, name
 /// The processors a machine of this system may choose: Dual G4 only under Leopard (Tiger ticks 100 Hz on every CPU in idle: a second G4 doubles its idle cost).
+/// Boot display modes a machine may choose: the display driver's catalog (b5-0002); "screen" is the Mac's screen size.
+/* How much larger than the system asks its 3D is drawn (the engine's OPTICS_INTERNAL): "1" is as it asks. */
+let renderScales = ["1", "1.5", "2"]
+let defaultRenderScale = "1.5"
+let displayModes = [
+    "screen", "640x480", "800x600", "1024x768", "1280x960", "1600x1200", "1280x800", "1440x900", "1680x1050", "1920x1200",
+    "2560x1600", "1280x720", "1360x768", "1600x900", "1920x1080", "2560x1440",
+]
 func cpuChoices(_ item: Installation) -> [(id: String, name: String)] { cpus.filter { $0.id != "7447a-dual" || item.installerIdentity.system == "Leopard" } }
 struct Installation: Codable {
     var schema = 1, id = UUID(), name = "Tiger", cpu = "7447a", ram = 2048, diskGiB = 40, phase = InstallPhase.installer
     var installer: String, installerIdentity: InstallerIdentity
     var systemIdentity: InstallerIdentity? = nil  // the installed system, read from the machine's disk; nil until the first read
     var toolsDigest: String? = nil  // SHA-256 of the PtolemyTools.dmg last put on the disk; nil: before this record existed
+    var display: String? = nil  // the boot display mode, one of displayModes; nil: the Mac's screen size
+    var upscale: Bool? = nil  // MetalFX for a picture shown larger than the guest draws it; nil: on
+    var renderScale: String? = nil  // 3D drawn larger than the system asks, one of renderScales; nil: defaultRenderScale
     var shownIdentity: InstallerIdentity { systemIdentity ?? installerIdentity }  // what the window names: updates show
     func validate() throws {
         try check(
@@ -289,6 +300,8 @@ struct Installation: Codable {
         try check(cpu != "750" || installerIdentity.system != "Leopard", "Leopard needs a G4 processor")
         try check(cpu != "7447a-dual" || installerIdentity.system == "Leopard", "Dual G4 needs Leopard")
         try check((8...120).contains(diskGiB), "Disk size must be 8–120 GiB (this board uses LBA28)")
+        try check(display.map { displayModes.contains($0) } ?? true, "Invalid display mode")
+        try check(renderScale.map { renderScales.contains($0) } ?? true, "Invalid 3D resolution")
     }
     static func load(_ folder: URL) throws -> Installation {
         let r = try JSONDecoder().decode(
@@ -349,6 +362,9 @@ struct ProductResources {
     func environment(_ phase: InstallPhase, _ item: Installation) -> [String: String] {
         var e = environment(phase)
         if item.cpu == "7447a-dual" { e["PT_CPUS"] = "2" }
+        if let d = item.display { e["PT_EDID_MODE"] = d }
+        e["PT_UPSCALE"] = item.upscale ?? true ? "1" : "0"  // the engine's View > MetalFX Upscaling at the start
+        e["OPTICS_INTERNAL"] = item.renderScale ?? defaultRenderScale
         return e
     }
 }

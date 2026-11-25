@@ -39,7 +39,7 @@ enum Art {
             srgbRed: CGFloat(v >> 16 & 255) / 255, green: CGFloat(v >> 8 & 255) / 255, blue: CGFloat(v & 255) / 255,
             alpha: a)
     }
-    /* "1.0 beta 4 · dev8": the bundle's version and the build label that tools/build-product.sh writes (PT_PRODUCT_LABEL).
+    /* "1.0 beta 5 · dev11": the bundle's version and the build label that tools/build-product.sh writes (PT_PRODUCT_LABEL).
      * The window's subtitle shows it. */
     static let version: String = {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -397,7 +397,6 @@ final class StageView: NSView {
         badge = GlassPanel.make(holder, radius: 22)
         super.init(frame: NSRect(x: 0, y: 0, width: 790, height: 680))
         wantsLayer = true
-        layerContentsRedrawPolicy = .onSetNeedsDisplay
         primary.keyEquivalent = "\r"
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -799,8 +798,19 @@ final class NewMachineForm: NSObject {
     }
 }
 
-/* The machine's settings: an alert with processor, memory and disk. Returns the alert and its three controls. */
-func settingsAlert(_ item: Installation) -> (alert: NSAlert, cpu: NSPopUpButton, ram: NSPopUpButton, disk: NSTextField) {
+/* A boot display mode as the settings name it: "1280 × 800 (16:10)"; "screen" fits the Mac's screen. */
+func displayName(_ mode: String) -> String {
+    let p = mode.split(separator: "x").compactMap { Int($0) }
+    guard p.count == 2 else { return "Fit the Screen" }
+    let ratio = p[0] * 3 == p[1] * 4 ? "4:3" : p[0] * 10 == p[1] * 16 ? "16:10" : "16:9"
+    return "\(p[0]) × \(p[1]) (\(ratio))"
+}
+
+/* The machine's settings: an alert with processor, memory, display, picture and disk. Returns the alert and its controls. */
+func settingsAlert(_ item: Installation) -> (
+    alert: NSAlert, cpu: NSPopUpButton, ram: NSPopUpButton, disk: NSTextField, display: NSPopUpButton, upscale: NSButton,
+    scale: NSPopUpButton
+) {
     let alert = NSAlert()
     alert.messageText = "Settings for \(item.name)"
     alert.informativeText = "\(Art.fullName(item.shownIdentity)) (\(item.shownIdentity.build))"
@@ -813,6 +823,14 @@ func settingsAlert(_ item: Installation) -> (alert: NSAlert, cpu: NSPopUpButton,
     let ram = NSPopUpButton()
     ram.addItems(withTitles: stride(from: 512, through: 2048, by: 64).map(String.init))
     ram.selectItem(withTitle: String(item.ram))
+    let display = NSPopUpButton()
+    display.addItems(withTitles: displayModes.map(displayName))
+    display.selectItem(at: displayModes.firstIndex(of: item.display ?? "screen") ?? 0)
+    let upscale = NSButton(checkboxWithTitle: "Smooth Scaling (MetalFX)", target: nil, action: nil)
+    upscale.state = item.upscale ?? true ? .on : .off
+    let scale = NSPopUpButton()
+    scale.addItems(withTitles: renderScales.map { $0 == "1" ? "As the System Draws" : "\($0)× Sharper" })
+    scale.selectItem(at: renderScales.firstIndex(of: item.renderScale ?? defaultRenderScale) ?? 0)
     let disk = NSTextField(string: String(item.diskGiB))
     disk.widthAnchor.constraint(equalToConstant: 64).isActive = true
     func head(_ s: String) -> NSTextField {
@@ -828,7 +846,11 @@ func settingsAlert(_ item: Installation) -> (alert: NSAlert, cpu: NSPopUpButton,
     mb.textColor = .secondaryLabelColor
     let memory = NSStackView(views: [ram, mb])
     memory.spacing = 6
-    let grid = NSGridView(views: [[head("Processor:"), cpu], [head("Memory:"), memory], [head("Disk:"), size]])
+    let grid = NSGridView(views: [
+        [head("Processor:"), cpu], [head("Memory:"), memory], [head("Display:"), display], [head("Picture:"), upscale],
+        [head("3D Graphics:"), scale],
+        [head("Disk:"), size],
+    ])
     grid.rowSpacing = 10
     grid.columnSpacing = 8
     grid.column(at: 0).xPlacement = .trailing
@@ -837,8 +859,11 @@ func settingsAlert(_ item: Installation) -> (alert: NSAlert, cpu: NSPopUpButton,
     cpu.setAccessibilityLabel("Processor")
     ram.setAccessibilityLabel("Memory in megabytes")
     disk.setAccessibilityLabel("Disk size in gigabytes")
+    display.setAccessibilityLabel("Display mode at startup")
+    upscale.setAccessibilityLabel("Smooth a picture shown larger than the guest draws it, with MetalFX")
+    scale.setAccessibilityLabel("How much larger than the system asks its 3D graphics are drawn")
     alert.accessoryView = grid
-    return (alert, cpu, ram, disk)
+    return (alert, cpu, ram, disk, display, upscale, scale)
 }
 
 /* The menu bar: the commands of the window with their shortcuts, and the standard application, edit, view and window menus. */

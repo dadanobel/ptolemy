@@ -70,14 +70,14 @@ static inline const PtBootMode *pt_boot_mode(const char *name) {
     for (unsigned i = 0; i < sizeof(modes) / sizeof(modes[0]); i++)
         if (!strcmp(name, modes[i].name))
             return &modes[i];
-    /* Any other strict "WxH" (e.g. the host's full-screen size, see stand_window_macos.m):
-     * width in 8-pixel CRTC units, horizontal rate within the EDID range limit (81 kHz). */
+    /* Any other strict "WxH" (e.g. the host's full-screen size, see stand_window_macos.m): within the R300 CRTC
+     * (CRTC_H_TOTAL_DISP: 512 units of 8 pixels, CRTC_V_TOTAL_DISP: 4096 lines). The DTD is filled for the tests. */
     static PtBootMode custom;
     unsigned w, h;
     char tail;
-    if (sscanf(name, "%ux%u%c", &w, &h, &tail) != 2 || w < 640 || w > 2560 || w % 8 || h < 480 || h > 1600 ||
-        pt_cvt_rb(w, h, custom.dtd) > 81000)
+    if (sscanf(name, "%ux%u%c", &w, &h, &tail) != 2 || w < 640 || w > 4096 || w % 8 || h < 480 || h > 4096)
         return NULL;
+    pt_cvt_rb(w, h, custom.dtd);
     custom.name = name;
     custom.width = w;
     custom.height = h;

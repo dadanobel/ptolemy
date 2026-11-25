@@ -109,6 +109,11 @@ TOOLS = ('Antiochus.app', 'rosettast.app')
 OLD = (('Antiochus.app', 'Antiochus.app'), ('Rosetta Stone.app', 'rosettast.app'))
 
 
+# Ptolemy Video (guest/video, bbbunny): QuickTime finds the component through a link in ~/Library/QuickTime to the
+# current version's copy, so a new version replaces it and removal takes it away.
+VIDEO = 'Ptolemy Video.component'
+
+
 # A link of ours: a symlink to versions/<20 hex digits>/tail in the Tools folder. Anything else is someone's own.
 def ours(root, link, tail):
     if not os.path.islink(link):
@@ -139,6 +144,59 @@ def launch_agent(library, link):
               + '</string><key>ProgramArguments</key><array><string>/usr/bin/open</string><string>' + xml(link)
               + '</string></array><key>RunAtLoad</key><true/></dict></plist>\n')
     return os.path.join(library, 'LaunchAgents', label + '.plist'), config
+
+
+# The DrawSprocket shim (guest/dsp/ptdsp.c) stays in the installed version; Ptolemy Agent starts DrawSprocket games with
+# it. Earlier builds put it into the session's environment instead - the library and an environment.plist naming it, in
+# ~/.MacOSX - which does not work in Tiger (loginwindow drops DYLD_*) and breaks Leopard's session once the library is
+# missing (u215). shim() is that pair, so that remove_shim() can take away what an earlier build wrote.
+def shim(home):
+    folder = os.path.join(home, '.MacOSX')
+    library = os.path.join(folder, 'ptdsp.dylib')
+    config = ('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" '
+              '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>DYLD_INSERT_LIBRARIES'
+              '</key><string>' + xml(library) + '</string></dict></plist>\n')
+    return folder, library, os.path.join(folder, 'environment.plist'), config
+
+
+# Writes path through a renamed temporary file in its folder; data None: a copy of source.
+def put(path, data, source):
+    fd, tmp = tempfile.mkstemp(prefix='.ptolemy-', dir=os.path.dirname(path))
+    os.close(fd)
+    try:
+        if data is None:
+            shutil.copyfile(source, tmp)
+        else:
+            f = open(tmp, 'wb')
+            f.write(data)
+            f.close()
+        os.chmod(tmp, 0644)
+        os.rename(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+# The environment first, then the library - which stays when an environment.plist that is not ours names it.
+def remove_shim(home):
+    folder, library, plist, config = shim(home)
+    named = 0
+    if lexists(plist):
+        if not os.path.islink(plist) and open(plist, 'rb').read() == config:
+            os.unlink(plist)
+        else:
+            named = os.path.islink(plist) or open(plist, 'rb').read().find('ptdsp.dylib') >= 0
+    if named:
+        print 'Kept, because ' + plist + ' names it: ' + library
+    elif os.path.isfile(library) and not os.path.islink(library):
+        os.unlink(library)
+    off = os.path.join(folder, 'ptdsp.off')
+    if os.path.isfile(off) and not os.path.islink(off):
+        os.unlink(off)
+    try:
+        os.rmdir(folder)  # only when nothing else is in it
+    except OSError:
+        pass
 
 
 # A running agent of another version holds the worker lock: the new one would start beside it and stay OFF (t877).
@@ -185,6 +243,10 @@ def remove():
     link = os.path.join(applications, 'Ptolemy Agent.app')
     if os.path.isdir(root):
         stop_other_agent(root, None)
+    remove_shim(home)
+    video = os.path.join(library, 'QuickTime', VIDEO)
+    if os.path.islink(video) and os.readlink(video) == os.path.join(root, 'current', VIDEO):
+        os.unlink(video)
     plist, config = launch_agent(library, link)
     if lexists(plist):
         if os.path.islink(plist) or open(plist, 'rb').read() != config:
@@ -248,6 +310,11 @@ def main():
     directory(applications)
     folder = os.path.join(applications, 'Ptolemy Tools', 'Antiochus')
     tools = tool_links(root, payload, dest, folder)
+    video = os.path.join(library, 'QuickTime', VIDEO)
+    video_target = os.path.join(root, 'current', VIDEO)
+    with_video = os.path.isdir(os.path.join(payload, VIDEO))
+    if with_video and lexists(video) and not (os.path.islink(video) and os.readlink(video) == video_target):
+        fail('Existing QuickTime component will be preserved: ' + video)
     if tools:
         directory(os.path.dirname(folder))
         directory(folder)
@@ -287,9 +354,15 @@ def main():
     atomic_link(expected, link)
     for target, path in tools:
         atomic_link(target, path)
+    if with_video:
+        directory(os.path.dirname(video))
+        atomic_link(video_target, video)
     for name, new in OLD:  # the links of earlier Tools, once the application is in its new place
         if ours(root, os.path.join(applications, name), name) and lexists(os.path.join(folder, new)):
             os.unlink(os.path.join(applications, name))
+    remove_shim(home)  # an earlier build's environment.plist and library; someone else's stay
+    if os.path.isfile(os.path.join(dest, 'ptdsp.dylib')):
+        print 'DrawSprocket games (Cro-Mag Rally): start them from the Ptolemy menu, DrawSprocket Games.'
     if not lexists(plist):
         fd, tmp = tempfile.mkstemp(prefix='.ptolemy-', dir=agents)
         os.close(fd)

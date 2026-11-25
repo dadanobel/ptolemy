@@ -303,7 +303,7 @@ static PtRamHooks ram_hooks = {ram_before, NULL};
 static uint64_t gpu_at = UINT64_MAX;
 static int gpu_late; /* the Radeon's service is not due within the millisecond: nothing for the CP, see gpu_soon */
 static void radeon_configure(void);
-static PtGpuMemory radeon_memory = {128u << 20, 256u << 20, 0x90000000u};
+static PtGpuMemory radeon_memory = {256u << 20, 512u << 20, 0xa0000000u}; /* 256 MiB by default (owner, 23.11); --vram-mb 128 */
 /* End of the PCI memory window the ROM advertises in "ranges" (own OpenBIOS fork: 1.25 GiB from 0x80000000); the
  * Radeon BARs must lie inside it, also the register BAR at 0xc0000000 with 256 MiB VRAM. */
 static const uint64_t pci_window_end = 0xd0000000ull;
@@ -321,7 +321,7 @@ static uint64_t nvram_at = UINT64_MAX;
 static int nvram_error;
 static uint8_t config[32][256], cfgmask[32][256];
 static uint32_t cfg_index[3];
-static uint8_t scc_reg[2], scc_wr[2][16];
+static uint8_t scc_reg[2], scc_wr[2][16], scc_txip[2]; /* index 1 = channel A */
 static _Atomic int stop_timer;
 static _Atomic uint64_t alarm_ns;
 static uint64_t end_ns;
@@ -349,6 +349,23 @@ static struct {
     uint8_t n, wr, known;
 } ring[TAIL];
 static int rx = -1;
+/* ESCC interrupts (Z85C30): Linux's pmac_zilog moves tty bytes only on them; OF and the kernel console poll.
+ * WR9 MIE gates both channels, WR1 TxIE / Rx int mode gate each, RR3 (read on channel A) reports them masked
+ * by WR1. TxIP is set by every byte written (the buffer empties at once) until "reset Tx int pending".
+ * ponytail: Rx mode "first char" fires on every char, and only channel A receives (the host's stdin). */
+static int scc_rx_on(void) {
+    unsigned m = scc_wr[1][1] & 0x18;
+    return (scc_wr[1][9] & 8) && (m == 0x08 || m == 0x10);
+}
+static unsigned scc_rr3(void) {
+    unsigned a = ((scc_wr[1][1] & 2) && scc_txip[1] ? 0x10 : 0) | (scc_rx_on() && rx >= 0 ? 0x20 : 0);
+    return a | ((scc_wr[0][1] & 2) && scc_txip[0] ? 0x02 : 0);
+}
+static void scc_irq(void) {
+    unsigned r3 = scc_wr[1][9] & 8 ? scc_rr3() : 0;
+    pt_pic_line(&pic, 0x25, 0, !!(r3 & 0x38)); /* ch-a, ch-b: "interrupts" 0x25, 0x24 in the device tree */
+    pt_pic_line(&pic, 0x24, 0, !!(r3 & 0x07));
+}
 static _Atomic int stand_stop, pause_request;
 static int window_mode;
 static PtVtime vtime; /* the machine's virtual uptime */
@@ -552,6 +569,8 @@ static void script_run(void) {
                 e = (PtInputEvent){.type = PT_INPUT_ABSOLUTE, .x = a, .y = b, .buttons = c};
             else if (!strcmp(op, "rel"))
                 e = (PtInputEvent){.type = PT_INPUT_RELATIVE, .x = (int32_t)a, .y = (int32_t)b, .buttons = c};
+            else if (!strcmp(op, "scroll")) /* T scroll PAN WHEEL: the mouse's scroll counts (tests) */
+                e = (PtInputEvent){.type = PT_INPUT_RELATIVE, .pan = (int32_t)a, .wheel = (int32_t)b};
             else
                 e = (PtInputEvent){.type = PT_INPUT_KEY, .usage = a, .pressed = b};
             pt_input_send(&peripherals.input, &e);
@@ -587,6 +606,8 @@ static void schedule_alarm(void) {
         deadline = script_at;
     if (network_enabled && pt_net_rtl_deadline(&network) < deadline)
         deadline = pt_net_rtl_deadline(&network);
+    if (scc_rx_on() && clock_model.last_ns + 10000000 < deadline)
+        deadline = clock_model.last_ns + 10000000; /* ponytail: stdin polled every 10 ms while the guest listens */
     deadline = pt_vtime_host(&vtime, deadline); /* the one virtual -> host conversion */
     int moved = atomic_exchange(&alarm_ns, deadline) != deadline;
     if (cpu1) {
@@ -832,6 +853,10 @@ static uint32_t irq(CPU *c, uint32_t ack) {
                 c->exit_code = 96;
             }
         }
+    }
+    if (scc_rx_on()) {
+        poll_rx();
+        scc_irq();
     }
     if (network_enabled) {
         network.bus_master = !!(config[15][4] & 4);
@@ -1230,6 +1255,7 @@ static int board_access(void *base, uint32_t offset, uint8_t *b, unsigned n, int
             if (wr) {
                 putchar(b[0]);
                 fflush(stdout);
+                scc_txip[ch] = 1;
             } else {
                 poll_rx();
                 b[0] = rx < 0 ? 0 : (uint8_t)rx;
@@ -1237,17 +1263,29 @@ static int board_access(void *base, uint32_t offset, uint8_t *b, unsigned n, int
             }
         } else {
             if (wr) {
-                if (scc_reg[ch]) {
-                    scc_wr[ch][scc_reg[ch]] = b[0];
+                unsigned r = scc_reg[ch], cmd = b[0] >> 3 & 7;
+                if (r) {
+                    scc_wr[ch][r] = b[0];
+                    if (r == 9) { /* one WR9 for both channels; its channel resets clear the interrupt enables */
+                        scc_wr[ch ^ 1][9] = b[0];
+                        for (unsigned k = 0; k < 2; k++)
+                            if (b[0] & (k ? 0x80 : 0x40))
+                                scc_wr[k][1] = scc_txip[k] = 0;
+                    }
                     scc_reg[ch] = 0;
-                } else
-                    scc_reg[ch] = b[0] & 15;
+                } else {
+                    scc_reg[ch] = (b[0] & 7) | (cmd == 1 ? 8 : 0); /* WR0: pointer; command 1 "point high" */
+                    if (cmd == 5)
+                        scc_txip[ch] = 0; /* reset Tx int pending */
+                }
             } else {
                 poll_rx();
-                b[0] = scc_reg[ch] == 1 ? 1 : scc_reg[ch] ? 0 : 4 | (rx >= 0);
+                unsigned r = scc_reg[ch];
+                b[0] = r == 1 ? 1 : r == 3 ? (ch ? scc_rr3() : 0) : r ? 0 : 4 | (rx >= 0);
                 scc_reg[ch] = 0;
             }
         }
+        scc_irq();
     } else {
         known = 0;
         /* Absent ATA devices return floating bus, other unimplemented

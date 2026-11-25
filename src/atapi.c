@@ -188,21 +188,26 @@ int pt_atapi_service(PtAta *a) {
 /* PIO data-register access for ATAPI: collects the 12-byte packet (then starts the SCSI command) and moves data-in
  * and data-out bytes. */
 int pt_atapi_data(PtAta *a, uint8_t *p, unsigned n, int write) {
-    if (!(a->status & 8) || a->position + n > a->buffer_size) {
+    if (!(a->status & 8) || a->position >= a->buffer_size) {
         if (!write)
             memset(p, 0xff, n);
         return 0;
     }
+    /* An odd byte count ends in a padded word: the last access carries the final byte. Linux reads five bytes of an
+     * INQUIRY page as three words; refusing the third left the drive in DRQ, and every later command waited 30 s for
+     * a lost interrupt (the Debian installer never read its CD). */
+    unsigned k = a->buffer_size - a->position < n ? a->buffer_size - a->position : n;
     if (write) {
         if (a->phase != ND_ATAPI_PACKET && a->phase != ND_ATAPI_OUT)
             return 0;
-        memcpy(a->buffer + a->position, p, n);
+        memcpy(a->buffer + a->position, p, k);
     } else {
         if (a->phase != ND_ATA_IDENTIFY && a->phase != ND_ATAPI_IN)
             return 0;
-        memcpy(p, a->buffer + a->position, n);
+        memcpy(p, a->buffer + a->position, k);
+        memset(p + k, 0, n - k);
     }
-    a->position += n;
+    a->position += k;
     if (a->position == a->buffer_size) {
         if (a->phase == ND_ATAPI_PACKET) {
             int error = pt_scsi_command(a->optical, a->buffer, 12);

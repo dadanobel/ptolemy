@@ -2,9 +2,11 @@
  * The real JIT emitter's frsqrte and stfiwx (PT_FP_MORE) against interp_step, bit for bit: FPRs, the whole
  * FPSCR and memory. frsqrte inputs over the full double range (denormals, huge, +Inf, zeros, negatives, NaNs) and
  * FPSCR guard bits; the JIT may hand over only for b <= 0, NaN or a guarded FPSCR, leaving FPRs and FPSCR untouched.
- * stfiwx: rA = 0 and not, any FPR bit pattern. */
+ * stfiwx: rA = 0 and not, any FPR bit pattern. fres: the JIT hands over only for NaN, zero, a b that is no single, or
+ * a result out of single's normal range, or a guarded FPSCR. */
 #include "jit-test.h"
 #include <math.h>
+#include <float.h>
 enum {
     MEMSZ = 1 << 16
 };
@@ -68,8 +70,10 @@ int main(void) {
         run1(code, in, &c);
         double x = before.fpr[b];
         int must_slow = !(x > 0) || (before.fpscr & 0xfb); /* NI stays in the JIT: the interpreter ignores it too */
+        float s = (float)(1.0 / sqrt(x)); /* an estimate that is no normal single stays a double: the interpreter's */
+        int range = x > 0 && !(isfinite(s) && fabsf(s) >= FLT_MIN);
         if (c.jit_exit == X_INTERP) {
-            assert(must_slow && !memcmp(c.fpr, before.fpr, sizeof c.fpr) && c.fpscr == before.fpscr);
+            assert((must_slow || range) && !memcmp(c.fpr, before.fpr, sizeof c.fpr) && c.fpscr == before.fpscr);
             slow++;
         } else {
             if (must_slow || memcmp(c.fpr, expected.fpr, sizeof c.fpr) || c.fpscr != expected.fpscr) {
@@ -82,6 +86,49 @@ int main(void) {
         }
     }
     assert(fast > 300000 && inexact > 100000);
+    unsigned rfast = 0, rslow = 0, rinexact = 0;
+    for (unsigned n = 0; n < 1000000; n++) { /* fres: singles over the full range, and any double */
+        unsigned d = rnd() & 31, b = rnd() & 31;
+        uint32_t in = 59u << 26 | d << 21 | b << 11 | 24u << 1, w = rnd();
+        float f;
+        memcpy(&f, &w, 4);
+        CPU c = {0};
+        c.msr = MSR_FP;
+        c.pc = 0x1000;
+        c.npreg = 1;
+        c.preg[0].base = 0;
+        c.preg[0].size = MEMSZ;
+        c.preg[0].host = m2;
+        wbe32(m2 + 0x1000, in);
+        for (unsigned r = 0; r < 32; r++)
+            c.fpr[r] = dval();
+        if (rnd() % 4)
+            c.fpr[b] = rnd() % 8 ? (double)f : (double[]){0.0, -0.0, INFINITY, -INFINITY, 0x1p-149, 0x1p127, 0x1p-127, 3.0}[rnd() % 8];
+        c.fpscr = (uint32_t[]){0, 0x82000000, 0x00020000, 0x00001000, 0x00004000, 0x02000000}[rnd() % 6] |
+                  (rnd() % 16 == 0 ? 1u << (rnd() % 8) : 0);
+        CPU expected = c;
+        assert(interp_step(&expected) == 0 && expected.pc == 0x1004);
+        jmsr = MSR_750 | MSR_FP;
+        jsys = 0;
+        fp_more_enabled = 1;
+        CPU before = c;
+        run1(code, in, &c);
+        double x = before.fpr[b];
+        int may_slow = isnan(x) || x == 0 || (double)(float)x != x || fabs(x) < 0x1p-126 || fabs(x) > 0x1p126 ||
+                       (before.fpscr & 0xfb);
+        if (c.jit_exit == X_INTERP) {
+            assert(may_slow && !memcmp(c.fpr, before.fpr, sizeof c.fpr) && c.fpscr == before.fpscr);
+            rslow++;
+        } else if (memcmp(c.fpr, expected.fpr, sizeof c.fpr) || c.fpscr != expected.fpscr) {
+            fprintf(stderr, "MISMATCH fres n=%u in=%08x b=%a fpscr %08x jit %a/%08x interp %a/%08x\n", n, in, x,
+                    before.fpscr, c.fpr[d], c.fpscr, expected.fpr[d], expected.fpscr);
+            return 1;
+        } else {
+            rinexact += !!(c.fpscr & 0x00020000);
+            rfast++;
+        }
+    }
+    assert(rfast > 400000 && rinexact > 200000);
     unsigned st = 0;
     for (unsigned n = 0; n < 20000; n++) { /* stfiwx, rA = 0 or r3, rB = r4 */
         unsigned s = rnd() & 31, a = n & 1 ? 3 : 0;
@@ -195,10 +242,13 @@ int main(void) {
     fp_more_enabled = 0;
     assert(tr(63u << 26 | 26u << 1, 0x2000) == -1 && cp == code); /* PT_FP_MORE=0 */
     assert(tr(31u << 26 | 983u << 1, 0x2000) == -1 && cp == code);
+    assert(tr(59u << 26 | 24u << 1, 0x2000) == -1 && cp == code);
     fp_more_enabled = 1;
     assert(tr(63u << 26 | 26u << 1 | 1, 0x2000) == -1 && cp == code); /* frsqrte.: interpreter */
-    printf("FP more (PT_FP_MORE): frsqrte %u JIT (%u inexact) + %u interpreter cases, stfiwx %u stores, bit-exact "
-           "(FPR + FPSCR + memory) vs interpreter, switch PASS; stfs %u denormal stores in the JIT.\n",
-           fast, inexact, slow, st, sd);
+    assert(tr(59u << 26 | 24u << 1 | 1, 0x2000) == -1 && cp == code); /* fres.: interpreter */
+    printf("FP more (PT_FP_MORE): frsqrte %u JIT (%u inexact) + %u interpreter cases, fres %u JIT (%u inexact) + %u "
+           "interpreter cases, stfiwx %u stores, bit-exact (FPR + FPSCR + memory) vs interpreter, switch PASS; stfs %u "
+           "denormal stores in the JIT.\n",
+           fast, inexact, slow, rfast, rinexact, rslow, st, sd);
     return 0;
 }

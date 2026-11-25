@@ -43,6 +43,8 @@ done
 clang -std=c11 -D_DARWIN_C_SOURCE -O2 -Wall -Wextra -Werror -Iinclude -c src/agent.c -o "$D/agent.o" -pthread
 clang -std=c11 -D_DARWIN_C_SOURCE -O2 -Wall -Wextra -Werror -Iinclude -c src/export.c -o "$D/export.o" -pthread
 clang -std=c11 $g5flags -O2 -Wall -Wextra -Werror -Iinclude -I"$E" -c src/agent_guest.c -o "$D/agent_guest.o"
+clang -std=c11 -D_DARWIN_C_SOURCE -O2 -Wall -Wextra -Werror -Iinclude -c src/video_guest.c -o "$D/video_guest.o" -pthread
+clang -std=gnu11 -O2 -Wall -Wextra -Werror -Iinclude -c src/video_macos.c -o "$D/video_macos.o"
 clang -fobjc-arc -O2 -Wall -Wextra -Werror -Iinclude -I"$P" -I"$P/foundation" -c "$P/frontend_host_macos.m" -o "$O/frontend_host_macos.o"
 # HVF fault route of fast VRAM: linked into the firmware only, not into liboptics.a.
 hvfobjs=""
@@ -58,22 +60,37 @@ rm -f "$O/liboptics.a"
 ar rcs "$O/liboptics.a" $objs "$O"/frontend_host_macos.o "$O"/surface_metal.o "$O"/renderer.o "$O"/frontend_metal.o "$O"/diagnostics_metal.o
 
 clang -std=gnu11 -D_DARWIN_C_SOURCE -DPT_HVF -DPT_NO_MAIN $g5flags -O2 -Iinclude -I"$E" \
-    src/firmware.c "$D"/export.o "$D"/agent.o "$D"/agent_guest.o \
+    src/firmware.c "$D"/export.o "$D"/agent.o "$D"/agent_guest.o "$D"/video_guest.o "$D"/video_macos.o -framework VideoToolbox \
     "$E"/hvf.c "$E"/interp.c "$E"/altivec.c "$E"/mmu.c "$E"/jit.c $g5sources "$D"/libptdevices.a -force_load "$O/liboptics.a" $hvfobjs \
     "$D"/stand_window_macos.o "$D"/display_macos.o "$D"/guest_window_macos.o "$D"/net_macos.o "$D"/web_macos.o "$D"/camera_macos.o \
-    -framework Carbon -framework AppKit -framework Metal -framework QuartzCore -framework Foundation \
+    -framework Carbon -framework AppKit -framework Metal -framework MetalFX -framework QuartzCore -framework Foundation \
     -framework vmnet -framework ImageIO -framework CoreGraphics -framework Hypervisor -framework AudioUnit -framework AudioToolbox -framework CoreAudio \
     -framework AVFoundation -framework CoreMedia -framework CoreVideo -lc++ \
     -Wl,-map,"$O/link.map" -o "$OUT"
 codesign --force --sign - --entitlements "$E"/hv.entitlements "$OUT"
 if [ -z "${OPTICS_NO_TESTS:-}" ]; then
     sh tools/check_R1.sh
+    # The DrawSprocket shim's window levels (guest/dsp/levels.h) against a stand-in window server; no guest runs.
+    clang -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined tests/ptdsp-levels.c -o build/test-ptdsp-levels
+    ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/test-ptdsp-levels
     # Device protocol contracts are permanent product checks; no guest or GPU is started.
     PYTHONDONTWRITEBYTECODE=1 python3 tools/check_S4.py
     clang -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/pointer-math.c -o build/test-pointer-math
     ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/test-pointer-math
     clang -std=c11 -D_DARWIN_C_SOURCE -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude tests/pointer-tools.c src/agent.c src/export.c "$P/diagnostics.c" -pthread -o build/test-pointer-tools
     ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/test-pointer-tools
+    # The video calls of the agent's hypercall on a made-up guest (pages, limits, sessions, queue), then the sessions
+    # under threads.
+    clang -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -Iinclude -I"$E" tests/video-guest.c src/agent_guest.c src/video_guest.c -pthread -o build/test-video-guest
+    ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/test-video-guest
+    clang -std=gnu11 -O1 -g -Wall -Wextra -Werror -fsanitize=thread -Iinclude tests/video-threads.c src/video_guest.c -pthread -o build/test-video-threads
+    TSAN_OPTIONS=halt_on_error=1 build/test-video-threads
+    # The Mac's decoder against the system's own decoding. Built here, run on files by hand or by a job
+    # (build/test-video-vt FILE.mp4 ...): the files are the owner's and are not in the tree.
+    clang -fobjc-arc -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations -Iinclude tests/video-vt.m src/video_guest.c src/video_macos.c \
+        -framework AVFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework Foundation -o build/test-video-vt
+    # The resource file of the guest's QuickTime component (guest/video), written and read back.
+    python3 guest/video/make-rsrc.py build/test-ptolemy-video.rsrc --check
     # Independent network protocol test and optional host transport compile; starts no interface.
     sh tools/build-network.sh
     # Compile the explicit host audio probe; no audio device is opened here.
@@ -84,9 +101,14 @@ if [ -z "${OPTICS_NO_TESTS:-}" ]; then
     clang $CF tests/optics-draw-decode.c "$P/r300_state.c" "$P/pixel.c" "$P/foundation/pm4.c" "$P/foundation/shader_decode.c" "$P/foundation/shader_eval.c" \
         -o build/test-optics-draw-decode
     build/test-optics-draw-decode
+    clang $CF tests/optics-internal-scale.c -o build/test-optics-internal-scale
+    build/test-optics-internal-scale
     # CP ring boundaries: across the end, N-1 and N words, MORE, BUSY hold, budget, WPTR, header race, errors.
     clang $CF tests/optics-ring.c "$P/ring.c" "$P/foundation/pm4.c" -o build/test-optics-ring
     build/test-optics-ring
+    # Indices from a buffer (3D_DRAW_INDX_2 + INDX_BUFFER, as Mesa's r300 draws) reach the executor as an INDX_2 draw.
+    clang $CF tests/optics-indx-buffer.c $CORE -o build/test-optics-indx-buffer
+    build/test-optics-indx-buffer 2>/dev/null
     # Completion: deferred mode (delayed and failed GPU completion, no double execution), then the default early publish.
     clang $CF tests/optics-fence.c $CORE -o build/test-optics-fence
     build/test-optics-fence 2>/dev/null
@@ -124,6 +146,10 @@ if [ -z "${OPTICS_NO_TESTS:-}" ]; then
     clang $CF tests/optics-frontend-replay.c tests/optics-draw-reference.c src/platform.c -Wl,-force_load,"$O/liboptics.a" -framework Metal -framework Foundation -lc++ -o build/test-optics-replay-metal
     # Independent depth/stencil storage in the product Metal executor (shared and alternating ZB buffers, CPU-write drop).
     clang $CF tests/optics-depth-metal.c src/platform.c -Wl,-force_load,"$O/liboptics.a" -framework Metal -framework Foundation -lc++ -o build/test-optics-depth-metal
+    # Internal resolution in the product Metal renderer; run it with 1, 1.5 and 2 (it sets OPTICS_INTERNAL itself).
+    clang $CF -c src/platform.c -o "$O/platform-test.o"
+    clang++ -std=c++17 -fobjc-arc -O2 -Wall -Wextra -Werror -I"$P" -I"$P/foundation" tests/optics-internal-scale-metal.mm "$O/platform-test.o" \
+        -Wl,-force_load,"$O/liboptics.a" -framework Metal -framework Foundation -o build/test-optics-internal-scale-metal
 fi
 # Link audit: the engine links system frameworks only (no GLib, shader cross-compilers, pixman or Vulkan).
 if otool -L "$OUT" | grep -E -i "glib|intl|shaderc|spirv|pixman|vulkan"; then echo "the engine links a third-party library" >&2; exit 1; fi
