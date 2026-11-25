@@ -18,9 +18,9 @@ If you miss your PowerBook G4 or the Power Mac under the desk, Ptolemy gives you
 
 - **Your own Mac OS X.** Make an image of your Tiger or Leopard install DVD, drop it onto Ptolemy's window, choose the
   disk size, and the installer runs as it did in 2005. Ptolemy does not include or download Apple software.
-- **Faster than the fastest real G4, mostly.** In Geekbench 2 one emulated G4 scores about 5000 and two of them about
-  6000; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220. Some floating-point
-  library code is only about as fast as on a real G4 (see [Known limitations](#known-limitations)).
+- **Faster than the fastest real G4, mostly.** In Geekbench 2 one emulated G4 scores up to about 5100 and two of
+  them about 6100; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220. vecLib's
+  FFT is only about as fast as on a real G4 (see [Known limitations](#known-limitations)).
 - **3D on the Mac's GPU.** Mac OS X's own ATI driver believes it talks to a Radeon 9700, so Quartz Extreme, Core Image
   and OpenGL games run on the Mac's GPU: Halo, Doom 3, Half-Life (Xash3D) and SimCity 4 among those we tried. Classic
   runs inside Tiger with a Mac OS 9.2.2 System Folder you bring (Age of Empires plays).
@@ -41,9 +41,11 @@ Beta 5 is about graphics and the screen.
 - **Fewer first-use stutters.** Ptolemy keeps the shader programs it has prepared and compiles them again in the
   background at the next start; a set gathered from Tiger and Leopard comes with the app. In Unreal Tournament 2004
   the wait for shaders on ONS-Torlan fell from about 13 s to 0.3 s in the second session.
-- **More display modes, up to 4K.** A machine's settings choose the startup mode: the Mac's screen, or 4:3, 16:10
-  or 16:9 from 640 × 480 to 2560 × 1600. Displays in Mac OS X offers the modes up to that one, now with 3440 × 1440
-  and 3840 × 2160. Screens wider than 2048 pixels no longer keep stale pieces of earlier pictures.
+- **More display modes.** A machine's settings choose the startup mode: *Fit the Screen* (the Mac's screen), or 4:3,
+  16:10 or 16:9 from 640 × 480 to 2560 × 1600, the size of Apple's largest display of the time, the 30-inch Cinema HD
+  Display. Displays in Mac OS X offers the modes up to the startup one. Larger modes are left to large screens: when
+  *Fit the Screen* gives a screen at least that large, Displays also offers 3440 × 1440 and 3840 × 2160, sizes Tiger
+  and Leopard were never made for. Screens wider than 2048 pixels no longer keep stale pieces of earlier pictures.
 - **H.264 on the Mac's decoder.** Ptolemy Tools add a QuickTime codec, Ptolemy Video, that hands H.264 to macOS:
   QuickTime Player plays 1080p at 30 frames a second without dropping frames.
 - **DrawSprocket games** such as Cro-Mag Rally start from the Ptolemy menu, *DrawSprocket Games*. Mac OS X's
@@ -87,29 +89,47 @@ included, on emulated hardware.
 
 ## How it differs from other emulators
 
-The usual way to run PowerPC Mac OS X on a Mac today is QEMU, directly or through UTM. SheepShaver, the other
-well-known one, runs Mac OS 9.0.4 and earlier, not Mac OS X. Ptolemy differs from QEMU in how it runs the processor
-and the graphics card:
+Ptolemy is a PowerPC Mac built from scratch for Apple silicon. The processor translator, the PowerBook G4 board with
+its disk, CD/DVD, USB, network and sound, the Radeon 9700, and the tools inside Mac OS X are Ptolemy's own code,
+written from hardware documentation and from what Mac OS X does; no code from other emulators is included. The one
+borrowed part is the firmware, a fork of OpenBIOS (see [THIRD-PARTY.md](THIRD-PARTY.md)).
 
-- **Processor.** QEMU translates PowerPC code with its portable code generator (TCG) in an ordinary process, and every
-  guest memory access looks its address up in a software TLB. Epicycle generates ARM64 code directly and leaves
-  address translation to the Mac's MMU.
-- **Graphics.** QEMU's Mac board has a plain framebuffer, so Tiger runs without Quartz Extreme and OpenGL falls back to
-  Apple's software renderer on the emulated processor. In Ptolemy, Tiger's ATI driver accelerates Quartz Extreme,
-  Core Image and OpenGL on the Mac's GPU.
+The usual way to run PowerPC Mac OS X on a Mac today is QEMU, directly or through UTM (SheepShaver runs Mac OS 9.0.4
+and earlier, not Mac OS X). QEMU is a general-purpose emulator. Ptolemy is built around one machine and one kind of
+host, and that is where its speed and its 3D come from:
 
-On a MacBook Air with the M4, Tiger in Ptolemy scores about 5100 in Geekbench 2.2 (a Power Mac G5 at 1.6 GHz scores
-1000), runs Halo's built-in time demo at about 90 fps with 2× FSAA and reaches its desktop about 10 seconds after the
-machine starts.
+- **Processor.** Epicycle generates ARM64 code directly, without an intermediate representation: PowerPC registers
+  stay in ARM64 registers within a block, blocks are linked by direct branches, AltiVec runs on NEON, and floating
+  point keeps PowerPC's rounding and FPSCR rules in translated code. It runs inside a Hypervisor.framework vCPU,
+  where the Mac's MMU does the PowerPC's address translation, so a guest load or store is one ARM64 load or store
+  and a byte swap. QEMU translates through its portable code generator (TCG) in an ordinary process and looks up
+  every guest memory access in a software TLB.
+- **Graphics.** Ptolemy's Radeon 9700 is close enough to the real card for Mac OS X's own ATI driver: its command
+  processor and 2D engine are modelled, and its vertex and fragment programs become Metal shaders. Quartz Extreme,
+  Core Image and OpenGL run on the Mac's GPU, with 3D drawn at 1.5 times the resolution the system asks for. QEMU's
+  Mac board has a plain framebuffer: no Quartz Extreme, and OpenGL falls back to Apple's software renderer on the
+  emulated processor.
+- **Two processors.** Leopard runs on a Dual G4 with its own multiprocessor kernel and scheduler; Cinebench renders
+  about 1.8 times faster with two.
+- **At home on macOS.** A launcher in the style of macOS 26, sound through Core Audio, H.264 on the Mac's decoder
+  through a QuickTime codec, the Mac's camera as a USB camera, the clipboard both ways, files dropped onto the
+  window, and a web gateway that lets Safari open today's HTTPS sites.
+- **Checked against the real thing.** The translator is tested instruction by instruction against its own
+  interpreter and against Unicorn; Antiochus compares 438 OpenGL cases with Apple's software renderer in Tiger and
+  Leopard.
+
+On a MacBook Air with the M4, Tiger in Ptolemy scores about 5100 in Geekbench 2.2 and Leopard on a Dual G4 about
+6100; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220, and Geekbench's
+baseline, a Power Mac G5 at 1.6 GHz, scores 1000. Halo's built-in time demo runs at about 90 fps with 2× FSAA, and
+Tiger reaches its desktop about 10 seconds after the machine starts.
 Published Geekbench 2.2 results for Tiger in [QEMU 7.0 on an M1 Mac mini](https://browser.geekbench.com/geekbench2/2730728)
 and [UTM 3.2.4 on an M1 Pro MacBook Pro](https://browser.geekbench.com/geekbench2/2730718) are 731 and 774. Those Macs
-are older, so the comparison is approximate.
+are older, but not seven times slower.
 
-QEMU runs on almost any computer and starts many more systems: Mac OS 9, other versions of Mac OS X, Linux. Ptolemy
-needs a Mac with Apple silicon and so far runs Tiger and Leopard only.
-
-[ppcosxkvm](https://github.com/linuxkid473/ppcosxkvm), a QEMU fork, also emulates the Radeon 9700 for Tiger's ATI
-driver, starts Jaguar and Leopard as well and runs on Linux and Intel computers too. We recommend trying it as well.
+Ptolemy is deliberately narrower: one machine, two systems, one kind of host. QEMU runs on almost any computer and
+starts many more systems: Mac OS 9, other versions of Mac OS X, Linux.
+[ppcosxkvm](https://github.com/linuxkid473/ppcosxkvm), a QEMU fork, also emulates the Radeon 9700 for the ATI driver,
+starts Jaguar as well and runs on Linux and Intel computers; it is worth a look if you are not on Apple silicon.
 
 ## How it works
 
@@ -187,8 +207,8 @@ takes about 1 s of host CPU a minute more, OpenGL is about 5% lower. Two threads
 slower than on one processor: each hand-over crosses into the Mac. Tiger keeps one processor: its kernel wakes every
 processor 100 times a second, idle or not.
 
-The screenshot is the separate run behind the table's x CPU score: 1.76× with two processors. Its OpenGL score, 4684,
-is below the session's 5601; results on the Air vary from run to run.
+The screenshot is from beta 4, a separate run: 1.76× with two processors. Its OpenGL score, 4684, is below that
+session's 5601; results on the Air vary from run to run.
 
 ### Inside Mac OS X: Ptolemy Tools
 
@@ -262,7 +282,8 @@ Ptolemy takes the resulting `.cdr` file, as well as `.dmg` and `.iso` images.
 
 On a 13.6-inch MacBook Air with the M4 (10-core CPU and GPU, 24 GB), macOS 27, with Tiger 10.4.11 and Leopard 10.5 on
 the G4 7447A. Unreal Tournament 2004, Quake 3, Cro-Mag Rally, Office 2004 and the video were tried with this release;
-Leopard, Dual G4, Photo Booth, Cinebench, Geekbench and Xbench with beta 4; Classic and SimCity 4 with beta 3, Halo
+Cinebench, Geekbench and Xbench in Leopard with this release (the best of up to four runs each), in Tiger with
+beta 4; Leopard, Dual G4 and Photo Booth with beta 4; Classic and SimCity 4 with beta 3, Halo
 with beta 1, Doom 3 with a build of the same day as beta 1, the others with builds of the weeks before.
 
 | Software | Result |
@@ -275,9 +296,9 @@ with beta 1, Doom 3 with a build of the same day as beta 1, the others with buil
 | SimCity 4 | Starts from its disc image; tutorial cities render with their trees and buildings |
 | Fallout 2 | 640 × 480 in 256 colours |
 | Classic (Mac OS 9.2.2) | Starts in Tiger; Age of Empires plays |
-| Cinebench R10 | Tiger: CPU 3138, OpenGL about 5200. Leopard: CPU 3141, OpenGL 5696. Leopard on Dual G4: x CPU 5461 (1.76×) |
-| Geekbench 2.2 | Tiger 5084, Leopard 4943, Leopard on Dual G4 6067 (a real dual 1.42 GHz Power Mac G4 averages about 1220) |
-| Xbench 1.3 | Tiger: User Interface 294, OpenGL 212, vecLib FFT 66 |
+| Cinebench R10 | Tiger: CPU 3138, OpenGL about 5200. Leopard: CPU 3194, OpenGL 5520. Leopard on Dual G4: x CPU 5771 (1.80×) |
+| Geekbench 2.2 | Tiger 5084, Leopard 5111, Leopard on Dual G4 6097 (a real dual 1.42 GHz Power Mac G4 averages about 1220) |
+| Xbench 1.3 | Tiger: User Interface 294, OpenGL 212, vecLib FFT 66. Leopard: CPU 155.8, Floating Point Basic 97.5, vecLib FFT 73.4 |
 | Photo Booth (Leopard) | Sees the Mac's camera as a USB camera |
 | Unreal Tournament 2004 (Leopard) | ONS-Torlan at 1024 × 768: about 65 fps |
 | Quake 3 Arena (Classic) | Plays in Tiger; set `seta r_primitives "2"` in `q3config.cfg`, otherwise stray triangles cross the menu |
@@ -304,6 +325,8 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
 - **Graphics.** Every case of the OpenGL comparison test matches Apple's software renderer, but some details are
   approximate: edge flags in wireframe mode (every edge is drawn), the R300's 3- and 6-sample FSAA modes (drawn with
   4 samples) and its exact sample positions. See [docs/graphics.md](docs/graphics.md).
+- **Time Machine.** In Leopard it stops with "The built-in network interface could not be found": the emulated
+  Ethernet card is not marked as built-in. A fix is planned.
 - **Sleep.** Mac OS X cannot sleep in Ptolemy: Tiger stops, Leopard hangs. In Tiger, set Energy Saver to never put
   the computer to sleep; in Leopard, Ptolemy Tools keep the system from sleeping on its own.
 - **NVRAM.** Mac OS X's NVRAM is emulated as the Core99 flash it expects. The first start of a machine made with an
@@ -314,8 +337,8 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
   one. The first start takes about two minutes. As on real Macs, Classic has no 3D. Mac OS 9 itself does not start:
   the firmware cannot start a disk that Tiger marked for Mac OS 9.
 - **Files.** Files dropped onto the window arrive without resource forks, type and creator. One file can be up to 4 GB.
-- **Benchmarks.** Most code runs much faster than on a real G4, but some floating-point library code is only about
-  as fast: in Leopard, Xbench's vecLib FFT scores about 72, a 1.33 GHz iBook G4 about 71.
+- **Benchmarks.** Most code runs several times faster than on a real G4, vecLib's FFT only about as fast: in Leopard,
+  Xbench's vecLib FFT scores up to 73, a 1.33 GHz iBook G4 about 71.
 - **Dual G4.** Leopard only (Tiger wakes every processor 100 times a second, which costs a second processor its idle
   time). Threads that hand one lock back and forth are much slower than on one processor, and software that shares
   memory without the PowerPC's barriers can misbehave more often than on a real dual G4.
