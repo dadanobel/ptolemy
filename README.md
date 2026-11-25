@@ -334,8 +334,10 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
   the startup disk itself, so Startup Disk has no effect.
 - **Classic.** Classic (Mac OS 9 inside Tiger) needs a Mac OS 9.2.2 System Folder that you bring into Tiger yourself,
   in a disk image or a StuffIt archive (files dropped one by one lose their resource forks); Ptolemy does not include
-  one. The first start takes about two minutes. As on real Macs, Classic has no 3D. Mac OS 9 itself does not start:
-  the firmware cannot start a disk that Tiger marked for Mac OS 9.
+  one. The first start takes about two minutes. As on real Macs, Classic has no hardware 3D: games that need a 3D card
+  (RAVE, Glide, accelerated OpenGL) do not run there, while software 3D such as QuickDraw 3D's own renderer, which
+  Bugdom uses, runs on the emulated G4. Mac OS 9 itself does not start: the firmware cannot start a disk that Tiger
+  marked for Mac OS 9.
 - **Files.** Files dropped onto the window arrive without resource forks, type and creator. One file can be up to 4 GB.
 - **Benchmarks.** Most code runs several times faster than on a real G4, vecLib's FFT only about as fast: in Leopard,
   Xbench's vecLib FFT scores up to 73, a 1.33 GHz iBook G4 about 71.
