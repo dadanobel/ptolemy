@@ -89,29 +89,47 @@ included, on emulated hardware.
 
 ## How it differs from other emulators
 
-The usual way to run PowerPC Mac OS X on a Mac today is QEMU, directly or through UTM. SheepShaver, the other
-well-known one, runs Mac OS 9.0.4 and earlier, not Mac OS X. Ptolemy differs from QEMU in how it runs the processor
-and the graphics card:
+Ptolemy is a PowerPC Mac built from scratch for Apple silicon. The processor translator, the PowerBook G4 board with
+its disk, CD/DVD, USB, network and sound, the Radeon 9700, and the tools inside Mac OS X are Ptolemy's own code,
+written from hardware documentation and from what Mac OS X does; no code from other emulators is included. The one
+borrowed part is the firmware, a fork of OpenBIOS (see [THIRD-PARTY.md](THIRD-PARTY.md)).
 
-- **Processor.** QEMU translates PowerPC code with its portable code generator (TCG) in an ordinary process, and every
-  guest memory access looks its address up in a software TLB. Epicycle generates ARM64 code directly and leaves
-  address translation to the Mac's MMU.
-- **Graphics.** QEMU's Mac board has a plain framebuffer, so Tiger runs without Quartz Extreme and OpenGL falls back to
-  Apple's software renderer on the emulated processor. In Ptolemy, Tiger's ATI driver accelerates Quartz Extreme,
-  Core Image and OpenGL on the Mac's GPU.
+The usual way to run PowerPC Mac OS X on a Mac today is QEMU, directly or through UTM (SheepShaver runs Mac OS 9.0.4
+and earlier, not Mac OS X). QEMU is a general-purpose emulator. Ptolemy is built around one machine and one kind of
+host, and that is where its speed and its 3D come from:
 
-On a MacBook Air with the M4, Tiger in Ptolemy scores about 5100 in Geekbench 2.2 (a Power Mac G5 at 1.6 GHz scores
-1000), runs Halo's built-in time demo at about 90 fps with 2× FSAA and reaches its desktop about 10 seconds after the
-machine starts.
+- **Processor.** Epicycle generates ARM64 code directly, without an intermediate representation: PowerPC registers
+  stay in ARM64 registers within a block, blocks are linked by direct branches, AltiVec runs on NEON, and floating
+  point keeps PowerPC's rounding and FPSCR rules in translated code. It runs inside a Hypervisor.framework vCPU,
+  where the Mac's MMU does the PowerPC's address translation, so a guest load or store is one ARM64 load or store
+  and a byte swap. QEMU translates through its portable code generator (TCG) in an ordinary process and looks up
+  every guest memory access in a software TLB.
+- **Graphics.** Ptolemy's Radeon 9700 is close enough to the real card for Mac OS X's own ATI driver: its command
+  processor and 2D engine are modelled, and its vertex and fragment programs become Metal shaders. Quartz Extreme,
+  Core Image and OpenGL run on the Mac's GPU, with 3D drawn at 1.5 times the resolution the system asks for. QEMU's
+  Mac board has a plain framebuffer: no Quartz Extreme, and OpenGL falls back to Apple's software renderer on the
+  emulated processor.
+- **Two processors.** Leopard runs on a Dual G4 with its own multiprocessor kernel and scheduler; Cinebench renders
+  about 1.8 times faster with two.
+- **At home on macOS.** A launcher in the style of macOS 26, sound through Core Audio, H.264 on the Mac's decoder
+  through a QuickTime codec, the Mac's camera as a USB camera, the clipboard both ways, files dropped onto the
+  window, and a web gateway that lets Safari open today's HTTPS sites.
+- **Checked against the real thing.** The translator is tested instruction by instruction against its own
+  interpreter and against Unicorn; Antiochus compares 438 OpenGL cases with Apple's software renderer in Tiger and
+  Leopard.
+
+On a MacBook Air with the M4, Tiger in Ptolemy scores about 5100 in Geekbench 2.2 and Leopard on a Dual G4 about
+6100; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220, and Geekbench's
+baseline, a Power Mac G5 at 1.6 GHz, scores 1000. Halo's built-in time demo runs at about 90 fps with 2× FSAA, and
+Tiger reaches its desktop about 10 seconds after the machine starts.
 Published Geekbench 2.2 results for Tiger in [QEMU 7.0 on an M1 Mac mini](https://browser.geekbench.com/geekbench2/2730728)
 and [UTM 3.2.4 on an M1 Pro MacBook Pro](https://browser.geekbench.com/geekbench2/2730718) are 731 and 774. Those Macs
-are older, so the comparison is approximate.
+are older, but not seven times slower.
 
-QEMU runs on almost any computer and starts many more systems: Mac OS 9, other versions of Mac OS X, Linux. Ptolemy
-needs a Mac with Apple silicon and so far runs Tiger and Leopard only.
-
-[ppcosxkvm](https://github.com/linuxkid473/ppcosxkvm), a QEMU fork, also emulates the Radeon 9700 for Tiger's ATI
-driver, starts Jaguar and Leopard as well and runs on Linux and Intel computers too. We recommend trying it as well.
+Ptolemy is deliberately narrower: one machine, two systems, one kind of host. QEMU runs on almost any computer and
+starts many more systems: Mac OS 9, other versions of Mac OS X, Linux.
+[ppcosxkvm](https://github.com/linuxkid473/ppcosxkvm), a QEMU fork, also emulates the Radeon 9700 for the ATI driver,
+starts Jaguar as well and runs on Linux and Intel computers; it is worth a look if you are not on Apple silicon.
 
 ## How it works
 
