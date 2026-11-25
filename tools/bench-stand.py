@@ -26,7 +26,7 @@ p.add_argument('--cpu', choices=['750', '7400', '7447a'], default='750')
 p.add_argument('--window', action='store_true')
 p.add_argument('--validation', action='store_true')
 p.add_argument('--seconds', type=int, default=150)
-p.add_argument('--vram-mb', choices=['128', '256'], default='128')
+p.add_argument('--vram-mb', choices=['128', '256'], default='256')
 p.add_argument('--binary', type=Path, help='exact firmware binary; window runs get a private app bundle')
 p.add_argument(
     '--rom',
@@ -189,7 +189,8 @@ args = [
     '--radeon-fast' if a.vram == 'quiescent' else '--radeon',
     '--cpu',
     a.cpu,
-    *(['--vram-mb', a.vram_mb] if a.vram_mb != '128' else []),
+    '--vram-mb',
+    a.vram_mb,  # always: the engine's default moved from 128 to 256 (c26)
     *disks,
     '--of',
     'auto-boot?=true',

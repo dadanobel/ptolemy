@@ -50,7 +50,8 @@ typedef struct CPU {
     uint32_t ca, so, ov, xer_bc; // XER split into its fields
     uint32_t fpscr, reserve, reserve_addr;
     /* PT_FP_LAZY: the FPSCR status (FR, FI, FPRF) of the JIT's last fast FP operation is owed, not
-     * stored: fs_kind (op 59: 0x20 | xo5, op 63: xo5; 0 = fpscr is complete) and its inputs fs_x[0..2] (A, B, C).
+     * stored: fs_kind (op 59: 0x20 | xo5, op 63: xo5; 0 = fpscr is complete) and its inputs fs_x[0..2] (A, B, C);
+     * with 0x40 in fs_kind the inputs were all singles, stored as their bits at bytes 0, 4 and 8 of fs_x.
      * Byte 1 of fs_kind: FPCC written by fcmpu since. Every FPSCR read or partial write settles first
      * (ppc_fp_settle in C, the JIT's settle routine in the VM). fs_x[3], fs_lr, fs_save: that routine's scratch. */
     double fs_x[4];

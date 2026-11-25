@@ -16,6 +16,7 @@ static inline NSString *PTGuestName(void) {
 - (void)exchangeFiles:(NSArray<NSURL *> *)files;
 - (void)exportExchangeFiles;
 - (void)setGuestScaling:(NSInteger)mode; /* 0 fit, 1 integer, 2 stretch */
+- (BOOL)guestUpscale:(BOOL)toggle; /* MetalFX upscaling of the frame: its state, changed first if toggle */
 - (void)resizeGuestLayer:(CAMetalLayer *)layer points:(CGSize)points scale:(CGFloat)scale fullscreen:(BOOL)fullscreen;
 - (void)guestWindowFocused:(BOOL)focused; /* YES = key with the pointer over it, NO = key lost (clipboard sync) */
 @end

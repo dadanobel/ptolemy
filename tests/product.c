@@ -123,6 +123,16 @@ int main(void) {
         pos += size;
     }
     assert(pos == 36 && got[0] == 5 && a->count == 3 && a->pending);
+    /* Odd byte count: five bytes of INQUIRY as three words, the last one padded - then the command ends. */
+    aw(a, 0x70, 0xa0);
+    cdb[4] = 5;
+    for (unsigned i = 0; i < 12; i += 2)
+        assert(!pt_ata_mmio(a, 0, cdb + i, 2, 1));
+    assert((a->status & 8) && (((unsigned)a->lba[2] << 8) | a->lba[1]) == 5);
+    uint8_t odd[6] = {0, 0, 0, 0, 0, 0xee};
+    for (unsigned i = 0; i < 6; i += 2)
+        assert(!pt_ata_mmio(a, 0, odd + i, 2, 0));
+    assert(!a->busy && !(a->status & 8) && odd[0] == 5 && !odd[5]);
     uint8_t dma_ram[65536] = {0};
     PtDma dma;
     pt_dma_init(&dma, (PtRam){dma_ram, sizeof dma_ram, NULL}, NULL, NULL, NULL);

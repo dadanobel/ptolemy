@@ -54,10 +54,21 @@ keyboard_close(int *idx)
 
 static void keyboard_read(void);
 
+/* get-key-map ( -- keymap ): the keys held down, as ADB key codes in a bitmap, as Apple's firmware gives it. BootX
+ * asks for it at every start (Command-V, Command-S, Shift); without the method it printed "call-method
+ * slw_update_keymap: exception -21" over the boot screen (Ptolemy). Nothing is reported held. */
+static unsigned char usb_kbd_keytable[32];
+
+static void keyboard_getkeymap(void)
+{
+	PUSH(pointer2cell(usb_kbd_keytable));
+}
+
 NODE_METHODS( usb_kbd ) = {
 	{ "open",		keyboard_open		},
 	{ "close",		keyboard_close		},
 	{ "read",               keyboard_read		},
+	{ "get-key-map",	keyboard_getkeymap	},
 };
 
 #ifdef CONFIG_DEBUG_USB

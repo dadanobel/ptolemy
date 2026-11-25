@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 enum {
     C0 = 0x100000,
@@ -77,6 +78,7 @@ int main(void) {
     t->sampler = 0x12;
     for (int c = 0; c < 4; c++)
         t->select[c] = (uint8_t)c;
+    setenv("OPTICS_INTERNAL", "1", 0); /* bytes are compared at the guest's own resolution */
     m = optics_metal_executor();
     optics_frontend_set_executor(NULL);
     static uint8_t ram[1 << 20];
@@ -128,6 +130,22 @@ int main(void) {
             if (bad++ < 8)
                 fprintf(stderr, "blend: pixel %u: %02x%02x%02x%02x\n", i, p[2], p[1], p[0], p[3]);
         }
+    }
+    /* 3. TX_OFFSET's swap on a texture in VRAM: none (it acts at the bus, for guest RAM) - one texel sampled with swap 0
+     * and with swap 2 gives the same pixel (u207 #3/#19). */
+    uint8_t texel[4] = {0x11, 0x22, 0x33, 0x44};
+    static uint8_t out2[N * N * 4];
+    assert(!pt_radeon_vram(d, TEX + 0x10000, texel, 4, 1)); /* a fresh address: the white texel stays cached at TEX */
+    dr.texture[0].offset = TEX + 0x10000;
+    dr.blend = 0;
+    dr.texture[0].swap = 0;
+    run(x, d, &dr, out);
+    dr.texture[0].swap = 2;
+    run(x, d, &dr, out2);
+    if (memcmp(out, out2, 4) || out[0] == out[3]) {
+        fprintf(stderr, "swap: %02x%02x%02x%02x / %02x%02x%02x%02x\n", out[0], out[1], out[2], out[3], out2[0], out2[1],
+                out2[2], out2[3]);
+        bad++;
     }
     assert(!bad);
     m->destroy(x, d);

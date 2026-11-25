@@ -390,8 +390,9 @@ defer fb8-invertrect
     dup 2 pick i * swap ! cell+
   loop 2drop
 
-  \ special foreground and background colors
-  ffffcc ['] color-palette cell+ 0 cells + !
+  \ special foreground and background colors: white behind black text, as Apple's Open Firmware
+  \ (Ptolemy; upstream's background is ffffcc, a light yellow)
+  ffffff ['] color-palette cell+ 0 cells + !
   000000 ['] color-palette cell+ ff cells + !
 
   \ load palette onto the hardware

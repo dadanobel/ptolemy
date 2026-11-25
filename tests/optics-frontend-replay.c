@@ -153,6 +153,7 @@ int main(int argc, char **argv) {
     optics_frontend_set_writeback_hook(on_wb, NULL);
     static const OpticsExecutor reference = {
             .draw = optics_draw_reference}; /* stateless CPU reference: no GPU ownership */
+    setenv("OPTICS_INTERNAL", "1", 0); /* bytes are compared at the guest's own resolution */
     if (getenv("OPTICS_REFERENCE"))
         optics_frontend_set_executor(&reference);
     Wb *refs = NULL;

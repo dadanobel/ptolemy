@@ -58,6 +58,16 @@ int main(void) {
             seen |= 8;
     }
     assert(seen == 15);
+    /* A DBAT move: its block's page in segment 6 goes, the same page number in segment 1 stays (and keeps its mark). */
+    uint32_t q = a >> 12 & 0xffff, w = a | 1;
+    assert(!map_page(1, a, a, 1));
+    assert(!map_page(1, b, b, 1));
+    vm_dtlbie(c, &w, 1);
+    assert(!entry(6, 0, a) && (entry(1, 0, b) & 0xfffff000) == b);
+    assert(mapped[q >> 6] >> (q & 63) & 1);
+    w = b | 1;
+    vm_dtlbie(c, &w, 1);
+    assert(!entry(1, 0, b) && !(mapped[q >> 6] >> (q & 63) & 1));
     free(eng);
-    puts("PASS MMU: same SR/page in different segments, PR roots, slots, invalidation aliases");
+    puts("PASS MMU: same SR/page in different segments, PR roots, slots, invalidation aliases, DBAT moves by segment");
 }

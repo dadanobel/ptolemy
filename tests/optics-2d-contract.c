@@ -16,6 +16,11 @@ int main(void) {
     PtRadeonConfig c = {.ram = {ram, sizeof ram, NULL}};
     PtRadeon *d;
     assert(!pt_radeon_create(&d, &c));
+    uint8_t r[4];
+    assert(!pt_radeon_mmio(d, 0x0108, r, 4, 0)); /* CONFIG_APER_SIZE: one aperture = the VRAM, never 0 (Linux radeon) */
+    uint32_t aper = (uint32_t)(r[0] | r[1] << 8 | r[2] << 16 | (uint32_t)r[3] << 24);
+    assert(!pt_radeon_mmio(d, 0x00f8, r, 4, 0)); /* CONFIG_MEMSIZE */
+    assert(aper >= 64u << 20 && aper - (uint32_t)(r[0] | r[1] << 8 | r[2] << 16 | (uint32_t)r[3] << 24) == 4u << 20);
     enum {
         BASE = 0x1000,
         PITCH = 256,

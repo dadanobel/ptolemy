@@ -7,8 +7,8 @@ unmodified (their own kernel, drivers, Finder and applications), in a window or 
 PowerPC code is translated to ARM64 and runs on the Mac's CPU cores under Hypervisor.framework; Mac OS X's own ATI
 driver drives an emulated Radeon 9700 whose 2D and 3D work runs on the Mac's GPU through Metal.
 
-**1.0 beta 4.** A hobby project, made for fun by a human and several frontier models. Expect rough edges: most applications and games have never been tried.
-[Download it](#download) · [what's new](#whats-new-in-beta-4) · [how it works](#how-it-works) · [build it](#building)
+**1.0 beta 5.** A hobby project, made for fun by a human and several frontier models. Expect rough edges: most applications and games have never been tried.
+[Download it](#download) · [what's new](#whats-new-in-beta-5) · [how it works](#how-it-works) · [build it](#building)
 
 <p align="center"><img src="assets/screenshots/ptolemy-window.png" alt="Ptolemy's window with a Tiger and a Leopard machine" width="720"></p>
 
@@ -20,7 +20,7 @@ If you miss your PowerBook G4 or the Power Mac under the desk, Ptolemy gives you
   disk size, and the installer runs as it did in 2005. Ptolemy does not include or download Apple software.
 - **Faster than the fastest real G4, mostly.** In Geekbench 2 one emulated G4 scores about 5000 and two of them about
   6000; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220. Some floating-point
-  library code is still slower than on a real G4 (see [Known limitations](#known-limitations)).
+  library code is only about as fast as on a real G4 (see [Known limitations](#known-limitations)).
 - **3D on the Mac's GPU.** Mac OS X's own ATI driver believes it talks to a Radeon 9700, so Quartz Extreme, Core Image
   and OpenGL games run on the Mac's GPU: Halo, Doom 3, Half-Life (Xash3D) and SimCity 4 among those we tried. Classic
   runs inside Tiger with a Mac OS 9.2.2 System Folder you bring (Age of Empires plays).
@@ -31,35 +31,37 @@ If you miss your PowerBook G4 or the Power Mac under the desk, Ptolemy gives you
 - **Several machines.** Each has its own disk (up to 120 GB), processor (G3 750, G4 7400, G4 7447A, Dual G4 for
   Leopard) and memory (512 MB to 2 GB). Disks are sparse bundles: they take only the space they use.
 
-## What's new in beta 4
+## What's new in beta 5
 
-- **Faster.** Against beta 3 on one G4 7447A, and beta 4 on Dual G4 in Leopard. One run each, one session after
-  another on the same Mac (MacBook Air M4, window 1024 × 768):
+Beta 5 is about graphics and the screen.
 
-  | | Tiger 1.0b3 | Tiger 1.0b4 | Leopard 1.0b3 | Leopard 1.0b4 | Leopard 1.0b4, Dual G4 |
-  |---|---|---|---|---|---|
-  | Geekbench 2 | 4539 | 5084 (+12%) | 4477 | 4943 (+10%) | 6067 |
-  | Cinebench R10, 1 CPU | 2876 | 3138 (+9%) | 2821 | 3141 (+11%) | 3190 |
-  | Cinebench R10, x CPU | — | — | — | — | 5461 (1.76×)¹ |
-  | Cinebench R10 OpenGL | 5376² | 5225 (−3%)² | 5345 | 5696 (+7%) | 5601 |
-  | Xbench vecLib FFT | 36.5 | 65.6 (×1.8) | 38.4 | 62.6 (×1.6) | 64.7 |
-  | Xbench Quartz | 367.7 | 361.7 (−2%) | 452.5 | 468.7 (+4%) | 463.1 |
-  | Xbench OpenGL | 166.7 | 212.4 (+27%) | 167.7 | 212.3 (+27%) | 209.7 |
-  | Xbench User Interface | 181.6 | 293.6 (+62%) | 137.1 | 184.8 (+35%) | 207.7 |
-
-  ¹ A separate run after the others. ² OpenGL alone, two runs each (beta 3: 5547, 5205; beta 4: 5408, 5041).
-
-  Logging in and starting applications are smoother: the translator keeps twice as much code before it starts over.
-- **Dual G4 for Leopard**, with Leopard's own multiprocessor kernel and scheduler. See
-  [Two processors](#two-processors-dual-g4).
-- **No first-use stutter in Halo.** A drawing whose shader is still being compiled for Metal waits up to 10 ms, then
-  is skipped for that frame, instead of stopping it.
-- **The Mac's camera** as a USB camera in Mac OS X (Photo Booth); macOS asks for permission the first time.
-- **Lighter when idle.** USB frames go in batches while the bus is quiet, and the graphics card's service runs only
-  while it has work.
-- **Ptolemy Tools update themselves** on machines made with an earlier beta, at their next start.
-- **A new window** in the style of macOS 26, with pictures of Tiger and Leopard; it names the installed system.
-- **Antiochus and Rosetta Stone**, a test suite and a demo, in the Ptolemy Tools menu.
+- **Sharper 3D.** 3D is drawn at 1.5 times the resolution the system asks for: *1.5× Sharper* in a machine's
+  settings, beside *As the System Draws* and *2× Sharper*. *Smooth Scaling (MetalFX)* smooths any picture shown larger
+  than the system draws it.
+- **Fewer first-use stutters.** Ptolemy keeps the shader programs it has prepared and compiles them again in the
+  background at the next start; a set gathered from Tiger and Leopard comes with the app. In Unreal Tournament 2004
+  the wait for shaders on ONS-Torlan fell from about 13 s to 0.3 s in the second session.
+- **More display modes, up to 4K.** A machine's settings choose the startup mode: the Mac's screen, or 4:3, 16:10
+  or 16:9 from 640 × 480 to 2560 × 1600. Displays in Mac OS X offers the modes up to that one, now with 3440 × 1440
+  and 3840 × 2160. Screens wider than 2048 pixels no longer keep stale pieces of earlier pictures.
+- **H.264 on the Mac's decoder.** Ptolemy Tools add a QuickTime codec, Ptolemy Video, that hands H.264 to macOS:
+  QuickTime Player plays 1080p at 30 frames a second without dropping frames.
+- **DrawSprocket games** such as Cro-Mag Rally start from the Ptolemy menu, *DrawSprocket Games*. Mac OS X's
+  DrawSprocket hides their windows under its screen capture, on a real Mac too; Ptolemy Tools raise them above it.
+- **Smooth scrolling.** Two-finger scrolling on a trackpad moves Mac OS X's windows smoothly, sideways too: the mouse
+  Mac OS X sees is now an Apple Mighty Mouse.
+- **OpenGL closer to the real card.** Antiochus now runs 438 OpenGL cases, most of them from Piglit, in Tiger and
+  Leopard against Apple's software renderer. The fixes they led to: index buffers, 16-bit float and 10-bit colour
+  render targets, the vertex programs' EXP and LOG, texture coordinates, depth read back by the CPU.
+- **Faster AltiVec and floating point.** Epicycle keeps up to 11 AltiVec registers in the Mac's registers within a
+  block. Floating-point operations that give an infinity or a result near zero, or run in a rounding mode other than
+  round-to-nearest, now stay in translated code instead of going to the interpreter. Against the same build without
+  these changes (Leopard on one G4 7447A, two sessions of two runs each): Xbench vecLib FFT +10% and +13%, Floating
+  Point Basic +4.5% and +7%; Geekbench 2 and Cinebench R10 within run-to-run noise, on Dual G4 too; Geekbench's vector
+  Stream Add is 7% slower.
+- **Fixed:** the RSS Visualizer screen saver (a white screen), Photo Booth's effects in Leopard (Ptolemy quit), a
+  hang at 3840 × 2160 in Leopard after a game, two pointers over an inactive window.
+- **256 MB of video memory** by default (was 128 MB).
 
 ## Emulated, translated, native
 
@@ -146,13 +148,14 @@ Optics, the Radeon 9700 model, works at the level of the card's registers and co
 OpenGL and Quartz Extreme run as they would on the real card. Each draw the driver sends becomes one Metal draw:
 
 - the card's vertex and fragment programs become Metal shaders, with fog, clip planes, logic ops and the other
-  fixed-function stages built in; a draw whose shader is still compiling waits up to 10 ms, then is skipped for
-  that frame;
+  fixed-function stages built in; while frames stream, a draw whose shader is still compiling waits up to 10 ms,
+  then is skipped for that frame; the programs are kept for the next start;
 - compute kernels decode textures on the GPU, DXT and YUV included;
 - render targets are Metal textures that own the guest's video memory, and Hypervisor.framework's page protection
-  tells Optics when the guest's CPU touches them; with FSAA they are multisampled and resolved on the GPU;
+  tells Optics when the guest's CPU touches them; with FSAA they are multisampled and resolved on the GPU; 3D targets
+  can be drawn at 1.5 or 2 times their size;
 - the driver's fences and occlusion queries complete from Metal's completion handlers;
-- the window presents through a `CAMetalLayer` at 60 Hz.
+- the window presents through a `CAMetalLayer` at 60 Hz, scaled with MetalFX when it is larger than the picture.
 
 The engine links Apple's frameworks only: no host OpenGL, no Vulkan layer, no shader cross-compiler.
 [docs/metal.md](docs/metal.md) describes this in detail; [docs/graphics.md](docs/graphics.md) lists what the model
@@ -192,7 +195,8 @@ is below the session's 5601; results on the Air vary from run to run.
 Ptolemy Tools run inside Tiger and Leopard and talk to the engine through private calls instead of emulated hardware.
 The display driver, which the firmware hands to Mac OS X, gives display modes up to the window's size, a hardware
 cursor and gamma. Ptolemy Agent, in the menu bar, carries the clipboard and files, restarts and shuts down the system in
-order and, in Leopard, keeps the system from sleeping on its own. Ptolemy.app installs the Tools
+order and, in Leopard, keeps the system from sleeping on its own. Ptolemy Video, a QuickTime codec, hands H.264 to the
+Mac's decoder, and a small DrawSprocket helper lets full-screen games of the Mac OS 9 era show their windows. Ptolemy.app installs the Tools
 into every new machine and updates them on machines made with an earlier beta; Tools someone else put in that place
 are left alone. Mac OS X's own files are not changed.
 
@@ -215,7 +219,7 @@ are left alone. Mac OS X's own files are not changed.
 | **Harmonics** | Screamer sound and its DBDMA channels, played through Core Audio | `src/audio.c`, `src/audio_macos.c` |
 | Machine | PowerBook5,8: G4 7447A 1.67 GHz, 2 GB, MacIO, PMU, ATA disk, ATAPI CD/DVD, USB keyboard, tablet, mouse and storage, RTL8139 Ethernet with user-mode networking, NVRAM | `src/`, `include/` |
 | Firmware | A fork of [OpenBIOS](https://github.com/openbios/openbios) (Open Firmware), built reproducibly | `firmware/openbios/` |
-| Ptolemy Tools | Runs inside Tiger: display driver (modes, hardware cursor, gamma), clipboard, file transfer, orderly restart and shut down | `guest/` |
+| Ptolemy Tools | Runs inside Tiger and Leopard: display driver (modes, hardware cursor, gamma), clipboard, file transfer, orderly restart and shut down, H.264 for QuickTime on the Mac's decoder, DrawSprocket games | `guest/` |
 | Ptolemy.app | Launcher: installs Tiger from your own DVD image, keeps several machines, sets disk size, processor and memory | `product/` |
 
 The firmware is the only third-party code in the machine; everything else was written for Ptolemy.
@@ -223,7 +227,7 @@ The firmware is the only third-party code in the machine; everything else was wr
 
 ## Download
 
-`Ptolemy-1.0b4.zip` on the [Releases](https://github.com/dadanobel/ptolemy/releases) page holds Ptolemy.app with the
+`Ptolemy-1.0b5.zip` on the [Releases](https://github.com/dadanobel/ptolemy/releases) page holds Ptolemy.app with the
 engine, the firmware and Ptolemy Tools. You need:
 
 - A Mac with Apple silicon and macOS 15 Sequoia or later (tried on macOS 15 with an M1 Max and on macOS 27 with
@@ -257,9 +261,9 @@ Ptolemy takes the resulting `.cdr` file, as well as `.dmg` and `.iso` images.
 ## What has been tried
 
 On a 13.6-inch MacBook Air with the M4 (10-core CPU and GPU, 24 GB), macOS 27, with Tiger 10.4.11 and Leopard 10.5 on
-the G4 7447A. Leopard, Dual G4, Photo Booth, Cinebench, Geekbench and Xbench were tried with this release; Classic and
-SimCity 4 with beta 3, Halo with beta 1, Doom 3 with a build of the same day as beta 1, the others with builds of
-the weeks before.
+the G4 7447A. Unreal Tournament 2004, Quake 3, Cro-Mag Rally, Office 2004 and the video were tried with this release;
+Leopard, Dual G4, Photo Booth, Cinebench, Geekbench and Xbench with beta 4; Classic and SimCity 4 with beta 3, Halo
+with beta 1, Doom 3 with a build of the same day as beta 1, the others with builds of the weeks before.
 
 | Software | Result |
 |---|---|
@@ -275,6 +279,11 @@ the weeks before.
 | Geekbench 2.2 | Tiger 5084, Leopard 4943, Leopard on Dual G4 6067 (a real dual 1.42 GHz Power Mac G4 averages about 1220) |
 | Xbench 1.3 | Tiger: User Interface 294, OpenGL 212, vecLib FFT 66 |
 | Photo Booth (Leopard) | Sees the Mac's camera as a USB camera |
+| Unreal Tournament 2004 (Leopard) | ONS-Torlan at 1024 × 768: about 65 fps |
+| Quake 3 Arena (Classic) | Plays in Tiger; set `seta r_primitives "2"` in `q3config.cfg`, otherwise stray triangles cross the menu |
+| Cro-Mag Rally | Full screen through *DrawSprocket Games* in the Ptolemy menu |
+| Microsoft Office 2004 | Installs and runs in Leopard |
+| QuickTime Player | 1080p H.264 at 30 fps, no frames dropped |
 
 Everything else is untested. Reports are welcome.
 
@@ -305,11 +314,12 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
   one. The first start takes about two minutes. As on real Macs, Classic has no 3D. Mac OS 9 itself does not start:
   the firmware cannot start a disk that Tiger marked for Mac OS 9.
 - **Files.** Files dropped onto the window arrive without resource forks, type and creator. One file can be up to 4 GB.
-- **Benchmarks.** Most code runs much faster than on a real G4, but some floating-point library code is slower: in Leopard,
-  Xbench's vecLib FFT scores about 63, where a 1.33 GHz iBook G4 scores about 71.
+- **Benchmarks.** Most code runs much faster than on a real G4, but some floating-point library code is only about
+  as fast: in Leopard, Xbench's vecLib FFT scores about 72, a 1.33 GHz iBook G4 about 71.
 - **Dual G4.** Leopard only (Tiger wakes every processor 100 times a second, which costs a second processor its idle
   time). Threads that hand one lock back and forth are much slower than on one processor, and software that shares
   memory without the PowerPC's barriers can misbehave more often than on a real dual G4.
+- **Video.** Ptolemy Video decodes H.264 for QuickTime; other codecs run on the emulated G4 as before.
 - **Not available:** two CPUs in Tiger, a G5, CD audio, game controllers, sound input, incoming network
   connections.
 - **Mouse in games.** When a game switches the display mode, Ptolemy captures the mouse: Ctrl+Option or Cmd+Tab
@@ -317,7 +327,7 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
 
 ## Plans
 
-Dual G4 runs in Leopard. A Power Mac G5 is postponed indefinitely.
+A multi-processor Power Mac G5 before 1.0. YouTube in the systems' own Safari, through the web gateway, in beta 6.
 
 ## Building
 

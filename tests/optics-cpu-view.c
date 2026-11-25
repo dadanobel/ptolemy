@@ -155,6 +155,21 @@ int main(void) {
     optics_frontend_stats(dev, &s);
     assert(s.guard_faults && s.guard_groups && !s.guard_emulated);
     pt_radeon_close(dev);
+    /* The driver's first write to SURFACE_CNTL ends the boot console's lanes (swap32 at 32 bits) even when it writes
+     * the value the register already holds: what the CPU wrote under the boot lanes goes back with them first. */
+    memset(prot, 0, sizeof prot);
+    PtRadeonConfig boot = c;
+    boot.width = 640;
+    boot.height = 480;
+    assert(!pt_radeon_create(&dev, &boot) && view); /* the boot console's mode: the view is mapped */
+    uint8_t held[4];
+    assert(!pt_radeon_mmio(dev, 0x0b00, held, 4, 0) && !(held[2] & 0x30)); /* the register itself says "no swap" */
+    gpu_put(0x8000, "\x04\x03\x02\x01");
+    assert(cpu_is(0x8000, "\x01\x02\x03\x04"));
+    cpu_put(0x8004, "\x0d\x0c\x0b\x0a");
+    assert(!pt_radeon_mmio(dev, 0x0b00, held, 4, 1)); /* the same value: only "the driver wrote it" is new */
+    assert(gpu_is(0x8004, "\x0a\x0b\x0c\x0d") && cpu_is(0x8004, "\x0a\x0b\x0c\x0d")); /* back as swap32; now none */
+    pt_radeon_close(dev);
     puts("PASS: CPU view lanes (swap32, swap16 region, none), grants, device syncs, snapshots, lane changes, trapped accesses, scanout");
     return 0;
 }

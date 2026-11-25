@@ -165,6 +165,10 @@ static void hid_test(void) {
     PtHid h;
     uint8_t b[64];
     pt_hid_init(&h, PT_HID_KEYBOARD);
+    setup(&h, 0x80, 6, 0x100, 64); /* Linux: 64 bytes of the device descriptor in packets of up to 64 */
+    assert(pt_hid_packet(&h, 0, PT_USB_IN, b, 64, 0) == 8 && b[0] == 18 && b[7] == 8);
+    assert(pt_hid_packet(&h, 0, PT_USB_IN, b, 64, 0) == 8 && pt_hid_packet(&h, 0, PT_USB_IN, b, 64, 0) == 2);
+    assert(!pt_hid_packet(&h, 0, PT_USB_OUT, b, 0, 0));
     setup(&h, 0, 5, 9, 0);
     assert(h.address == 0);
     assert(!pt_hid_packet(&h, 0, PT_USB_IN, b, 0, 0) && h.address == 9);
@@ -186,10 +190,14 @@ static void hid_test(void) {
     pt_hid_init(&h, PT_HID_MOUSE);
     h.configuration = 1;
     pt_hid_pointer(&h, 1, 300, -1, 0);
-    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 0) == 4 && b[1] == 127 && b[2] == 255);
-    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 1) == 4 && b[1] == 127 && !b[2]);
-    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 2) == 4 && b[1] == 46);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 0) == 5 && b[1] == 127 && b[2] == 255);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 1) == 5 && b[1] == 127 && !b[2]);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 2) == 5 && b[1] == 46);
     assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 3) == PT_USB_NAK);
+    pt_hid_scroll(&h, 200, -3); /* wheel and AC Pan in 8-bit pieces */
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 4) == 5 && b[3] == 127 && b[4] == 253);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 5) == 5 && b[3] == 73 && !b[4]);
+    assert(pt_hid_packet(&h, 1, PT_USB_IN, b, 8, 6) == PT_USB_NAK);
     pt_hid_destroy(&h);
 }
 static void td(unsigned a, unsigned flags, unsigned cbp, unsigned next, unsigned end) {
@@ -216,7 +224,7 @@ static void ohci_test(void) {
     memcpy(ram + 0x3000, req, 8);
     td(0x2100, 0xf0000000, 0x3000, 0x2110, 0x3007);
     td(0x2110, 0xf0000000 | (2 << 19) | (3 << 24), 0, 0x2120, 0);
-    td(0x2000, 8 << 16, 0x2120, 0x2100, 0);
+    td(0x2000, (8 << 16) | (3 << 11), 0x2120, 0x2100, 0); /* D = 11b: direction from the TD, as Open Firmware sets it */
     pt_ohci_write(&o, 0x20, 0x2000);
     pt_ohci_write(&o, 0x10, 0x80000002);
     pt_ohci_write(&o, 4, 0x90);

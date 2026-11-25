@@ -4,6 +4,7 @@
  * shader decodes the VBE mode (8 bpp via DAC palette, 15/16/24/32 bpp, either byte order). */
 #import "guest_window_macos.h"
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #include "stand_window.h"
 #include "pt_agent.h"
 #include "pt_boot_mode.h"
@@ -83,6 +84,30 @@ static NSString *const shader =
          "    float4 q = t.read(uint2(g));\n"
          "    return finish(hwcursor((p.be ? float3(q.g, q.r, q.a) : float3(q.r, q.g, q.b)) * 255.0, g, p,\n"
          "            cur), p, gam);\n"
+         "}\n"
+         /* A native frame drawn at an internal resolution (OPTICS_INTERNAL): p.pad0 / 2 texels to a guest pixel, the
+ * cursor still in guest pixels. Shown smaller than it is, it is filtered (linear: an exact average at half its
+ * size); at its own size or larger, its texels as they are.
+ * ponytail: shown at less than half its size it aliases; a mip or two passes if such a window matters. */
+         "fragment float4 fstl(V in [[stage_in]], constant P &p [[buffer(0)]], texture2d<float> t [[texture(0)]],\n"
+         "        device const uint *cur [[buffer(3)]], constant uint *gam [[buffer(4)]]) {\n"
+         "    constexpr sampler lin(filter::linear, address::clamp_to_edge);\n"
+         "    float2 g = (in.pos.xy - p.offset) / p.scale, size = float2(p.w, p.h);\n"
+         "    if (g.x < 0 || g.y < 0 || g.x >= size.x || g.y >= size.y) return float4(0, 0, 0, 1);\n"
+         "    float m = float(p.pad0) * 0.5;\n"
+         "    float4 q = p.scale.x < m || p.scale.y < m\n"
+         "            ? t.sample(lin, min(g * m, size * m - 0.5) / float2(t.get_width(), t.get_height()))\n"
+         "            : t.read(uint2(g * m));\n"
+         "    return finish(hwcursor((p.be ? float3(q.g, q.r, q.a) : float3(q.r, q.g, q.b)) * 255.0, g, p,\n"
+         "            cur), p, gam);\n"
+         "}\n"
+         /* A frame MetalFX enlarged to the size it is shown at (View > MetalFX Upscaling), at the frame's offset. */
+         "fragment float4 fsc(V in [[stage_in]], constant P &p [[buffer(0)]],\n"
+         "        texture2d<float, access::read> t [[texture(0)]]) {\n"
+         "    float2 g = in.pos.xy - p.offset;\n"
+         "    if (g.x < 0 || g.y < 0 || g.x >= float(t.get_width()) || g.y >= float(t.get_height()))\n"
+         "        return float4(0, 0, 0, 1);\n"
+         "    return float4(t.read(uint2(g)).rgb, 1);\n"
          "}\n";
 
 typedef struct {
@@ -287,6 +312,7 @@ static int drop_to_guest(NSString *sock, NSURL *url, PTAgentCancellation *operat
 
 @interface PTStandActions : NSObject <PTGuestWindowActions, NSApplicationDelegate>
 @property(atomic) unsigned scaling; /* 0 fit, 1 integer, 2 stretch */
+@property(atomic) BOOL upscale; /* View > MetalFX Upscaling (PT_UPSCALE=1 at the start) */
 @property(nonatomic) BOOL stopped;
 @property(nonatomic) BOOL asked; /* Tiger accepted Restart/Shut Down and has not stopped yet */
 @property(nonatomic) NSMutableArray<NSURL *> *sendQueue; /* files still to copy into Tiger while the copy sheet is up */
@@ -810,6 +836,11 @@ static uint64_t clip_gen;
 - (void)setGuestScaling:(NSInteger)mode {
     self.scaling = (unsigned)mode;
 }
+- (BOOL)guestUpscale:(BOOL)toggle {
+    if (toggle)
+        self.upscale = !self.upscale;
+    return self.upscale;
+}
 - (void)resizeGuestLayer:(CAMetalLayer *)layer points:(CGSize)points scale:(CGFloat)scale fullscreen:(BOOL)fs {
     (void)layer;
     (void)points;
@@ -824,7 +855,12 @@ static uint64_t clip_gen;
 @implementation PTStandPresenter {
     id<MTLDevice> _dev;
     id<MTLCommandQueue> _queue;
-    id<MTLRenderPipelineState> _pipe, _pipeTexture;
+    id<MTLRenderPipelineState> _pipe, _pipeTexture, _pipeCopy, _pipeLarge;
+    unsigned _shownInternal;
+    id<MTLFXSpatialScaler> _fx; /* MetalFX for the sizes in _fxSize; nil: none for them */
+    id<MTLTexture> _fxIn, _fxOut;
+    NSUInteger _fxSize[4];
+    BOOL _shownFx;
     PTDisplayView *_view;
     PTStandActions *_actions;
     id<MTLCommandBuffer> _last;
@@ -876,8 +912,63 @@ static uint64_t clip_gen;
         NSLog(@"Metal: %@", e);
         return nil;
     }
+    d.fragmentFunction = [lib newFunctionWithName:@"fsc"];
+    _pipeCopy = [_dev newRenderPipelineStateWithDescriptor:d error:&e];
+    if (!_pipeCopy) {
+        NSLog(@"Metal: %@", e);
+        return nil;
+    }
+    d.fragmentFunction = [lib newFunctionWithName:@"fstl"];
+    _pipeLarge = [_dev newRenderPipelineStateWithDescriptor:d error:&e];
+    if (!_pipeLarge) {
+        NSLog(@"Metal: %@", e);
+        return nil;
+    }
     _cursor = [_dev newBufferWithLength:64 * 64 * 4 options:MTLResourceStorageModeShared];
     return self;
+}
+/* The MetalFX spatial scaler for a guest frame of w x h shown as ow x oh, with its input and output textures (the
+ * layer's pixel format, so fs and fst draw into the input as they draw into the drawable); made anew when a size
+ * changes. NO: this GPU or these sizes have none, and the frame is presented as without it. */
+- (BOOL)scalerWidth:(NSUInteger)w height:(NSUInteger)h outputWidth:(NSUInteger)ow outputHeight:(NSUInteger)oh {
+    if (_fxSize[0] == w && _fxSize[1] == h && _fxSize[2] == ow && _fxSize[3] == oh)
+        return _fx != nil;
+    _fxSize[0] = w;
+    _fxSize[1] = h;
+    _fxSize[2] = ow;
+    _fxSize[3] = oh;
+    _fx = nil;
+    _fxIn = _fxOut = nil;
+    MTLPixelFormat format = _view.metalLayer.pixelFormat;
+    id<MTLFXSpatialScaler> fx = nil;
+    if ([MTLFXSpatialScalerDescriptor supportsDevice:_dev]) {
+        MTLFXSpatialScalerDescriptor *sd = [MTLFXSpatialScalerDescriptor new];
+        sd.inputWidth = w;
+        sd.inputHeight = h;
+        sd.outputWidth = ow;
+        sd.outputHeight = oh;
+        sd.colorTextureFormat = sd.outputTextureFormat = format;
+        sd.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual; /* the guest's pixels are display values */
+        fx = [sd newSpatialScalerWithDevice:_dev];
+    }
+    if (fx) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                      width:w
+                                                                                     height:h
+                                                                                  mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = fx.colorTextureUsage | MTLTextureUsageRenderTarget;
+        _fxIn = [_dev newTextureWithDescriptor:td];
+        td.width = ow;
+        td.height = oh;
+        td.usage = fx.outputTextureUsage | MTLTextureUsageShaderRead;
+        _fxOut = [_dev newTextureWithDescriptor:td];
+        if (_fxIn && _fxOut)
+            _fx = fx;
+    }
+    NSLog(@"Present: MetalFX %lux%lu to %lux%lu%s", (unsigned long)w, (unsigned long)h, (unsigned long)ow,
+          (unsigned long)oh, _fx ? "" : ": not available");
+    return _fx != nil;
 }
 - (void)frame:(NSTimer *)timer {
     (void)timer;
@@ -950,6 +1041,33 @@ static uint64_t clip_gen;
             NSLog(@"Present: %s", now);
         }
     }
+    /* A native frame drawn at an internal resolution is larger than the mode: `internal` halves of it (2: as the
+     * guest sees it). Its texture is as wide as the scanout's line at that resolution, rounded up, so the line gives
+     * the factor exactly. */
+    id<MTLTexture> native = m.enabled ? (__bridge id<MTLTexture>)rf.metal_texture : nil;
+    unsigned internal = native && m.line >= 8 ? (unsigned)(2 * native.width / (m.line / 4)) : 2;
+    if (internal < 2 || internal > 4)
+        internal = 2;
+    if (internal > 2)
+        p.pad0 = internal;
+    /* View > MetalFX Upscaling: the frame is finished at its own size (fs, fst or fstl, cursor and gamma included),
+     * MetalFX enlarges it to the size it is shown at and fsc puts that into the drawable. Not when nothing is
+     * enlarged (a frame at an internal resolution no smaller than it is shown needs none), and not while the window
+     * is being resized (every size would make a scaler).
+     * ponytail: the cursor is enlarged with the frame, so a pointer move runs the scaler; the cursor in fsc if the
+     * cost shows. */
+    NSUInteger iw = m.width * internal / 2, ih = m.height * internal / 2;
+    if (internal != _shownInternal) {
+        BOOL say = native && (internal > 2 || _shownInternal > 2); /* nothing to say about a frame of the guest's size */
+        _shownInternal = internal;
+        if (say) /* what is shown is the mode's part of the texture: a surface may be taller or wider than the mode */
+            NSLog(@"Present: native frame %lux%lu (texture %lux%lu) for guest %ux%u, internal resolution x%g",
+                  (unsigned long)iw, (unsigned long)ih, (unsigned long)native.width, (unsigned long)native.height,
+                  m.width, m.height, internal * 0.5);
+    }
+    NSUInteger ow = (NSUInteger)lround((double)m.width * p.sx), oh = (NSUInteger)lround((double)m.height * p.sy);
+    BOOL fx = _actions.upscale && !_view.inLiveResize && p.sx >= 1 && p.sy >= 1 && (ow > iw || oh > ih) &&
+              [self scalerWidth:iw height:ih outputWidth:ow outputHeight:oh];
     PtHwCursor *hc = config->hw_cursor;
     uint64_t pos = atomic_load(&hc->pos); /* read at every presentation, not per frame */
     pthread_mutex_lock(&hc->lock); /* a new image gets a new buffer: frames in flight keep the old one */
@@ -969,7 +1087,10 @@ static uint64_t clip_gen;
     p.cy = (int16_t)(pos >> 16);
     p.cw = _cursorW;
     p.ch = _cursorH;
-    p.visible = (pos >> 32 & 1) && _cursorW;
+    /* Tiger's cursor is the pointer only while this window takes the Mac's input. Over an inactive window the Mac shows
+     * its own pointer (an app cannot blank it while another app is frontmost), and Tiger's, left where it was, made a
+     * second one until a click (GitHub report, 1.0b4). */
+    p.visible = (pos >> 32 & 1) && _cursorW && ((NSApp.isActive && _view.window.isKeyWindow) || _view.isRelativeCaptured);
     p.gamma = _gammaOn;
     /* Automatic capture follows the agent's CGCursorIsVisible only: the hardware cursor is also hidden while typing. */
     _view.guestCursorHidden = YES;
@@ -980,7 +1101,7 @@ static uint64_t clip_gen;
     /* Nothing new since the last presentation: the layer keeps showing it (no redraw and composite at 60 Hz). */
     if (_last && rf.ticket.epoch == _shownTicket.epoch && rf.ticket.seq == _shownTicket.seq &&
         _cursorGen == _shownCursorGen && _gammaGen == _shownGammaGen && CGSizeEqualToSize(ds, _shownSize) &&
-        !memcmp(&p, &_shown, sizeof p)) {
+        fx == _shownFx && !memcmp(&p, &_shown, sizeof p)) {
         if (leased)
             pt_radeon_frame_release(card, &rf);
         return;
@@ -996,24 +1117,31 @@ static uint64_t clip_gen;
     _shownCursorGen = _cursorGen;
     _shownGammaGen = _gammaGen;
     _shownSize = ds;
+    _shownFx = fx;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = drawable.texture;
     rp.colorAttachments[0].loadAction = MTLLoadActionClear;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLCommandBuffer> cb = [_queue commandBuffer];
+    Params q = p; /* the frame's own pass: into the scaler's input at the frame's own size when it is upscaled */
+    if (fx) {
+        q.sx = q.sy = internal * 0.5f;
+        q.ox = q.oy = 0;
+        rp.colorAttachments[0].texture = _fxIn;
+    }
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     if (m.enabled && leased &&
         rf.metal_texture) { /* immutable native frame, leased until this presentation completes */
-        [enc setRenderPipelineState:_pipeTexture];
-        [enc setFragmentBytes:&p length:sizeof p atIndex:0];
+        [enc setRenderPipelineState:internal > 2 ? _pipeLarge : _pipeTexture];
+        [enc setFragmentBytes:&q length:sizeof q atIndex:0];
         [enc setFragmentTexture:(__bridge id<MTLTexture>)rf.metal_texture atIndex:0];
         [enc setFragmentBuffer:_cursor offset:0 atIndex:3];
         [enc setFragmentBytes:_gamma length:sizeof _gamma atIndex:4];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     } else if (m.enabled) {
         [enc setRenderPipelineState:_pipe];
-        [enc setFragmentBytes:&p length:sizeof p atIndex:0];
+        [enc setFragmentBytes:&q length:sizeof q atIndex:0];
         [enc setFragmentBuffer:(__bridge id<MTLBuffer>)rf.metal_buffer offset:0 atIndex:1];
         [enc setFragmentBytes:rf.palette length:sizeof rf.palette atIndex:2];
         [enc setFragmentBuffer:_cursor offset:0 atIndex:3];
@@ -1021,6 +1149,20 @@ static uint64_t clip_gen;
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }
     [enc endEncoding];
+    if (fx) {
+        _fx.colorTexture = _fxIn;
+        _fx.inputContentWidth = iw;
+        _fx.inputContentHeight = ih;
+        _fx.outputTexture = _fxOut;
+        [_fx encodeToCommandBuffer:cb];
+        rp.colorAttachments[0].texture = drawable.texture;
+        enc = [cb renderCommandEncoderWithDescriptor:rp];
+        [enc setRenderPipelineState:_pipeCopy];
+        [enc setFragmentBytes:&p length:sizeof p atIndex:0];
+        [enc setFragmentTexture:_fxOut atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    }
     if (leased)
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
             (void)done;
@@ -1113,6 +1255,7 @@ int pt_stand_window_main(PtStandWindow *w) {
                 NO; /* no Show Tab Bar / Show All Tabs in the View menu: one guest window */
         PTStandActions *actions = [PTStandActions new];
         actions.scaling = screenMode ? 0 : 1;
+        actions.upscale = pt_env_flag("PT_UPSCALE");
         app.delegate = actions;
         PtInputSink sink = {w->input, pt_input_send};
         PTGuestWindow *win = [[PTGuestWindow alloc] initWithTitle:@"Ptolemy" input:sink actions:actions];

@@ -3,8 +3,8 @@
  * Open Firmware node ("driver,AAPL,MacOS,PowerPC"; mkpef.py builds the container). It answers like the boot driver
  * Tiger uses without one (one mode with the firmware's geometry) and adds a 64x64 ARGB hardware cursor that it hands
  * to the host by hypercall, so WindowServer no longer draws the pointer into VRAM (each draw read the scanout back).
- * Several modes and depths. Mode 100 is the firmware's geometry; 101-103 are 640x480, 800x600 and
- * 1024x768 when smaller than it; each in 8 bits indexed (depth mode 128), 16 bits 1555 (129) and 32 bits (130). A switch and
+ * Several modes and depths. Mode 100 is the firmware's geometry; 101-117 are the catalogue below (4:3, 16:10, 16:9 up
+ * to UHD and the 21:9 ultrawide: the sizes Mac users' displays have), each offered when it fits inside the firmware's and is not it; each in 8 bits indexed (depth mode 128), 16 bits 1555 (129) and 32 bits (130). A switch and
  * the colour table go to the engine by hypercall (ops 3 and 4), which programs the CRTC, the aperture swap and the DAC; the
  * switch returns the framebuffer's address (8 and 16 bits lie in aperture 1: Tiger's driver swaps aperture 0 for 32 bits).
  * Kernel code: clang, powerpc SVR4, no globals or literals. r2 (the PEF TOC) is the data section, given to C as d. */
@@ -15,7 +15,7 @@ enum {
     UNSUPPORTED = (int)0xe00002c7,
     BAD_ARGUMENT = (int)0xe00002c2,
     BOOT_MODE = 100,
-    LAST_MODE = 103,
+    LAST_MODE = 117,
     DEPTH8 = 128,
     DEPTH32 = 130
 };
@@ -73,20 +73,25 @@ static u32 host(u32 op, u32 a, u32 b, u32 c) {
 static u32 get(const u8 *p) {
     return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
 }
+/* Stores a big-endian word, byte by byte. */
 static void put(u8 *p, u32 v) {
     p[0] = v >> 24;
     p[1] = v >> 16;
     p[2] = v >> 8;
     p[3] = v;
 }
+/* Stores a big-endian halfword. */
 static void put16(u8 *p, u32 v) {
     p[0] = v >> 8;
     p[1] = v;
 }
+/* Loads a big-endian halfword. */
 static u32 get16(const u8 *p) {
     return (u32)p[0] << 8 | p[1];
 }
 
+/* kInitializeCommand: keeps the display node's RegEntryID and reads the firmware's geometry (address, linebytes,
+ * width, height, depth). */
 static int init(struct Data *d, const u8 *info) {
     for (int i = 0; i < 4; i++)
         d->entry[i] = get(info + 2 + 4 * i); /* DriverInitInfo: refNum, RegEntryID */
@@ -101,28 +106,72 @@ static int init(struct Data *d, const u8 *info) {
 
 /* Mode geometry; 0 when the mode does not exist. */
 static int mode_size(const struct Data *d, u32 mode, u32 *w, u32 *h) {
+    u32 size;
     switch (mode) {
     case BOOT_MODE:
         *w = d->geo[2];
         *h = d->geo[3];
         return 1;
-    case 101:
-        *w = 640;
-        *h = 480;
+    /* width << 16 | height. A width is a whole number of 8-pixel CRTC units, so 1360 stands for 1366x768. */
+    case 101: /* 4:3 */
+        size = 640 << 16 | 480;
         break;
     case 102:
-        *w = 800;
-        *h = 600;
+        size = 800 << 16 | 600;
         break;
     case 103:
-        *w = 1024;
-        *h = 768;
+        size = 1024 << 16 | 768;
+        break;
+    case 104:
+        size = 1280 << 16 | 960;
+        break;
+    case 105:
+        size = 1600 << 16 | 1200;
+        break;
+    case 106: /* 16:10 */
+        size = 1280 << 16 | 800;
+        break;
+    case 107:
+        size = 1440 << 16 | 900;
+        break;
+    case 108:
+        size = 1680 << 16 | 1050;
+        break;
+    case 109:
+        size = 1920 << 16 | 1200;
+        break;
+    case 110:
+        size = 2560 << 16 | 1600;
+        break;
+    case 111: /* 16:9 */
+        size = 1280 << 16 | 720;
+        break;
+    case 112:
+        size = 1360 << 16 | 768;
+        break;
+    case 113:
+        size = 1600 << 16 | 900;
+        break;
+    case 114:
+        size = 1920 << 16 | 1080;
+        break;
+    case 115:
+        size = 2560 << 16 | 1440;
+        break;
+    case 116: /* 21:9 */
+        size = 3440 << 16 | 1440;
+        break;
+    case 117: /* 16:9, UHD */
+        size = 3840 << 16 | 2160;
         break;
     default:
         return 0;
     }
+    *w = size >> 16;
+    *h = size & 0xffff;
     return *w <= d->geo[2] && *h <= d->geo[3] && (*w < d->geo[2] || *h < d->geo[3]);
 }
+/* Bits per pixel of a depth mode (128, 129, 130); 0 for any other. */
 static u32 bits(u32 depth_mode) {
     return depth_mode == DEPTH8 ? 8 : depth_mode == DEPTH8 + 1 ? 16 : depth_mode == DEPTH32 ? 32 : 0;
 }
@@ -131,9 +180,11 @@ static u32 bits(u32 depth_mode) {
 static u32 row_bytes(const struct Data *d, u32 mode, u32 w, u32 b) {
     return mode == BOOT_MODE && b == 32 ? d->geo[1] : (w * (b / 8) + 255) / 256 * 256;
 }
+/* The current mode: the firmware's until the first switch. */
 static u32 cur_mode(const struct Data *d) {
     return d->mode ? d->mode : BOOT_MODE;
 }
+/* The current depth mode: 32 bits until the first switch. */
 static u32 cur_depth(const struct Data *d) {
     return d->depth ? d->depth : DEPTH32;
 }
@@ -175,6 +226,7 @@ static u32 logical(struct Data *d, u32 phys) {
     }
     return phys;
 }
+/* The current framebuffer's logical address: the engine's after a switch, the firmware's before. */
 static u32 cur_base(struct Data *d) {
     return logical(d, d->base ? d->base : d->geo[0]);
 }
@@ -218,6 +270,8 @@ static int set_gamma(struct Data *d, const u8 *g) {
     return host(5, (u32)d->gamma, 0, 256) ? BAD_ARGUMENT : 0;
 }
 
+/* Asks the engine for a mode and depth; on success it is the current one, with the framebuffer address the engine
+ * chose. */
 static int set_mode(struct Data *d, u32 mode, u32 depth_mode) {
     u32 w, h, b = bits(depth_mode);
     if (!b || !mode_size(d, mode, &w, &h))

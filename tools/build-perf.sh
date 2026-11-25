@@ -10,7 +10,7 @@ case "${1:-}" in
 esac
 out=build/perf-20261022-sol
 mkdir -p "$out"
-tests='fp-directed-jit fpr-cache-jit fp-fmas-jit fpscr-lazy-jit vmx-integer-jit vmx-fp-jit vmx-mem-jit mfcr-fuse-jit fp-more-jit vmx-fp2-jit jit-check-state fp-mixed-add-jit fpscr-fr cpu-config fp-kernels-jit fp-moves-jit ras-jit prof-jit vmx-chain-jit'
+tests='fp-directed-jit fpr-cache-jit fp-fmas-jit fpscr-lazy-jit vmx-integer-jit vmx-fp-jit vmx-mem-jit mfcr-fuse-jit fp-more-jit vmx-fp2-jit jit-check-state fp-mixed-add-jit fpscr-fr cpu-config fp-kernels-jit fp-moves-jit ras-jit prof-jit vmx-chain-jit fctiw-sat-jit why-jit fdiv-zx-jit code-tlbie-jit fp-tiny-jit'
 for test in $tests perf-emission; do
     clang -std=gnu11 -D_DARWIN_C_SOURCE -O2 -Iepicycle "tests/$test.c" \
         epicycle/interp.c epicycle/altivec.c epicycle/mmu.c -lm -o "$out/$test"

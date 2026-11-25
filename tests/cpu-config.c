@@ -41,6 +41,9 @@ int main(void) {
             for (unsigned n = 0; n < 11; n++)
                 unsetenv(fast[n]);
             unsetenv("PT_FP_DIRECTED");
+            unsetenv("PT_FP_MIXED");
+            unsetenv("PT_FMA_DIRECT_S");
+            unsetenv("PT_FP_MOVES");
             unsetenv("PT_CPU_FAST");
             if (mode == 1)
                 setenv("PT_CPU_FAST", "0", 1);
@@ -55,6 +58,7 @@ int main(void) {
             assert(fma_fast == enabled && fp_hoist_enabled == enabled && fp_lazy_enabled == enabled);
             assert(fp_round_fast == enabled && fp_more_enabled == enabled && fcache_enabled == (enabled && mode != 4));
             assert(!!cr_fuse == enabled && fp_directed_enabled == enabled);
+            assert(!!fp_mixed == enabled && !!fma_single_direct == enabled && !!fp_moves_enabled == enabled);
             assert(vmx_neon_enabled == (enabled && model != 0));
             assert(!!(jmsr & MSR_VEC) == (model != 0));
             if (!model)

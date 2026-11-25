@@ -65,8 +65,8 @@
                                                   userInfo:nil]];
         if (_displayView.inputPolicyEnabled) {
             window.acceptsMouseMovedEvents = YES;
-            _displayView.toolTip =
-                    @"Ctrl+Cmd+G: capture or release the mouse. Ctrl+Cmd+Escape (or Ctrl+Option): release the mouse. Ctrl+Cmd+F: full screen. Cmd+Tab: back to the Mac.";
+            /* No tooltip over the image: it came up whenever the pointer rested on Tiger (GitHub report); the shortcuts
+             * are in the View menu, the release key in the title while the mouse is captured. */
             _displayView.captureChanged = ^(BOOL captured) {
                 PTGuestWindow *owner = weakSelf;
                 if (!owner)
@@ -116,6 +116,8 @@
         [self item:@"Fit" selector:@selector(scaling:) menu:_viewMenu tag:0];
         [self item:@"Integer Scale" selector:@selector(scaling:) menu:_viewMenu tag:1];
         [self item:@"Stretch" selector:@selector(scaling:) menu:_viewMenu tag:2];
+        [self item:@"MetalFX Upscaling" selector:@selector(upscale:) menu:_viewMenu tag:0].state =
+                [actions guestUpscale:NO] ? NSControlStateValueOn : NSControlStateValueOff;
         [window center];
         /* Restart: the previous process handed over its frame; used once, the next restart sets it again. */
         const char *frame = getenv("PT_WINDOW_FRAME");
@@ -204,6 +206,9 @@
 - (void)scaling:(NSMenuItem *)sender {
     if (sender.tag >= 0 && sender.tag < 3)
         [_actions setGuestScaling:sender.tag];
+}
+- (void)upscale:(NSMenuItem *)sender {
+    sender.state = [_actions guestUpscale:YES] ? NSControlStateValueOn : NSControlStateValueOff;
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     (void)sender;

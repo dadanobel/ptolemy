@@ -61,6 +61,12 @@ static void putf(uint32_t a, float v) {
     memcpy(&w, &v, 4);
     wbe32(memory + a, w);
 }
+static float rbe32f(const uint8_t *m) {
+    uint32_t w = (uint32_t)m[0] << 24 | (uint32_t)m[1] << 16 | (uint32_t)m[2] << 8 | m[3];
+    float f;
+    memcpy(&f, &w, 4);
+    return f;
+}
 static void putd(uint32_t a, double v) {
     uint64_t w;
     memcpy(&w, &v, 8);
@@ -80,12 +86,30 @@ static const uint32_t K_MANDEL[] = {0xfc0a02b2, 0x38420001, 0xfc0b02f8, 0xfd6800
 static const uint32_t K_FPB[] = {0x7c020378, 0xc1820008, 0xc162000c, 0xec1ff02a, 0x38020010, 0xedac582a,
                                  0xec0007f2, 0xedac0372, 0xed5f07ba, 0xd0020000, 0xc3c20014, 0xc3e20010,
                                  0xed8c6afa, 0xd1a20008, 0xd1420004, 0xd182000c, 0x4200ffc0};
+/* lfs f1,0(r2); fmuls f2,f1,f31; fctiwz f0,f2; stfd f0,0(r3); fctiw f4,f1; stfd f4,8(r3); the two integers folded
+ * into r6; next float. UT2004 converts values of 2^31 and more this way: saturated in the JIT (fctiw_sat). */
+static const uint32_t K_FCTIW[] = {0xc0220000, 0xec4107f2, 0xfc00101e, 0xd8030000, 0xfc80081c, 0xd8830008, 0x80a30004,
+                                   0x80e3000c, 0x7cc62a14, 0x7cc63a78, 0x54c6083e, 0x38420004, 0x4200ffd0};
+/* lfs f1,0(r2); lfs f2,4(r2); fdivs f3,f1,f2; fdiv f5,f1,f2; fadds f4,f4,f3; stfs f3,0(r3); stfd f5,8(r3); next float.
+ * Zero divisors all along (UT2004: 1.0 / 0.0): an exact infinity with ZX, in the JIT. */
+static const uint32_t K_FDIV[] = {0xc0220000, 0xc0420004, 0xec611024, 0xfca11024, 0xec84182a,
+                                  0xd0630000, 0xd8a30008, 0x38420004, 0x4200ffe0};
+/* The whole of Xbench's timed loop (0x6988-0x69e8): outer passes (r9) over the 16 KB array at r31, 1023 inner
+ * iterations each; the data turns to +Inf and zero pairs on its own after its first passes, as in Xbench. */
+static const uint32_t K_XBFULL[] = {0xc3ff0000, 0xc3cb0000, 0x380003ff, 0x7fe2fb78, 0x7c0903a6, 0x48000008, 0x7c020378,
+                                    0xc1820008, 0xc162000c, 0xec1ff02a, 0x38020010, 0xedac582a, 0xec0007f2, 0xedac0372,
+                                    0xed5f07ba, 0xd0020000, 0xc3c20014, 0xc3e20010, 0xed8c6afa, 0xd1a20008, 0xd1420004,
+                                    0xd182000c, 0x4200ffc0, 0x3529ffff, 0x4082ffa0};
 static const Kernel kernels[] = {
         {"gb2-dot", K_DOT, 5},           {"gb2-lu", K_LU, 9},
         {"gb2-mandel", K_MANDEL, 14},    {"xb-fpbasic-inf", K_FPB, 17},
         {"xb-fpbasic-zero", K_FPB, 17},  {"xb-fpbasic-normal", K_FPB, 17},
         {"gb2-dot-double-sum", K_DOT, 5}, /* a sum not exactly single at entry (single-format cache) */
-        {"xb-fpbasic-specials", K_FPB, 17}}; /* every single class through lfs, the special paths and the eager forms */
+        {"xb-fpbasic-specials", K_FPB, 17}, /* every single class through lfs, the special paths and the eager forms */
+        {"ut-fctiw", K_FCTIW, 13}, /* in range, 2^31 and beyond, Inf, NaN: no interpreter for the conversions */
+        {"ut-fdiv0", K_FDIV, 9}, /* finite / zero: no interpreter either */
+        {"xb-fpbasic-mixed", K_FPB, 17}, /* Xbench's own array after its first passes: +Inf and zero pairs mixed */
+        {"xb-fpbasic-full", K_XBFULL, 25}}; /* Xbench's timed loop as it is: iters = outer passes */
 static CPU prepare(unsigned k, uint32_t iters) { /* the kernel's data and registers (Geekbench / Xbench layouts) */
     CPU c = initial();
     memset(memory, 0, 1 << 20);
@@ -130,6 +154,29 @@ static CPU prepare(unsigned k, uint32_t iters) { /* the kernel's data and regist
         putf(0x10000, (float)c.fpr[31]);
         putf(0x10004, (float)c.fpr[30]);
     }
+    if (x->ins == K_XBFULL) { /* Xbench: (random % 2000 - 2000) / 1000, here a fixed sequence over the same range */
+        c.gpr[31] = 0x10000;
+        c.gpr[11] = 0x10004;
+        c.gpr[9] = iters;
+        for (uint32_t i = 0; i < 4096 + 2; i++)
+            putf(0x10000 + 4 * i, -(float)(1 + (i * 7919) % 2000) / 1000.0f);
+    }
+    if (!strcmp(x->name, "xb-fpbasic-mixed")) { /* the pair map (p, q) -> (p(p+q), pq + p(p+q)), 30 passes over
+                                                 * Xbench's starting range: 83% (+Inf, +Inf) and 17% (0, 0) pairs */
+        c.gpr[0] = 0x10000;
+        for (uint32_t i = 0; i < 2 * (iters + 1) && 0x10000 + 8 * i + 8 <= (1u << 20); i++) {
+            float p = -(float)(1 + (2 * i * 7919) % 1999) / 1000.0f, q = -(float)(1 + (2 * i * 7919 + 7919) % 1999) / 1000.0f;
+            for (int k2 = 0; k2 < 30; k2++) {
+                float t = (p + q) * p;
+                q = fmaf(p, q, t);
+                p = t;
+            }
+            putf(0x10000 + 8 * i, p);
+            putf(0x10004 + 8 * i, q);
+        }
+        c.fpr[31] = rbe32f(memory + 0x10000);
+        c.fpr[30] = rbe32f(memory + 0x10004);
+    }
     if (!strcmp(x->name, "xb-fpbasic-specials")) { /* zeros, denormals, normals, tiny and huge, Inf, QNaN, SNaN */
         static const uint32_t s[16] = {0x00000000, 0x80000000, 0x00000001, 0x807fffff, 0x00800000, 0x3f800000,
                                        0xbfc00000, 0x7f7fffff, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc12345,
@@ -144,10 +191,38 @@ static CPU prepare(unsigned k, uint32_t iters) { /* the kernel's data and regist
         c.fpr[31] = 1.0;
         c.fpr[30] = -1.5;
     }
+    if (!strcmp(x->name, "ut-fctiw")) {
+        static const uint32_t s[16] = {0x00000000, 0x80000000, 0x3fc00000, 0xc0200000, 0x4f000000, 0xcf000000,
+                                       0x4effffff, 0x4f32d05e, 0xcf32d05e, 0x60ad78ec, 0x7f800000, 0xff800000,
+                                       0x7fc00000, 0x7f800001, 0x4e2aaaab, 0x00011111};
+        c.gpr[2] = 0x10000;
+        c.gpr[3] = 0x9000;
+        for (uint32_t i = 0; 0x10000 + 4 * i < (1u << 20); i++) {
+            uint32_t h = i * 0x9E3779B9u;
+            h ^= h >> 15;
+            h *= 0x85EBCA6Bu;
+            wbe32(memory + 0x10000 + 4 * i, s[(h ^ h >> 13) >> 28]);
+        }
+        c.fpr[31] = 3.0;
+    }
+    if (!strcmp(x->name, "ut-fdiv0")) {
+        static const uint32_t s[8] = {0x00000000, 0x80000000, 0x3f800000, 0xc0200000,
+                                      0x00000000, 0x41200000, 0x7f800000, 0x3eaaaaab};
+        c.gpr[2] = 0x10000;
+        c.gpr[3] = 0x9000;
+        for (uint32_t i = 0; 0x10000 + 4 * i < (1u << 20); i++) {
+            uint32_t h = i * 0x9E3779B9u;
+            h ^= h >> 15;
+            h *= 0x85EBCA6Bu;
+            wbe32(memory + 0x10000 + 4 * i, s[(h ^ h >> 13) >> 29]);
+        }
+    }
     c.ctr = iters;
     return c;
 }
 static CPU *shadow; /* the interpreter in step, compared at every exit: the state an interrupt there would see */
+static unsigned fctiw_handed; /* fctiw(z) instructions that the JIT handed to the interpreter */
+static unsigned fdiv0_handed; /* fdiv(s) of a finite non-zero value by zero, RN nearest, handed to the interpreter */
 static CPU run(CPU c, unsigned n) { /* as jit_run: links, interpreter steps, until the illegal word after the loop */
     uint32_t end = 0x1000 + 4 * n;
     pthread_jit_write_protect_np(0);
@@ -174,8 +249,14 @@ static CPU run(CPU c, unsigned n) { /* as jit_run: links, interpreter steps, unt
             pthread_jit_write_protect_np(1);
             continue;
         }
-        if (why == X_INTERP && c.pc != end)
+        if (why == X_INTERP && c.pc != end) {
+            uint32_t w = be32(c.mem + c.pc);
+            fctiw_handed += w >> 26 == 63 && (w >> 1 & 0x3fe) == 14;
+            double x = c.fpr[w >> 16 & 31], y = c.fpr[w >> 11 & 31];
+            fdiv0_handed += (w >> 26 == 59 || w >> 26 == 63) && (w >> 1 & 31) == 18 && y == 0 && isfinite(x) &&
+                            x != 0 && !(c.fpscr & 0xfb);
             assert(interp_step(&c) == 0);
+        }
         if (why == X_FSF) {
             pthread_jit_write_protect_np(0);
             int k = jit_fsf_fail(&c);
@@ -327,9 +408,10 @@ int main(int argc, char **argv) {
     for (unsigned k = 0; k < sizeof kernels / sizeof *kernels; k++) {
         const Kernel *x = &kernels[k];
         if (!bench) { /* specials: then 4-iteration runs along the data, so each run's first status bits are compared */
-            for (uint32_t o = 0; o < (strcmp(x->name, "xb-fpbasic-specials") ? 1u : 3000u); o += 4) {
-                CPU c = prepare(k, o ? 4 : 3000);
-                c.gpr[0] += 16 * o;
+            int ut = !strncmp(x->name, "ut-", 3), along = ut || !strcmp(x->name, "xb-fpbasic-specials");
+            for (uint32_t o = 0; o < (along ? 3000u : 1u); o += 4) {
+                CPU c = prepare(k, o ? 4 : x->ins == K_XBFULL ? 40 : 3000);
+                c.gpr[ut ? 2 : 0] += (ut ? 4 : 16) * o;
                 if (o % 64 == 32) /* RN 1-3: the directed form on the guard's slow path (PT_FP_DIRECTED=0: the interpreter) */
                     c.fpscr |= 1 + o / 64 % 3;
                 memcpy(reference, memory, 1 << 20);
@@ -337,9 +419,10 @@ int main(int argc, char **argv) {
                 r.mem = r.vbase = reference;
                 r.preg[0].host = reference;
                 reset();
-                shadow = strcmp(x->name, "xb-fpbasic-specials") ? NULL : &r;
+                shadow = along ? &r : NULL;
                 c = run(c, x->n);
                 shadow = NULL;
+                assert(!fctiw_handed && !fdiv0_handed);
                 while (r.pc != c.pc)
                     assert(interp_step(&r) == 0);
                 ppc_fp_settle(&c);
@@ -350,13 +433,15 @@ int main(int argc, char **argv) {
             }
             continue;
         }
-        /* Iterations within each kernel's data (Dot: 60000 floats, LU: 40K doubles, FP Basic: 16 bytes each); the
-         * Mandelbrot loop may leave early (escape), so time is divided by the iterations actually run (CTR). */
+        /* Iterations within each kernel's data (Dot: 60000 floats, LU: 40K doubles); FP Basic as Xbench runs it: 1023
+         * iterations over its 16 KB array (in L1), 200 times. The Mandelbrot loop may leave early (escape), so time is
+         * divided by the iterations actually run (CTR). */
         double t[7];
-        uint32_t iters = k == 0 ? 60000 : k == 1 ? 39000 : k == 2 ? 2000000 : 60000;
+        int full = x->ins == K_XBFULL;
+        uint32_t iters = k == 0 ? 60000 : k == 1 ? 39000 : k == 2 ? 2000000 : full ? 3680 : 60000;
         for (unsigned i = 0; i < 7; i++) {
             uint64_t ns = 0, done = 0;
-            for (unsigned r = 0; r < 10; r++) {
+            for (unsigned r = 0; r < (full ? 1u : 10u); r++) {
                 CPU c = prepare(k, iters);
                 if (!i && !r) {
                     reset();
@@ -367,7 +452,7 @@ int main(int argc, char **argv) {
                 uint64_t t0 = jit_now();
                 CPU e = run(c, x->n);
                 ns += jit_now() - t0;
-                done += iters - e.ctr + (k == 2 && e.ctr != 0); /* escape precedes bdnz */
+                done += full ? 1023u * iters : iters - e.ctr + (k == 2 && e.ctr != 0); /* escape precedes bdnz */
             }
             t[i] = (double)ns / (double)(done ? done : 1);
         }
@@ -378,8 +463,11 @@ int main(int argc, char **argv) {
                     t[i] = t[j];
                     t[j] = v;
                 }
-        printf("fp-kernels: %-18s %7.2f ns/iteration (median of 7, min %.2f, max %.2f)%s\n", x->name, t[3], t[0], t[6],
+        printf("fp-kernels: %-18s %7.2f ns/iteration (median of 7, min %.2f, max %.2f)%s", x->name, t[3], t[0], t[6],
                cache ? "" : " no FPR cache");
+        if (full) /* Xbench counts 16384 flop a pass (4 an element); its score is about 42.15 per Gflop/s */
+            printf(", Xbench FP Basic about %.0f", 16384.0 / 1023 / t[3] * 42.15);
+        putchar('\n');
     }
     if (!bench) { /* PT_STATS_BLOCK: the passes of one block's loop are counted in the block itself */
         jit_stats_on = 1;

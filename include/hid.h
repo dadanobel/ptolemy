@@ -10,7 +10,7 @@ enum {
 };
 typedef struct {
     uint8_t keys[8], buttons;
-    int32_t x, y, wheel;
+    int32_t x, y, wheel, pan;
 } PtHidEvent;
 typedef struct {
     pthread_mutex_t lock;
@@ -30,6 +30,8 @@ void pt_hid_reset(PtHid *);
 /* UI producer APIs accept USB HID usages, NOT macOS virtual key codes. */
 void pt_hid_key(PtHid *, unsigned usage, int pressed);
 void pt_hid_pointer(PtHid *, uint8_t buttons, int32_t x, int32_t y, int32_t wheel);
+/* Scroll counts for the relative device (Mighty Mouse: 43 per inch in Tiger's and Leopard's driver): vertical, horizontal. */
+void pt_hid_scroll(PtHid *, int32_t wheel, int32_t pan);
 void pt_hid_release(PtHid *); /* on focus/capture loss */
 /* One USB packet. Returns actual bytes or STALL/NAK. SETUP exactly 8 bytes.
  * SET_ADDRESS takes effect only after the status stage. No AppKit calls. */

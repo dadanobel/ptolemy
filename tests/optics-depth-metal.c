@@ -129,6 +129,95 @@ int main(void) {
         }
         dr.aa_config = 0;
         dr.aa_samples = 0;
+        /* Reused VRAM (Tiger u195 T2 #326): a colour target still GPU-owned, then a tiled ZB at the same address. A read
+         * there exported the stale depth into the owned pages - "busy" - and the device stopped for good. Now the
+         * colour owner is exported, the depth dropped, and the next draw works. */
+        enum {
+            C3 = 0x700000,
+            Z4 = 0x800000
+        };
+        assert(!pt_radeon_mmio(d, 0x4f24, tiled, 4, 1));
+        draw(x, d, C3, Z4, 0.2f, 0, 1, 0);
+        draw(x, d, C0, C3, 0.3f, 1, 0, 0);
+        for (int i = 0; m->fence(x, d) != OPTICS_FENCE_DONE; i++) {
+            assert(i < 5000);
+            usleep(1000);
+        }
+        assert(!m->materialize(x, d, C3, C3 + N * N * 4, 0));
+        uint8_t g[4];
+        assert(!pt_radeon_vram(d, C3 + (N / 2 * N + N / 2) * 4, g, 4, 0));
+        assert((g[0] | g[1] << 8 | g[2] << 16 | (uint32_t)g[3] << 24) == 0xff00ff00u); /* the colour owner's pixel */
+        draw(x, d, C0, 0x900000, 0.5f, 0, 0, 1);
+        assert(pixel(x, d, C0) == 0xff0000ffu);
+        /* ARGB16161616 drawn with OUT_FMT C4_16_FP (Leopard's GL_RGBA16F FBO, u195 #8): the export holds halves (it held
+         * unorm16, 0xffff - a half NaN - for 1.0), and an import reads halves (a pixel outside the scissor survives the
+         * round trip). Channels C0..C3 = B, G, R, A (output selects 0: 0x1b). */
+        enum {
+            C5 = 0xa00000
+        };
+        uint16_t blue[4] = {0x3c00, 0, 0, 0x3c00}, h[4];
+        for (unsigned i = 0; i < N * N; i++)
+            assert(!pt_radeon_vram(d, C5 + i * 8, (uint8_t *)blue, 8, 1));
+        dr.cb_format = 10;
+        dr.cb_bpp = 8;
+        dr.cb_fp16 = 1;
+        dr.depth_enable = dr.depth_write = 0;
+        dr.scissor[0] = dr.scissor[1] = N / 2;
+        draw(x, d, C5, 0xb00000, 0.5f, 1, 0, 0);
+        for (int i = 0; m->fence(x, d) != OPTICS_FENCE_DONE; i++) {
+            assert(i < 5000);
+            usleep(1000);
+        }
+        assert(!m->materialize(x, d, C5, C5 + N * N * 8, 0));
+        assert(!pt_radeon_vram(d, C5 + ((N - 1) * N + N - 1) * 8, (uint8_t *)h, 8, 0));
+        assert(h[0] == 0 && h[1] == 0 && h[2] == 0x3c00 && h[3] == 0x3c00); /* red, as halves */
+        assert(!pt_radeon_vram(d, C5, (uint8_t *)h, 8, 0));
+        assert(!memcmp(h, blue, 8)); /* untouched: blue came back as halves */
+        /* OUT_FMT C_2_10_10_10 (Tiger's GL_RGB10_A2 FBO, selects 0x39: C0..C3 = R, G, B, A): R, G, B in 10 bits from
+         * bit 0 and A in 31:30 of a little-endian word. Opaque red 0xc00003ff; opaque blue 0xfff00000 survives import
+         * and export. */
+        enum {
+            C8 = 0xd40000
+        };
+        uint8_t p4[4];
+        const uint8_t blue10[4] = {0x00, 0x00, 0xf0, 0xff};
+        for (unsigned i = 0; i < N * N; i++)
+            assert(!pt_radeon_vram(d, C8 + i * 4, (uint8_t *)blue10, 4, 1));
+        dr.cb_format = 6;
+        dr.cb_bpp = 4;
+        dr.cb_fp16 = 0;
+        dr.cb_rgb10a2 = 1;
+        dr.cb_select = 0x39;
+        draw(x, d, C8, 0xb00000, 0.5f, 1, 0, 0);
+        for (int i = 0; m->fence(x, d) != OPTICS_FENCE_DONE; i++) {
+            assert(i < 5000);
+            usleep(1000);
+        }
+        assert(!m->materialize(x, d, C8, C8 + N * N * 4, 0));
+        assert(!pt_radeon_vram(d, C8 + ((N - 1) * N + N - 1) * 4, p4, 4, 0) && p4[0] == 0xff && p4[1] == 0x03 &&
+               p4[2] == 0 && p4[3] == 0xc0);
+        assert(!pt_radeon_vram(d, C8, p4, 4, 0) && !memcmp(p4, blue10, 4));
+        /* A VRAM target keeps native bytes whatever COLOR_ENDIAN (the R300 swaps at the bus, for guest RAM): an
+         * ARGB4444 target drawn with 1 (Leopard's GL_RGBA4 FBO, u207 #3) holds opaque red as 0xff00 little-endian. */
+        enum {
+            C9 = 0xd80000
+        };
+        uint8_t q2[2];
+        dr.scissor[0] = dr.scissor[1] = 0;
+        dr.cb_format = 15;
+        dr.cb_bpp = 2;
+        dr.cb_rgb10a2 = 0;
+        dr.cb_select = 0;
+        dr.cb_endian = 1;
+        draw(x, d, C9, 0xb00000, 0.5f, 1, 0, 0);
+        for (int i = 0; m->fence(x, d) != OPTICS_FENCE_DONE; i++) {
+            assert(i < 5000);
+            usleep(1000);
+        }
+        assert(!m->materialize(x, d, C9, C9 + N * N * 2, 0));
+        assert(!pt_radeon_vram(d, C9, q2, 2, 0) && q2[0] == 0x00 && q2[1] == 0xff);
+        dr.scissor[0] = dr.scissor[1] = 0;
+        dr.cb_format = dr.cb_bpp = dr.cb_fp16 = dr.cb_rgb10a2 = dr.cb_select = dr.cb_endian = 0;
     }
     m->destroy(x, d);
     pt_radeon_close(d);

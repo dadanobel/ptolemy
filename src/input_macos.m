@@ -22,7 +22,8 @@
     BOOL _captured, _modernPointer, _previousCoalescing;
     CGPoint _captureOrigin;
     uint8_t _modifiers[8], _buttons;
-    double _dx, _dy, _wheel;
+    double _dx, _dy, _wheel, _pan, _scrollAt;
+    int32_t _panOut;
     NSTrackingArea *_tracking;
     BOOL _agentCursorKnown, _agentCursorHidden;
     BOOL _inputPolicyEnabled, _autoBlocked, _automaticCapture, _sawGuestCursor, _autoEnabled;
@@ -128,7 +129,7 @@ static NSCursor *blank_cursor(void) {
     }
     memset(_modifiers, 0, sizeof _modifiers);
     _buttons = 0;
-    _dx = _dy = _wheel = 0;
+    _dx = _dy = _wheel = _pan = 0;
     if (_inputPolicyEnabled) {
         memset(_keys, 0, sizeof _keys);
         /* A key still physically held after release must not be re-pressed
@@ -646,7 +647,9 @@ static NSCursor *blank_cursor(void) {
     _sentAt = pt_cursor_now();
     _lastAbsolute = p;
     if (_sink.send) {
-        PtInputEvent event = {.type = PT_INPUT_ABSOLUTE, .buttons = _buttons, .x = ax, .y = ay, .wheel = wheel};
+        PtInputEvent event = {
+                .type = PT_INPUT_ABSOLUTE, .buttons = _buttons, .x = ax, .y = ay, .wheel = wheel, .pan = _panOut};
+        _panOut = 0;
         _sink.send(_sink.opaque, &event);
     }
 }
@@ -659,10 +662,30 @@ static NSCursor *blank_cursor(void) {
         return;
     if (_inputPolicyEnabled && motion && [self tryAutomaticCapture])
         return;
-    if (scroll)
-        _wheel +=
-                _modernPointer ? pt_pointer_scroll(e.scrollingDeltaY, e.hasPreciseScrollingDeltas) : e.scrollingDeltaY;
+    if (scroll) { /* counts of the guest's Mighty Mouse (hid.c) */
+        /* Tiger's and Leopard's driver scroll v counts/s as 0.6 * v^1.25 lines/s (u240): precise deltas go at the speed
+         * that gives the host's pixels at PT_SCROLL_LINE_PX pixels a line (12); wheel lines as PT_SCROLL_LINE counts (1). */
+        static double line_px = -1, per_line;
+        if (line_px < 0) {
+            const char *v = getenv("PT_SCROLL_LINE_PX"), *l = getenv("PT_SCROLL_LINE");
+            line_px = v && atof(v) > 0 ? atof(v) : 12;
+            per_line = l && atof(l) > 0 ? atof(l) : 1;
+        }
+        double dt = fmin(0.1, fmax(1.0 / 240, e.timestamp - _scrollAt));
+        _scrollAt = e.timestamp;
+        double dy = e.scrollingDeltaY, dx = -e.scrollingDeltaX; /* AC Pan: positive scrolls right */
+        if (e.hasPreciseScrollingDeltas) {
+            dy = isfinite(dy) ? copysign(pow(fabs(dy) / dt / (0.6 * line_px), 0.8) * dt, dy) : 0;
+            dx = isfinite(dx) ? copysign(pow(fabs(dx) / dt / (0.6 * line_px), 0.8) * dt, dx) : 0;
+        } else {
+            dy = pt_pointer_scroll(dy, per_line);
+            dx = pt_pointer_scroll(dx, per_line);
+        }
+        _wheel += dy;
+        _pan += dx;
+    }
     int32_t wheel = pt_pointer_whole(&_wheel);
+    _panOut = pt_pointer_whole(&_pan);
     if (_captured && _sink.send) {
         if (motion) {
             _dx += e.deltaX;
@@ -670,7 +693,9 @@ static NSCursor *blank_cursor(void) {
         }
         int32_t x = pt_pointer_whole(&_dx), y = pt_pointer_whole(&_dy);
         if (_sink.send) {
-            PtInputEvent event = {.type = PT_INPUT_RELATIVE, .buttons = _buttons, .x = x, .y = y, .wheel = wheel};
+            PtInputEvent event = {
+                    .type = PT_INPUT_RELATIVE, .buttons = _buttons, .x = x, .y = y, .wheel = wheel, .pan = _panOut};
+            _panOut = 0;
             _sink.send(_sink.opaque, &event);
         }
     } else if (_sink.send && self.bounds.size.width > 0 && self.bounds.size.height > 0) {

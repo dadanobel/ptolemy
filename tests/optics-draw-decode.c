@@ -79,6 +79,40 @@ int main(void) {
         }
         optics_r300_state_destroy(s);
     }
-    puts("optics-draw-decode: ok (stream elements, VAP swaps, source pixel discard only while blending, DXT1 alpha)");
+    { /* One US program has one identity whatever lies in the words it does not run: a texture instruction of a node
+       * without lookups, the address word of an unused node, an ALU instruction outside the node's range. */
+        OpticsR300State *s = optics_r300_state_create(1);
+        assert(s);
+        triangle_state(s);
+        wr(s, 0x4e38, 6u << 21 | 64);
+        passthrough(s);
+        for (unsigned b = 0; b < 4; b++)
+            wr(s, 0x46c4 + b * 0x100, 0);
+        wr(s, 0x4608, 1u << 6); /* two ALU instructions captured, the node runs the first */
+        const unsigned stale[][2] = {{0x4620, 0x18041}, {0x4610, 0x123}, {0x46c4, 0x1c020040}, {0x49c4, 0x40509},
+                                     {0x461c, 0x400000 | 3u << 12}};
+        uint64_t id[2] = {0, 0};
+        for (unsigned c = 0; c < 7; c++) {
+            OpticsDraw d;
+            const char *why = NULL;
+            if (c && c < 6)
+                wr(s, stale[c - 1][0], stale[c - 1][1]);
+            if (c == 6)
+                wr(s, 0x49c0, 9u | (17u << 7) | (17u << 14)); /* the instruction the node runs: another program */
+            if (!optics_draw_build(&d, regs, s, 0x35, TRIANGLE, 13, NULL, NULL, NULL, &why)) {
+                fprintf(stderr, "%s\n", why);
+                assert(0);
+            }
+            if (c && c < 6)
+                assert(d.us_id == id[0]);
+            else
+                id[c == 6] = d.us_id;
+            optics_draw_free(&d);
+        }
+        assert(id[0] && id[1] && id[0] != id[1]);
+        optics_r300_state_destroy(s);
+    }
+    puts("optics-draw-decode: ok (stream elements, VAP swaps, source pixel discard only while blending, DXT1 alpha, "
+         "one identity for a US program)");
     return 0;
 }

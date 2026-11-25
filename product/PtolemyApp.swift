@@ -385,7 +385,7 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSDra
         guard !busy, let folder = selected else { return }
         do {
             var item = try Installation.load(folder)
-            let (alert, cpu, ram, disk) = settingsAlert(item)
+            let (alert, cpu, ram, disk, display, upscale, scale) = settingsAlert(item)
             alert.beginSheetModal(for: window) { response in
                 if response == .alertThirdButtonReturn {
                     self.work {
@@ -403,6 +403,10 @@ final class PtolemyApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSDra
                 guard response == .alertFirstButtonReturn else { return }
                 item.cpu = cpuChoices(item)[cpu.indexOfSelectedItem].id
                 item.ram = Int(ram.titleOfSelectedItem!)!
+                item.display = display.indexOfSelectedItem > 0 ? displayModes[display.indexOfSelectedItem] : nil
+                item.upscale = upscale.state == .on
+                let chosen = renderScales[scale.indexOfSelectedItem]
+                item.renderScale = chosen == defaultRenderScale ? nil : chosen  // nil follows the default
                 guard let size = Int(disk.stringValue), size >= item.diskGiB && size <= 120 else {
                     self.show(InstallError("Disk size must stay the same or increase, up to 120 GB"))
                     return

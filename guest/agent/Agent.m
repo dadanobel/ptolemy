@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <string.h>
 #include <dlfcn.h>
 #include <sys/utsname.h>
 #include "sleep_guard.h"
@@ -22,15 +23,103 @@
     PtSleepGuard sleepGuard;
     void *powerLibrary;
     NSMenuItem *sleepItem;
+    NSMenu *games;
+    unsigned frontTries;
 }
 - (void)toggle:(id)sender;
 - (void)guestSleep:(id)sender;
+- (void)openGame:(id)sender;
+- (void)append:(NSData *)data;
+- (void)recentGame:(id)sender;
 - (void)show:(id)sender;
 - (void)antiochus:(id)sender;
 - (void)rosettast:(id)sender;
 - (void)poll:(NSTimer *)sender;
 @end
 @implementation PtolemyAgent
+/* DrawSprocket games (guest/dsp/ptdsp.c): started from this menu with the shim of the installed Tools in their
+ * environment. The session's environment cannot carry it: Tiger's loginwindow drops DYLD_* from
+ * ~/.MacOSX/environment.plist, and in Leopard a library named there and missing stops Finder and the Dock (u215). */
+static NSString *shim_path(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Ptolemy/current/ptdsp.dylib"];
+}
+/* The submenu: Open..., a separator, then the games started from it, the latest first. */
+- (void)listGames {
+    while ([games numberOfItems] > 2)
+        [games removeItemAtIndex:2];
+    NSEnumerator *e = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"DrawSprocketGames"] objectEnumerator];
+    NSString *path;
+    while ((path = [e nextObject])) {
+        NSMenuItem *m = [games addItemWithTitle:[[NSFileManager defaultManager] displayNameAtPath:path]
+                                         action:@selector(recentGame:)
+                                  keyEquivalent:@""];
+        [m setTarget:self];
+        [m setRepresentedObject:path];
+    }
+}
+/* A program started by NSTask does not come to the front by itself: once its process is known to the window server. */
+- (void)front:(NSTimer *)t {
+    ProcessSerialNumber psn;
+    if (GetProcessForPID([[t userInfo] intValue], &psn) == noErr) {
+        SetFrontProcess(&psn);
+        [t invalidate];
+    } else if (++frontTries > 40)
+        [t invalidate];
+}
+- (void)play:(NSString *)path {
+    NSFileManager *files = [NSFileManager defaultManager];
+    BOOL folder = NO;
+    NSString *program = path;
+    if ([files fileExistsAtPath:path isDirectory:&folder] && folder)
+        program = [[NSBundle bundleWithPath:path] executablePath];
+    NSData *head = program ? [[NSFileHandle fileHandleForReadingAtPath:program] readDataOfLength:8] : nil;
+    NSMutableDictionary *env = [NSMutableDictionary dictionaryWithDictionary:[[NSProcessInfo processInfo] environment]];
+    NSTask *game = [[[NSTask alloc] init] autorelease];
+    [env setObject:shim_path() forKey:@"DYLD_INSERT_LIBRARIES"];
+    [game setEnvironment:env];
+    if ([head length] == 8 && !memcmp([head bytes], "Joy!peff", 8)) { /* CFM: Apple's loader runs it, as Finder does */
+        [game setLaunchPath:@"/System/Library/Frameworks/Carbon.framework/Versions/A/Support/LaunchCFMApp"];
+        [game setArguments:[NSArray arrayWithObject:program]];
+    } else if (program)
+        [game setLaunchPath:program];
+    @try {
+        if (!program || ![files fileExistsAtPath:shim_path()])
+            [NSException raise:@"Ptolemy" format:@"%@", program ? @"The shim of Ptolemy Tools is missing" : @"Not a program"];
+        [game launch];
+    } @catch (NSException *x) {
+        [NSApp activateIgnoringOtherApps:YES];
+        NSRunAlertPanel([[files displayNameAtPath:path] stringByAppendingString:@" could not be started"], @"%@", @"OK",
+                        nil, nil, [x reason]);
+        return;
+    }
+    NSMutableArray *recent = [NSMutableArray arrayWithObject:path];
+    NSEnumerator *e = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"DrawSprocketGames"] objectEnumerator];
+    NSString *other;
+    while ((other = [e nextObject]) && [recent count] < 6)
+        if (![other isEqualToString:path])
+            [recent addObject:other];
+    [[NSUserDefaults standardUserDefaults] setObject:recent forKey:@"DrawSprocketGames"];
+    [self listGames];
+    frontTries = 0;
+    [NSTimer scheduledTimerWithTimeInterval:0.25
+                                     target:self
+                                   selector:@selector(front:)
+                                   userInfo:[NSNumber numberWithInt:[game processIdentifier]]
+                                    repeats:YES];
+    [self append:[[NSString stringWithFormat:@"DrawSprocket game started with the shim: %@\n", path]
+                         dataUsingEncoding:NSUTF8StringEncoding]];
+}
+- (void)openGame:(id)sender {
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    [NSApp activateIgnoringOtherApps:YES];
+    [panel setTitle:@"Start a DrawSprocket Game"];
+    if ([panel runModalForDirectory:@"/Applications" file:nil types:nil] == NSOKButton)
+        [self play:[panel filename]];
+}
+- (void)recentGame:(id)sender {
+    [self play:[sender representedObject]];
+}
 - (void)guestSleep:(id)sender {
     BOOL enable = sender ? !sleepGuard.active : YES;
     int e = pt_sleep_guard_set(&sleepGuard, enable);
@@ -117,6 +206,18 @@
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Quit Ptolemy Agent" action:@selector(terminate:) keyEquivalent:@"q"];
     [item setMenu:menu];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:shim_path()]) {
+        games = [[NSMenu alloc] initWithTitle:@"DrawSprocket Games"];
+        [[games addItemWithTitle:[NSString stringWithUTF8String:"Open\xe2\x80\xa6"]
+                          action:@selector(openGame:)
+                   keyEquivalent:@""] setTarget:self];
+        [games addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *g = [[[NSMenuItem alloc] initWithTitle:@"DrawSprocket Games (Cro-Mag Rally)" action:NULL
+                                             keyEquivalent:@""] autorelease];
+        [g setSubmenu:games];
+        [menu insertItem:g atIndex:[menu indexOfItemWithTitle:@"Antiochus"] + 1]; /* above the separator and Quit */
+        [self listGames];
+    }
     struct utsname os;
     if (!uname(&os) && atoi(os.release) >= 9) {
         powerLibrary = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY | RTLD_LOCAL);

@@ -13,11 +13,11 @@ int main(void) {
     x = 0;
     n = 0;
     for (unsigned k = 0; k < 100; k++) {
-        x += pt_pointer_scroll(0.5, 1);
+        x += pt_pointer_scroll(0.5, 0.1);
         n += pt_pointer_whole(&x);
     }
     assert(n >= 4 && n <= 5);
-    assert(pt_pointer_scroll(3, 0) == 3);
+    assert(pt_pointer_scroll(3, 4) == 12 && pt_pointer_scroll(NAN, 4) == 0);
     x = NAN;
     assert(!pt_pointer_whole(&x) && x == 0);
     x = 1e100;

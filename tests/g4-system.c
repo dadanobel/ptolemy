@@ -17,6 +17,64 @@ static void step(CPU *c, uint32_t in) {
     wbe32(c->mem + 0x100, in);
     (void)interp_step(c);
 }
+/* Little-endian mode (MSR[LE]): fetch and data accesses are munged (Virtual PC's x86 code runs so). The word at 0x100
+ * of a little-endian program is the big-endian word at 0x104; 0x100 holds 0, an illegal instruction. */
+static void le_step(CPU *c, uint32_t in) {
+    wbe32(c->mem + 0x100, 0);
+    wbe32(c->mem + 0x104, in);
+    c->pc = 0x100;
+    (void)interp_step(c);
+    assert(c->pc == 0x104);
+}
+static void little_endian(void) {
+    CPU *c = calloc(1, sizeof *c);
+    assert(c);
+    c->mem = calloc(1, 0x10000);
+    assert(c->mem);
+    c->preg[0] = (PRegion){0, 0x10000, c->mem, 0};
+    c->npreg = 1;
+    c->sys = 1;
+    c->spr[287] = 0x80030102;
+    c->msr = MSR_LE | MSR_FP | MSR_VEC;
+    c->gpr[3] = 0x2000;
+    c->gpr[4] = 0x11223344;
+    le_step(c, 36u << 26 | 4 << 21 | 3 << 16); /* stw r4,0(r3): the big-endian word at 0x2004 */
+    assert(be32(c->mem + 0x2004) == 0x11223344 && !be32(c->mem + 0x2000));
+    le_step(c, 34u << 26 | 5 << 21 | 3 << 16); /* lbz r5,0(r3): the low-order byte */
+    assert(c->gpr[5] == 0x44);
+    le_step(c, 40u << 26 | 5 << 21 | 3 << 16 | 2); /* lhz r5,2(r3) */
+    assert(c->gpr[5] == 0x1122);
+    le_step(c, 32u << 26 | 5 << 21 | 3 << 16 | 1); /* lwz r5,1(r3): misaligned in a doubleword */
+    assert(c->gpr[5] == 0x00112233);
+    for (unsigned i = 0; i < 16; i++)
+        c->mem[0x2000 + i] = i;
+    le_step(c, 32u << 26 | 5 << 21 | 3 << 16 | 6); /* lwz r5,6(r3): bytes 6,7 at 1,0 and 8,9 at 15,14 */
+    assert(c->gpr[5] == 0x0e0f0001);
+    le_step(c, 36u << 26 | 5 << 21 | 3 << 16 | 0x16); /* stw r5,0x16(r3): the same pieces at 0x2010 */
+    assert(be16(c->mem + 0x2010) == 0x0001 && be16(c->mem + 0x201e) == 0x0e0f && !be32(c->mem + 0x2012));
+    le_step(c, x(534, 5, 0, 3)); /* lwbrx: big-endian order */
+    assert(c->gpr[5] == 0x07060504);
+    uint64_t f = 0x0102030405060708ull;
+    memcpy(&c->fpr[1], &f, 8);
+    le_step(c, 54u << 26 | 1 << 21 | 3 << 16 | 0x20); /* stfd f1,0x20(r3): a doubleword is not munged */
+    assert(be32(c->mem + 0x2020) == 0x01020304 && be32(c->mem + 0x2024) == 0x05060708);
+    le_step(c, 34u << 26 | 5 << 21 | 3 << 16 | 0x20); /* lbz r5,0x20(r3) */
+    assert(c->gpr[5] == 0x08);
+    c->gpr[6] = 0x2004;
+    c->gpr[7] = 0x2030;
+    le_step(c, x(103, 1, 0, 3)); /* lvx: doublewords swapped */
+    le_step(c, x(71, 2, 0, 6));  /* lvewx of word 1: at 0x2000, into element 2 */
+    le_step(c, x(231, 1, 0, 7)); /* stvx: back as it was */
+    for (unsigned i = 0; i < 16; i++)
+        assert(c->vr[1][i] == (i + 8) % 16 && c->mem[0x2030 + i] == i);
+    assert(be32(c->vr[2] + 8) == 0x00010203);
+    c->pc = 0x104; /* tw 31,0,0: the handler runs with LE = ILE */
+    wbe32(c->mem + 0x100, 0x7fe00008);
+    (void)interp_step(c);
+    assert(c->pc == 0x700 && !(c->msr & MSR_LE) && c->spr[SPR_SRR1] & MSR_LE);
+    free(c->mem);
+    free(c);
+}
 static void profile(uint32_t pvr) {
     CPU *c = calloc(1, sizeof *c);
     assert(c);
@@ -296,6 +354,7 @@ static void dec_behind_ext(
 int main(void) {
     trace_unimpl = 0;
     dec_behind_ext();
+    little_endian();
     profile(0x000c0209);
     profile(0x80030102);
     vector_memory(0x000c0209);
@@ -312,5 +371,5 @@ int main(void) {
     c.spr[287] = 0x00080301;
     step(&c, 0x10000484);
     assert(c.pc == 0x700 && (c.spr[SPR_SRR1] & 0x80000));
-    puts("G4: all 18 VMX memory/stream forms; VEC/DSI, rfi/mtmsr, VRSAVE, fenv; EAR external bus, high/extended BATs, software TLB/C-bit/miss/index invalidation; 7447A L2CR/L3CR; G3 illegal; DEC behind EXT: PASS");
+    puts("G4: all 18 VMX memory/stream forms; VEC/DSI, rfi/mtmsr, VRSAVE, fenv; EAR external bus, high/extended BATs, software TLB/C-bit/miss/index invalidation; 7447A L2CR/L3CR; G3 illegal; DEC behind EXT; little-endian mode: PASS");
 }

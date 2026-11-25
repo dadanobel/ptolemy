@@ -13,6 +13,16 @@ static inline float pt_r2_fp_in(float x, unsigned profile) {
     memcpy(&x, &b, 4);
     return x;
 }
+/* The R300's fragment ALU is fp24 (16-bit mantissa): RS hands it the vertex stage's fp32 values, and the driver packs
+ * its fragment constants the same way, truncating (38.2 -> 0x443199, u200 #199). An input kept at fp32 compares
+ * unequal to the constant it was written as (piglit fs-notEqual-of-expression). */
+static inline float pt_r2_fp24(float x) {
+    uint32_t b;
+    memcpy(&b, &x, 4);
+    b &= 0xffffff80u;
+    memcpy(&x, &b, 4);
+    return x;
+}
 static inline float pt_r2_fp_out(float x, unsigned profile) {
     uint32_t b;
     memcpy(&b, &x, 4);

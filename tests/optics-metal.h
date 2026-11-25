@@ -2,6 +2,7 @@
  * Shared by the Metal executor tests: the product executor m and one triangle draw dr over an n x n target. */
 #include "frontend.h"
 #include <assert.h>
+#include <stdlib.h>
 #include <unistd.h>
 static const OpticsExecutor *m;
 static PtR2ShaderIR pvs, us;
@@ -48,6 +49,7 @@ static inline void triangle(unsigned n, const uint32_t *fs, uint32_t us_id) {
     dr.us_input[0] = 0;
     for (int c = 0; c < 4; c++)
         dr.component[0][c] = (uint8_t)c;
+    setenv("OPTICS_INTERNAL", "1", 0); /* bytes are compared at the guest's own resolution */
     m = optics_metal_executor();
     optics_frontend_set_executor(NULL);
 }

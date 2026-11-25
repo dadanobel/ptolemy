@@ -10,7 +10,7 @@ enum {
 };
 typedef struct {
     unsigned type, usage, pressed, buttons;
-    int32_t x, y, wheel;
+    int32_t x, y, wheel, pan; /* wheel and pan: scroll counts of the guest's mouse (vertical, horizontal) */
 } PtInputEvent;
 /* Main-thread producer. send must COPY the event; never retain the pointer. */
 typedef struct {

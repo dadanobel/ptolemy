@@ -56,6 +56,25 @@ static uint32_t read_reg(PtNetRtl *n, unsigned reg, unsigned size) {
     assert(!pt_net_rtl_access(n, reg, b, size, 0));
     return (uint32_t)pt_read_le(b, size);
 }
+/* Linux 8139too's read_eeprom, bit for bit. */
+static unsigned eeprom(PtNetRtl *n, unsigned location, unsigned addr_len) {
+    unsigned cmd = location | (6u << addr_len), v = 0;
+    write_reg(n, 0x50, 1, 0x80);
+    write_reg(n, 0x50, 1, 0x88);
+    for (int i = 4 + (int)addr_len; i >= 0; i--) {
+        unsigned d = cmd >> i & 1 ? 2 : 0;
+        write_reg(n, 0x50, 1, 0x88 | d);
+        write_reg(n, 0x50, 1, 0x88 | d | 4);
+    }
+    write_reg(n, 0x50, 1, 0x88);
+    for (int i = 0; i < 16; i++) {
+        write_reg(n, 0x50, 1, 0x88 | 4);
+        v = v << 1 | (read_reg(n, 0x50, 1) & 1);
+        write_reg(n, 0x50, 1, 0x88);
+    }
+    write_reg(n, 0x50, 1, 0);
+    return v;
+}
 int main(void) {
     static uint8_t ram[65536];
     uint8_t mac[] = {2, 1, 2, 3, 4, 5}, config[256], mask[256];
@@ -63,6 +82,11 @@ int main(void) {
     assert(pt_read_le(config, 4) == 0x813910ec && config[11] == 2 && mask[4] == 7);
     PtNetRtl n;
     pt_net_rtl_init(&n, (PtRam){ram, sizeof ram, &hooks}, mac, (PtNetIo){0, send_packet, receive, link}, irq, NULL);
+    /* 93C46: Linux's probe with 8 address bits must not see 0x8129, then words 7-9 are the station address */
+    assert(eeprom(&n, 0, 8) != 0x8129 && eeprom(&n, 0, 6) == 0x8129 && eeprom(&n, 2, 6) == 0x8139);
+    for (unsigned i = 0; i < 3; i++)
+        assert(eeprom(&n, 7 + i, 6) == (unsigned)(mac[2 * i] | mac[2 * i + 1] << 8));
+    assert(!(read_reg(&n, 0x50, 1) & 1));
     write_reg(&n, 0x30, 4, 0x1000);
     write_reg(&n, 0x44, 4, 0x80 | 8 | 2);
     write_reg(&n, 0x3c, 2, 0x800f);
@@ -77,6 +101,11 @@ int main(void) {
     assert(!ready && n.rx == 1 && publications == 1 && line && pt_read_le(ram + 0x1002, 2) == 68 &&
            !memcmp(ram + 0x1004, frame, 64));
     assert(pt_read_le(ram + 0x1044, 4) == 0x7c6f85d2u);
+    write_reg(&n, 0x3e, 2, 0x20);   /* the link change acknowledged, ROK still pending */
+    write_reg(&n, 0x3c, 2, 0xc02e); /* 8139too's rtl8139_norx_intr_mask (NAPI): the line drops at once */
+    assert(!line);
+    write_reg(&n, 0x3c, 2, 0x800f);
+    assert(line);
     write_reg(&n, 0x3e, 2, 0xffff);
     assert(!line);
     write_reg(&n, 0x62, 2, 0x1200);

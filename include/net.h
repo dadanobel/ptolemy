@@ -25,6 +25,8 @@ typedef struct {
     uint64_t tx, rx, dropped, faults;
     uint64_t (*clock)(void), tctr_ns, timer_due;
     int timer_wait; /* TCTR/TimerInt: clock in ns (NULL: the timer never fires) */
+    uint16_t ee_cmd, ee_word; /* the 93C46 EEPROM behind Cfg9346 */
+    uint8_t ee_bits, ee_state, ee_addr, ee_out, ee_sk, ee_do;
 } PtNetRtl;
 void pt_net_rtl_init(PtNetRtl *, PtRam, const uint8_t mac[6], PtNetIo, void (*)(void *, int), void *);
 void pt_net_rtl_pci(uint8_t config[256], uint8_t mask[256]);

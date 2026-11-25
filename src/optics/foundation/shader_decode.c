@@ -190,18 +190,56 @@ static PtR2ShaderStatus decode_us(PtR2ShaderIR *p, PtR2ShaderError *e) {
     }
     return PT_R2_SHADER_OK;
 }
+/* The US words with what decode_us does not read set to zero: the address words of the nodes not used, the first
+ * node's texture range when US_CONFIG gives it no lookups, and the texture and ALU instructions outside every node's
+ * range. Tiger's driver leaves other programs' instructions there, and one program then came as many word images
+ * (Leopard's desktop: 76 stored programs, 44 different ones). Words that fail decode_us's range checks stay as they are. */
+void pt_r2_shader_us_canonical(uint32_t *w, size_t n) {
+    if (n < 7)
+        return;
+    unsigned na = ((w[2] >> 6) & 63) + 1, nt = ((w[2] >> 18) & 31) + 1, nodes = (w[0] & 3) + 1;
+    if (n != 7 + nt + 4 * (size_t)na)
+        return;
+    uint64_t alu = 0;
+    uint32_t tex = 0;
+    for (unsigned node = 4 - nodes; node < 4; ++node) {
+        uint32_t v = w[3 + node];
+        unsigned as = v & 63, ac = ((v >> 6) & 63) + 1, ts = (v >> 12) & 31, tc = ((v >> 17) & 31) + 1;
+        if (node == 4 - nodes && !(w[0] & 8))
+            tc = 0;
+        if (as + ac > na || (tc && ts + tc > nt))
+            return;
+        for (unsigned k = as; k < as + ac; ++k)
+            alu |= UINT64_C(1) << k;
+        for (unsigned k = ts; tc && k < ts + tc; ++k)
+            tex |= 1u << k;
+    }
+    for (unsigned node = 0; node < 4 - nodes; ++node)
+        w[3 + node] = 0;
+    if (!(w[0] & 8))
+        w[3 + 4 - nodes] &= ~(0x3ffu << 12);
+    for (unsigned k = 0; k < nt; ++k)
+        if (!(tex >> k & 1))
+            w[7 + k] = 0;
+    for (unsigned k = 0; k < na; ++k)
+        if (!(alu >> k & 1))
+            for (unsigned b = 0; b < 4; ++b)
+                w[7 + nt + b * na + k] = 0;
+}
 /* Math engine opcodes. Only the IEEE variants share US operation semantics; DX/FF have their own zero rules. */
 static uint8_t math_op(unsigned op) {
     switch (op) {
     case 0:
         return PT_R2_OP_NOP;
-    /* The DX partial-precision EXP/LOG (1, 2) and LOG_FULL (12) as their full-precision forms, EXP_BASEE_FF (3; its
+    /* EXP_BASE2_DX and LOG_BASE2_DX (1, 2) are four-component (the ARB EXP/LOG forms: Tiger's and Leopard's drivers send
+     * ARB LOG as 2 - u195 #137); EXP_BASE2_FULL_DX and LOG_BASE2_FULL_DX (11, 12) one value replicated. EXP_BASEE_FF (3; its
      * operand in the third source, as Tiger's fog programs place it), POWER_FUNC_FF (5; base in the first source, exponent
      * in the third), its clamped forms CLAMP_B and CLAMP_B1 (13, 14; Approximation: unclamped) and CLAMP_01 (15), SIN and
      * COS (16, 17). Halo's PVS programs use them. */
     case 1:
-        return PT_R2_OP_EXP2;
+        return PT_R2_OP_EXP_DX;
     case 2:
+        return PT_R2_OP_LOG_DX;
     case 12:
         return PT_R2_OP_LOG2;
     case 3:
@@ -343,6 +381,10 @@ static PtR2ShaderStatus decode_pvs(PtR2ShaderIR *p, PtR2ShaderError *e) {
             uint32_t x = w[at + 3];
             unsigned sx = (x >> 13) & 7, sy = (x >> 16) & 7;
             v->dual_op = math_op(((x >> 21) & 15) | ((x >> 2) & 1) << 4);
+            /* A dual step writes one lane: EXP/LOG DX there stay the replicated full value (as before; unverified) */
+            v->dual_op = v->dual_op == PT_R2_OP_EXP_DX ? PT_R2_OP_EXP2
+                         : v->dual_op == PT_R2_OP_LOG_DX ? PT_R2_OP_LOG2
+                                                         : v->dual_op;
             if (v->dual_op == 255 || v->dual_op == PT_R2_OP_LIT || v->dual_op == PT_R2_OP_POW ||
                 v->dual_op == PT_R2_OP_POW01 || !pvs_source(x, PT_R2_F32X4, &v->arg[2]) || v->arg[2].relative ||
                 sx > 5 || sy > 5)

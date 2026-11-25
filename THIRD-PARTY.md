@@ -6,7 +6,7 @@ Ptolemy's own code is licensed GPL-2.0-or-later (SPDX headers; the GPLv2 text is
 
 | Component | Where | Use | License |
 |---|---|---|---|
-| [OpenBIOS](https://github.com/openbios/openbios) | `firmware/openbios/` | The machine's Open Firmware, as Ptolemy's fork (see `firmware/README.md`) | GPL-2.0 |
+| [OpenBIOS](https://github.com/openbios/openbios) | `firmware/openbios/` | The machine's Open Firmware, as Ptolemy's fork, reduced to what the PowerPC build uses (see `firmware/README.md`) | GPL-2.0 |
 | [CoreMark](https://github.com/eembc/coremark) | `tests/epicycle/coremark/` | A CPU benchmark for the engine's tests; not part of the engine | EEMBC CoreMark license, `tests/epicycle/coremark/LICENSE.md` |
 
 The notices are in `THIRD-PARTY-NOTICES.txt`.

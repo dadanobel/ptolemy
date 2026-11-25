@@ -237,6 +237,40 @@ void pt_net_rtl_service(PtNetRtl *n) {
     nr_empty(n);
     nr_timer(n);
 }
+static uint16_t nr_eeprom_word(const PtNetRtl *n, unsigned a) {
+    static const uint16_t head[7] = {0x8129, 0x10ec, 0x8139, 0x10ec, 0x8139, 0, 0};
+    return a < 7 ? head[a] : a < 10 ? (uint16_t)(n->mac[2 * (a - 7)] | n->mac[2 * (a - 7) + 1] << 8) : 0;
+}
+/* The 93C46 behind Cfg9346 in programming mode (EEM 10; CS 8, SK 4, DI 2, DO 1), reads only. Linux's 8139too takes the
+ * station address from words 7-9: without the EEPROM the card came up as 00:00:00:00:00:00, which Linux refuses to
+ * open, and the Debian installer had no network. */
+static void nr_eeprom(PtNetRtl *n, uint8_t v) {
+    int cs = (v & 0xc8) == 0x88, sk = !!(v & 4);
+    if (!cs)
+        n->ee_cmd = n->ee_bits = n->ee_state = n->ee_do = 0;
+    else if (sk && !n->ee_sk) {
+        if (!n->ee_state) {
+            unsigned di = v >> 1 & 1;
+            if (n->ee_bits || di) { /* leading zeros before the start bit are ignored */
+                n->ee_cmd = (uint16_t)(n->ee_cmd << 1 | di);
+                if (++n->ee_bits == 9) { /* start bit, opcode, six address bits; then a dummy zero */
+                    n->ee_state = (n->ee_cmd >> 6 & 7) == 6 ? 1 : 2;
+                    n->ee_addr = n->ee_cmd & 63;
+                    n->ee_out = n->ee_do = 0;
+                }
+            }
+        } else if (n->ee_state == 1) { /* D15 first; past D0 the next word follows */
+            if (!n->ee_out) {
+                n->ee_word = nr_eeprom_word(n, n->ee_addr);
+                n->ee_addr = (n->ee_addr + 1) & 63;
+                n->ee_out = 16;
+            }
+            n->ee_do = n->ee_word >> --n->ee_out & 1;
+        }
+    }
+    n->ee_sk = (uint8_t)sk;
+    n->reg[0x50] = (uint8_t)((v & ~1u) | n->ee_do);
+}
 /* The RTL8139's I/O registers (station address, transmit and receive buffers, command, interrupts, timer). */
 int pt_net_rtl_access(PtNetRtl *n, unsigned at, uint8_t *p, unsigned size, int write) {
     if (!p || !(size == 1 || size == 2 || size == 4) || at > 256 || size > 256 - at)
@@ -268,12 +302,15 @@ int pt_net_rtl_access(PtNetRtl *n, unsigned at, uint8_t *p, unsigned size, int w
     else if (at == 0x48 && size == 4) {
         n->tctr_ns = nr_now(n);
         nr_arm(n);
-    } else if (at == 0x54 && size == 4) {
+    } else if (at == 0x50 && size == 1)
+        nr_eeprom(n, (uint8_t)v);
+    else if (at == 0x54 && size == 4) {
         memcpy(n->reg + at, p, size);
         nr_arm(n);
     } else if (at < 0x10 || (at >= 0x20 && at < 0x34) || at == 0x38 || at == 0x3c || at == 0x44 || at == 0x4c ||
                at == 0x50 || at == 0x52 || at == 0x66)
         memcpy(n->reg + at, p, size);
+    nr_irq(n); /* the line follows IMR too: Linux's NAPI masks receive in IMR while ROK is still set in ISR */
     pt_net_rtl_service(n);
     return 0;
 }

@@ -252,10 +252,10 @@ void pt_devices_service(PtDevices *d, uint64_t now) {
     for (unsigned budget = 0; budget < 128 && pt_input_take(&d->input, &event); budget++) {
         if (event.type == PT_INPUT_KEY)
             pt_hid_key(&d->hid[0], event.usage, event.pressed);
-        else if (event.type == PT_INPUT_RELATIVE)
-            pt_hid_pointer(&d->hid[1], event.buttons, event.x, event.y, event.wheel);
-        else if (event.type == PT_INPUT_ABSOLUTE)
-            pt_hid_pointer(&d->hid[2], event.buttons, event.x, event.y, event.wheel);
+        else if (event.type == PT_INPUT_RELATIVE || event.type == PT_INPUT_ABSOLUTE) {
+            pt_hid_pointer(&d->hid[event.type == PT_INPUT_RELATIVE ? 1 : 2], event.buttons, event.x, event.y, 0);
+            pt_hid_scroll(&d->hid[1], event.wheel, event.pan); /* the Mighty Mouse scrolls, also for the tablet */
+        }
         else if (event.type == PT_INPUT_RELEASE)
             for (unsigned k = 0; k < 3; k++)
                 pt_hid_release(&d->hid[k]);

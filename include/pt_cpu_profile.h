@@ -10,8 +10,11 @@ static inline void pt_cpu_fast_defaults(uint32_t pvr, int window) {
     if (mode ? strcmp(mode, "1") != 0 : !window)
         return;
     /* PT_FP_DIRECTED: on the slow path of the RN guard, no test of its own (the per-operation one cost up to 24%, t878). */
-    static const char *const fp[] = {"PT_FMA_FAST", "PT_FP_ROUND_FAST", "PT_FP_HOIST", "PT_FP_LAZY",
-                                     "PT_FP_MORE",  "PT_FPR_CACHE",     "PT_CR_FUSE",  "PT_FP_DIRECTED"};
+    /* PT_FP_MIXED, PT_FMA_DIRECT_S, PT_FP_MOVES (owner, 22.11): finished paths with no regression beyond 3% are on; one is
+     * switched off (=0) only if a problem is traced to it. UT2004 left the JIT for fmuls with a double operand 12M times. */
+    static const char *const fp[] = {"PT_FMA_FAST", "PT_FP_ROUND_FAST", "PT_FP_HOIST",     "PT_FP_LAZY",
+                                     "PT_FP_MORE",  "PT_FPR_CACHE",     "PT_CR_FUSE",      "PT_FP_DIRECTED",
+                                     "PT_FP_MIXED", "PT_FMA_DIRECT_S",  "PT_FP_MOVES"};
     static const char *const vmx[] = {"PT_VMX_NEON", "PT_VMX_INT2", "PT_VMX_MHADD", "PT_VMX_FP2"};
     for (unsigned i = 0; i < sizeof fp / sizeof *fp; i++)
         setenv(fp[i], "1", 0);

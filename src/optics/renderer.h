@@ -50,8 +50,11 @@ typedef struct {
      * flat: varyings interpolated flat; rop 0 or 1 + the GL logic op truth table (blending off, the target read back in
      * the fragment function); textureFixed 1: samples take PtR2Raster's LOD bias and border emulation; generated: varyings
      * (bit j) that are the negated window position shifted right by generatedShift (x 3:0, y 7:4), the polygon stipple's
-     * coordinates, component c from select[j][c] (0 x, 1 y, 4 zero, 5 one); discard 0..6: draw.h's source pixel discard. */
-    uint8_t fog, fogSelect, fogOutput, clipPlanes, flat, rop, textureFixed, generated, generatedShift, discard, pad2[2];
+     * coordinates, component c from select[j][c] (0 x, 1 y, 4 zero, 5 one); discard 0..6: draw.h's source pixel discard.
+     * generatedScale: the target's scale (PtR2Target.scale) when it is scaled and generated is set, else 0: the window
+     * position is then taken in guest pixels. pad2 must be zero. */
+    uint8_t fog, fogSelect, fogOutput, clipPlanes, flat, rop, textureFixed, generated, generatedShift, discard,
+            generatedScale, pad2;
 } PtR2Route;
 typedef struct {
     uint8_t compare, fail, depthFail, pass;
@@ -102,10 +105,18 @@ typedef struct {
 @end
 @interface PtR2Texture : NSObject
 @end
+/* Internal resolution (OPTICS_INTERNAL: x1.5 unless it says 1 or 2; foundation/internal_scale.h). A target with depth is drawn larger
+ * than the guest asked for: a multisampled target from the start, a single-sample one from the first depth storage
+ * bound to it. Nothing else changes for the caller: sizes, rectangles, viewports and scissors stay in guest pixels,
+ * and every reader of such a target (readback, view, copyView) gets its colour reduced to the guest's size, but for
+ * two: snapshot:, the frame that is shown, keeps the internal resolution, and so does a copy into another target
+ * (copy:, resolve:...to: - a buffer swap), which makes that target scaled as well; depth read back is the texel under each guest pixel's centre. Targets that never get depth storage
+ * (a desktop, 2D surfaces) stay as they are. Fill-mode lines (PtR2Raster.fill) stay one texel wide. */
 @interface PtR2Target : NSObject
-@property(nonatomic, readonly) uint32_t width;
+@property(nonatomic, readonly) uint32_t width; /* the guest's */
 @property(nonatomic, readonly) uint32_t height;
 @property(nonatomic, readonly) uint32_t samples; /* Metal samples per pixel */
+@property(nonatomic, readonly) unsigned scale; /* in halves: PT_R2_SCALE_ONE (2) as the guest sees it, 3 or 4 */
 @end
 /* Depth/stencil storage independent of any colour target (normalized D32Float/Stencil8, not the R300
  * D24S8 bytes). Storage no pass has initialized yet is cleared to depth 1, stencil 0 by the first pass that uses it. */
@@ -283,7 +294,8 @@ typedef struct {
                    linear:(BOOL)linear
                    raster:(PtR2Raster)raster
                     error:(NSError **)error;
-/* Explicit RT -> sampleable snapshot and RT -> CPU export. Never wait in encode. */
+/* Explicit RT -> sampleable snapshot and RT -> CPU export. Never wait in encode. The snapshot has the size of the
+ * target's storage: pt_r2_scale_size() of the guest's width and height at the target's scale. */
 - (PtR2Texture *)snapshot:(PtR2Target *)target resolveControl:(uint32_t)control error:(NSError **)error;
 - (PtR2Frame *)frame:(PtR2Texture *)completedSnapshot error:(NSError **)error;
 - (PtR2Readback *)readback:(PtR2Target *)target resolveControl:(uint32_t)control error:(NSError **)error;

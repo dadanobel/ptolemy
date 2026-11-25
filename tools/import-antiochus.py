@@ -11,7 +11,7 @@ from pathlib import Path
 import shutil
 import sys
 
-KEEP = ('LICENSE', 'README.md', 'build-tiger.sh', 'build-classic.sh', 'compare.py', 'docs/PROTOCOL.md')
+KEEP = ('LICENSE', 'THIRD-PARTY.md', 'README.md', 'build-tiger.sh', 'build-classic.sh', 'compare.py', 'docs/PROTOCOL.md')
 FOLDERS = ('src/', 'classic/', 'resources/', 'tests/')
 
 
@@ -31,7 +31,7 @@ def main():
         (dest / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(delivery / name, dest / name)
         shutil.copymode(delivery / name, dest / name)
-        if name != 'LICENSE' and b'SPDX-License-Identifier' not in data[:400]:
+        if name not in ('LICENSE', 'THIRD-PARTY.md') and b'SPDX-License-Identifier' not in data[:400]:
             bare.append(name)
     # the delivery's own name for itself: the first line of the build manifest in her built application
     version = (delivery / 'build/Antiochus.app/Contents/Resources/build-manifest.txt').read_text().splitlines()[0]

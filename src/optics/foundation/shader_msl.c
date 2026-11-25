@@ -348,6 +348,13 @@ static PtR2ShaderStatus emit(const PtR2ShaderIR *p, const PtR2ShaderInterface *i
         "template<typename T> T pt_sqrt(T a) { return pt_out(precise::sqrt(pt_in(a))); }\n"
         "template<typename T> T pt_exp2(T a) { return pt_out(precise::exp2(pt_in(a))); }\n"
         "template<typename T> T pt_log2(T a) { return pt_out(precise::log2(pt_in(a))); }\n"
+        "float4 pt_log_dx(float a) {\n" /* ME_LOG_BASE2_DX: exponent, mantissa in [1,2), log2, 1 of |a| */
+        "    float m = abs(pt_in(a));\n"
+        "    if (m == 0.0f) return float4(-FLT_MAX, 1.0f, -FLT_MAX, 1.0f);\n"
+        "    int e;\n"
+        "    float f = frexp(m, e);\n"
+        "    return float4(float(e - 1), 2.0f * f, pt_log2(m), 1.0f);\n"
+        "}\n"
         "%s"
         "void pt_shader_body(%s",
         fragment ? "struct PtIO {\n"
@@ -426,7 +433,8 @@ static PtR2ShaderStatus emit(const PtR2ShaderIR *p, const PtR2ShaderInterface *i
     for (unsigned t = 0; t < 128; ++t)
         if (temp[t]) {
             if (p->stage == PT_R2_SHADER_US && t < i->input_count)
-                put(&w, "float4 t%u = io.input[%u];\n", t, t);
+                put(&w, "float4 t%u = as_type<float4>(as_type<uint4>(io.input[%u]) & 0xffffff80u); // fp24, shader_fp.h\n",
+                    t, t);
             else
                 put(&w, "float4 t%u = float4(0.0f);\n", t);
         }
@@ -435,25 +443,35 @@ static PtR2ShaderStatus emit(const PtR2ShaderIR *p, const PtR2ShaderInterface *i
             put(&w, "float4 at%u = float4(0.0f);\n", t);
     if (addr || pt_r2_relative(p))
         put(&w, "int4 a0 = int4(0);\n");
+    /* A TEX on an input no ALU step has written takes the interpolated value whole: fp24 is the ALU's precision
+     * (shader_fp.h), and a repeated texture at coordinate 64 would step a whole texel of 1024 at 16 mantissa bits. */
+    bool written[128] = {false};
     for (unsigned k = 0; k < p->step_count; ++k) {
         const PtR2ShaderStep *st = &p->step[k];
         put(&w, "// decoded step %u, raw word %u\n", k, st->word);
-        if (st->kind == PT_R2_STEP_US)
+        if (st->kind == PT_R2_STEP_US) {
             us(&w, &st->u.us);
-        else if (st->kind == PT_R2_STEP_TEX) {
-            unsigned op = st->u.tex.op, u = st->u.tex.unit;
+            written[st->u.us.rgb_temp] |= st->u.us.rgb_mask != 0;
+            written[st->u.us.alpha_temp] |= st->u.us.alpha_mask != 0;
+        } else if (st->kind == PT_R2_STEP_TEX) {
+            unsigned op = st->u.tex.op, u = st->u.tex.unit, src = st->u.tex.src;
+            char coord[24];
+            snprintf(coord, sizeof coord, p->stage == PT_R2_SHADER_US && src < i->input_count && !written[src]
+                                                  ? "io.input[%u]" : "t%u", src);
+            if (op != 2)
+                written[st->u.tex.dst] = true;
             if (op == 2)
                 put(&w,
-                    "if (any(pt_in(t%u) < float4(0.0f))) {\n"
+                    "if (any(pt_in(%s) < float4(0.0f))) {\n"
                     "    io.killed = 1;\n"
                     "    return;\n"
                     "}\n",
-                    st->u.tex.src);
+                    coord);
             else {
                 put(&w,
                     "{\n"
-                    "    float4 c = pt_in(t%u);",
-                    st->u.tex.src);
+                    "    float4 c = pt_in(%s);",
+                    coord);
                 if (fragment) {
                     put(&w,
                         "t%u = PT_TEX(%uu, tx%u, sp%u, c, %uu);\n"
@@ -470,7 +488,8 @@ static PtR2ShaderStatus emit(const PtR2ShaderIR *p, const PtR2ShaderInterface *i
             }
         } else {
             const PtR2ShaderPVS *v = &st->u.pvs;
-            unsigned lanes = v->arg[0].type, out = v->op == PT_R2_OP_LIT ? 4 : lanes;
+            unsigned lanes = v->arg[0].type,
+                     out = v->op == PT_R2_OP_LIT || v->op == PT_R2_OP_EXP_DX || v->op == PT_R2_OP_LOG_DX ? 4 : lanes;
             put(&w, "{\n");
             for (unsigned j = 0; j < 3; ++j) {
                 put(&w, "%s %c =", lanes == 1 ? "float" : "float4", 'A' + j);
@@ -488,6 +507,10 @@ static PtR2ShaderStatus emit(const PtR2ShaderIR *p, const PtR2ShaderInterface *i
                     "float4(1.0f, pt_in(B) > 0.0f ? pt_in(B) : 0.0f, pt_in(B) > 0.0f\n"
                     "        ? pt_out(precise::pow(pt_in(A) > 0.0f ? pt_in(A) : 0.0f, clamp(pt_in(C), -128.0f, 128.0f)))\n"
                     "        : 0.0f, 1.0f)");
+            else if (v->op == PT_R2_OP_EXP_DX)
+                put(&w, "float4(pt_exp2(pt_floor(A)), A > 128.0f ? 0.0f : pt_sub(A, pt_floor(A)), pt_exp2(A), 1.0f)");
+            else if (v->op == PT_R2_OP_LOG_DX)
+                put(&w, "pt_log_dx(A)");
             else
                 arithmetic(&w, v->op, lanes, "A", "B", "C");
             put(&w, ";\n");

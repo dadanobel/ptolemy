@@ -421,6 +421,32 @@ cpu_g4_init(const struct cpudef *cpu)
     fword("finish-device");
 }
 
+/* Ptolemy fork: the node of a second G4, when the board has one (FW_CFG_NB_CPUS = 2). The first one's node again,
+ * with reg 1 (its unit address) and a state that is not "running": Mac OS X takes the "running" node for the boot CPU
+ * and starts the others itself (MacRISC2CPU). This firmware never runs on the second CPU. */
+static void
+cpu_g4_second(const struct cpudef *cpu)
+{
+    cpu_generic_init(cpu);
+
+    PUSH(1);
+    fword("encode-int");
+    push_str("reg");
+    fword("property");
+
+    push_str("stopped");
+    fword("encode-string");
+    push_str("state");
+    fword("property");
+
+    set_property(get_cur_dev(), "altivec", NULL, 0);
+    set_property(get_cur_dev(), "data-streams", NULL, 0);
+    if (cpu->iu_version == 0x80030000)
+        cpu_add_l2_cache(0x80000, 0x20, 0x40);
+
+    fword("finish-device");
+}
+
 #ifdef CONFIG_PPC_64BITSUPPORT
 /* In order to get 64 bit aware handlers that rescue all our
    GPRs from getting truncated to 32 bits, we need to patch the
@@ -1159,6 +1185,9 @@ arch_of_init(void)
     snprintf(buf, sizeof(buf), "/cpus/%s", cpu->name);
     ofmem_register(find_dev("/memory"), find_dev(buf));
     node_methods_init(buf);
+    /* After the lookups by name above: they are the first CPU's. */
+    if (cpu->initfn == cpu_g4_init && fw_cfg_read_i32(FW_CFG_NB_CPUS) == 2)
+        cpu_g4_second(cpu);
 
 #ifdef CONFIG_RTAS
     /* OldWorld Macs don't have an /rtas node. */

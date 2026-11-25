@@ -160,6 +160,14 @@ def main():
                 shutil.copytree(src, dest, symlinks=True)
             else:
                 shutil.copyfile(src, dest)
+        shim = a.binaries / 'ptdsp.dylib' if a.binaries else None  # the DrawSprocket shim (guest/dsp), when it was built
+        if shim and shim.is_file():
+            macho(shim)
+            shutil.copyfile(shim, payload / 'ptdsp.dylib')
+        video = a.binaries / 'Ptolemy Video.component' if a.binaries else None  # bbbunny (guest/video), when built
+        if video and video.is_dir():
+            macho(video / 'Contents/MacOS/Ptolemy Video')
+            shutil.copytree(video, payload / 'Ptolemy Video.component', symlinks=True)
         if a.antiochus:
             antiochus(payload, a.antiochus, a.rosettast, a.antiochus_sums)
         # Antiochus's icon (supplied by the owner, unedited) for the agent and the medium.

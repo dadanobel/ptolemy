@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "bench.h"
 #include "panion.h"
+#include "conformance.h"
 #include <mach/mach_time.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
@@ -85,11 +86,16 @@ int main(int argc, char **argv) {
     AntWork work; int ready, pass; struct utsname u;
     memset(&work, 0, sizeof work);
     if(argc<3 && strstr(argv[0],"/Rosetta"))return ant_panorama("gpu-rosetta",NULL,1)?0:1;
+    if(argc==2 && !strcmp(argv[1],"--list-shaders")) return ant_sr_list();
+    if(argc==2 && !strcmp(argv[1],"--list-graphics")) { int rc=ant_cf_list(); return rc?rc:ant_sr_list(); }
+    if (argc == 2 && !strcmp(argv[1],"--list-conformance")) return ant_cf_list();
     if (argc != 3 || strchr(argv[1], '/') || strlen(argv[1]) > 64) return 64;
     ant_text("protocol", ANT_PROTOCOL); ant_text("version", ANT_VERSION);
     ant_text("id", argv[1]); ant_text("status", "running");
     if (!uname(&u)) { ant_text("machine", u.machine); ant_text("kernel", u.release); }
     ant_number("altivec", ant_has_vmx());
+    if (!strncmp(argv[1],"sr-",3)) return ant_sr_run(argv[1],argv[2]);
+    if (!strncmp(argv[1],"cf-",3)) return ant_cf_run(argv[1],argv[2]);
     if(pan_stage(argv[1])>=0){pass=ant_panorama(argv[1],argv[2],0);ant_text("status",pass?"pass":"fail");return ferror(stdout)?2:pass?0:1;}
     if (!strcmp(argv[1], "gpu-window") || !strcmp(argv[1], "gpu-window-offscreen")) {
         pass=ant_window(argv[1],argv[2]);

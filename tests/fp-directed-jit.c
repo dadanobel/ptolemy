@@ -32,12 +32,38 @@ static double value(unsigned n) {
 enum { GUEST = 1 << 16, END = 0xf000 };
 static uint8_t *memory;
 static unsigned to_interp; /* exits for the interpreter's instruction */
+static void (*fill)(void); /* the program's data, after program() clears memory */
 #define AFP(sgl, xo, d, a, b, c) (((sgl) ? 59u : 63u) << 26 | (d) << 21 | (a) << 16 | (b) << 11 | (c) << 6 | (xo) << 1)
 #define XFP(xo, d, b) (63u << 26 | (d) << 21 | (b) << 11 | (xo) << 1)
 #define MTFSFI7(rn) (63u << 26 | 7u << 23 | (uint32_t)(rn) << 12 | 134u << 1)
 #define STFD(s, a, i) (54u << 26 | (s) << 21 | (a) << 16 | (i))
 #define LFD(d, a, i) (50u << 26 | (d) << 21 | (a) << 16 | (i))
 #define BDNZ(to, at) (16u << 26 | 16u << 21 | (((to) - (at)) & 0xfffc))
+#define LFS(d, a, i) (48u << 26 | (d) << 21 | (a) << 16 | (i))
+#define ADDI(d, a, i) (14u << 26 | (d) << 21 | (a) << 16 | ((i) & 0xffff))
+#define MFFS(d) (63u << 26 | (d) << 21 | 583u << 1)
+static int fill_single;
+static void fill_rows(void) { /* 256 rows of three operands: singles (bits) or doubles, ordinary and edge values */
+    for (unsigned i = 0; i < 256 * 3; i++) {
+        double x = i % 5 == 1 ? value(i) : ldexp(1.0 + (double)(rnd() & 0xfffffff) / 0x1p28, (int)(rnd() % 61) - 30) *
+                                                   (rnd() & 1 ? -1 : 1); /* mostly ordinary, inexact results */
+        if (fill_single) {
+            float f = (float)x;
+            uint32_t u;
+            if (i % 5 == 0) /* short mantissas: exact results, zero sums, steps into the next binade */
+                f = (float)((int)(rnd() % 64) - 32) * (rnd() & 1 ? 0.25f : 1.0f);
+            memcpy(&u, &f, 4);
+            wbe32(memory + 0x2000 + 4 * i, u);
+        } else {
+            uint64_t u;
+            if (i % 5 == 0)
+                x = (double)((int)(rnd() % 64) - 32) * (rnd() & 1 ? 0.25 : 1.0);
+            memcpy(&u, &x, 8);
+            wbe32(memory + 0x2000 + 8 * i, (uint32_t)(u >> 32));
+            wbe32(memory + 0x2000 + 8 * i + 4, (uint32_t)u);
+        }
+    }
+}
 #define B(to, at) (18u << 26 | (((to) - (at)) & 0x3fffffc))
 static void run(CPU *c) { /* as jit_run: translate, link, fill the jump cache, step the interpreter where asked */
     uint32_t *t = NULL;
@@ -69,6 +95,8 @@ static void run(CPU *c) { /* as jit_run: translate, link, fill the jump cache, s
 }
 static unsigned program(const char *name, const uint32_t *ins, unsigned n, unsigned loops, uint32_t fpscr) {
     memset(memory, 0, GUEST);
+    if (fill)
+        fill();
     for (unsigned i = 0; i < n; i++)
         wbe32(memory + 0x1000 + 4 * i, ins[i]);
     CPU c = {0};
@@ -82,6 +110,8 @@ static unsigned program(const char *name, const uint32_t *ins, unsigned n, unsig
         c.crtab[i] = cr_make(i >> 3 & 1, i >> 2 & 1, i >> 1 & 1, i & 1);
     c.ctr = loops;
     c.gpr[1] = 0x8000;
+    c.gpr[3] = 0x2000; /* data rows (random programs) */
+    c.gpr[4] = 0xa000; /* results: the value and the FPSCR after each operation */
     c.fpscr = fpscr;
     const double v[] = {0x1.123456789abcdp+4, 1.0, 0x1p-54, 3.0, 0x1.0000001p+0, 1e6, -0x1.fffffep-3, 0.1};
     for (unsigned i = 0; i < 32; i++)
@@ -159,6 +189,27 @@ static void blocks(void) {
     const uint32_t mixed[] = {AFP(1, 21, 9, 1, 8, 0), AFP(0, 21, 1, 1, 9, 0), BDNZ(0x1000, 0x1008), B(END, 0x100c)};
     unsigned mx = program("mixed", mixed, 4, 100, 0);
     assert(mx >= 10);
+    /* Every A-form operation at RN 1-3 over random rows: blocks translated at RN != 0 (fp_rn_any) round inline; the
+     * value and mffs after each operation go to memory, compared with the interpreter's */
+    uint64_t rn0 = st_rn_blocks;
+    unsigned rows = 0;
+    fill = fill_rows;
+    for (unsigned sgl = 0; sgl < 2; sgl++)
+        for (unsigned k = 0; k < 8; k++)
+            for (uint32_t rn = 1; rn < 4; rn++) {
+                unsigned w = sgl ? 4 : 8;
+                const uint32_t rand_ops[] = {sgl ? LFS(1, 3, 0) : LFD(1, 3, 0), sgl ? LFS(2, 3, 4) : LFD(2, 3, 8),
+                                             sgl ? LFS(4, 3, 8) : LFD(4, 3, 16), AFP(sgl, xo[k], 3, 1, 2, 4),
+                                             STFD(3, 4, 0), MFFS(5), STFD(5, 4, 8), ADDI(3, 3, 3 * w), ADDI(4, 4, 16),
+                                             BDNZ(0x1000, 0x1024), B(END, 0x1028)};
+                fill_single = (int)sgl;
+                rows += 256;
+                (void)program("random", rand_ops, 11, 256, rn | (rn & 1 ? 0x82000000u : 0));
+            }
+    fill = NULL;
+    printf("directed blocks: %u random rows (16 forms x RN 1-3) equal to the interpreter, %llu blocks translated for RN != 0\n",
+           rows, (unsigned long long)(st_rn_blocks - rn0));
+    assert(st_rn_blocks > rn0);
     fp_directed_enabled = 0; /* the negative control: the same programs leave for the interpreter */
     unsigned off = program("time", time, 10, 300, 0), off3 = program("chain", chain, n, 200, 3);
     fp_directed_enabled = 1;
@@ -200,10 +251,18 @@ int main(void) {
                         c.fpr[2] = 0x1p-54;
                         c.fpr[4] = 0x1.0000001p+0;
                     }
+                    if (sgl && n == 2 && (xo == 20 || xo == 21 || xo >= 28)) {
+                        /* The fused cases have single-representable inputs; the exact sum is tiny and inexact. */
+                        c.fpr[1] = xo >= 28 ? 0x1p-126 : 0x1p-1022;
+                        c.fpr[4] = 0x1p-149;
+                        c.fpr[2] = (xo == 20 || xo == 28 || xo == 30) ? -0x1p-149 : 0x1p-149;
+                    }
                     c.fpscr = rn | (n % 17 == 0 ? 0x8 : 0) | (n % 19 == 0 ? 4 : 0) | (n % 2 ? 0x82000000 : 0);
                     wbe32(mem + 0x1000, in);
                     CPU expected = c;
                     assert(!interp_step(&expected));
+                    if (sgl && n == 2 && xo >= 28)
+                        assert((expected.fpscr & 0x0a020000u) == 0x0a020000u); /* UX, XX, FI */
                     CPU before = c;
                     run1(code, in, &c);
                     uint64_t fpcr;

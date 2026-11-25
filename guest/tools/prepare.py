@@ -26,6 +26,10 @@ def main():
     macho(os.path.join(app, 'Contents/MacOS/PtolemyAgent'))
     macho(os.path.join(app, 'Contents/Resources/ptolemy-agent-worker'))
     shutil.copytree(app, os.path.join(payload, 'Ptolemy Agent.app'))
+    shim = os.path.join(binaries, 'ptdsp.dylib')  # the DrawSprocket shim, when it was built
+    if os.path.isfile(shim):
+        macho(shim)
+        shutil.copyfile(shim, os.path.join(payload, 'ptdsp.dylib'))
     entries = []
     for parent, dirs, files in os.walk(payload):
         for name in dirs + files:

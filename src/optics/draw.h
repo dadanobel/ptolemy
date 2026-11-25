@@ -37,6 +37,8 @@ typedef struct {
      * US_OUT_FMT_0 bits 15:8 (C0..C3 from A, R, G, B), read for the one- and two-byte formats. */
     uint32_t cb_offset, cb_pitch, width, height;
     uint8_t cb_bpp, cb_format, cb_select; /* 1, 2, 4 or 8 bytes per pixel; hand-built draws: 0, 0 */
+    uint8_t cb_fp16; /* US_OUT_FMT_0 OUT_FMT is C4_16_FP (18): an ARGB16161616 target holds halves (GL_RGBA16F) */
+    uint8_t cb_rgb10a2; /* OUT_FMT C_2_10_10_10 (13): a 32-bit target holds C0..C2 in 10 bits from bit 0, C3 in 31:30 */
     int32_t scissor[4]; /* x0,y0,x1,y1 exclusive, already clipped to the target */
     uint32_t vte;
     float viewport[6]; /* SE_VTE_CNTL and SE_VPORT_{X,Y,Z}{SCALE,OFFSET} */

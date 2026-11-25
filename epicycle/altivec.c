@@ -458,15 +458,19 @@ int ppc_altivec_mem(CPU *c, uint32_t in) {
     int store = xo == 135 || xo == 167 || xo == 199 || xo == 231 || xo == 487;
     uint8_t tmp[16];
     memcpy(tmp, c->vr[d], 16);
-    for (unsigned i = 0, z = n < 4 ? n : 4; i < n; i += z) {
+    /* Little-endian mode (AltiVec PEM): with the scalar accesses munged, a quadword's doublewords trade places and an
+     * element lands at the mirrored position - byte offset XOR (16 - size). */
+    unsigned z = n < 4 ? n : 4, le = c->msr & MSR_LE ? 16 - z : 0;
+    for (unsigned i = 0; i < n; i += z) {
+        uint8_t *e = tmp + ((off + i) ^ le);
         if (store) {
-            if (ppc_st(c, ea + i, z, vu(tmp + off + i, z, 0)))
+            if (ppc_st(c, ea + i, z, vu(e, z, 0)))
                 return 1;
         } else {
             uint64_t v;
             if (ppc_ld(c, ea + i, z, &v))
                 return 1;
-            vp(tmp + off + i, z, 0, (uint32_t)v);
+            vp(e, z, 0, (uint32_t)v);
         }
     }
     if (!store)

@@ -3,6 +3,7 @@
 #import "renderer.h"
 #include "raw_vertex.h"
 #import "foundation/surface_metal.h"
+#include "foundation/internal_scale.h"
 #import <os/signpost.h>
 #include <atomic>
 #include <algorithm>
@@ -10,6 +11,9 @@
 #include <deque>
 #include <memory>
 #include <map>
+#include <set>
+#include <string>
+#include <mach-o/dyld.h>
 #include <mutex>
 #include <unordered_map>
 #include <pthread.h>
@@ -83,6 +87,43 @@ static NSString *const unpackSource =
          "kernel void optics_unpack3d(device const uchar *src [[buffer(0)]], constant uint *p [[buffer(1)]],\n"
          "        texture3d<float, access::write> dst [[texture(0)]], uint3 g [[thread_position_in_grid]]) {\n"
          "    if (g.x < p[0] && g.y < p[1]) dst.write(optics_texel(src + ulong(g.z) * p[6], p, g.xy), g);\n"
+         "}\n";
+/* Internal resolution (foundation/internal_scale.h), as full-target passes. optics_scale_up fills a scaled target's
+ * texels from guest-size colour: each takes the guest pixel under its centre (pt_r2_scale_guest). optics_scale_down
+ * is pt_r2_scale_down8 in the same integers: the guest-size colour every reader of a scaled target takes.
+ * p: the factor in halves; for up, the source origin minus the destination's and the source's last pixel; for down,
+ * the guest's size in half texels. */
+static NSString *const scaleSource =
+        @"#include <metal_stdlib>\n"
+         "using namespace metal;\n"
+         "struct OpticsScale {\n"
+         "    float4 position [[position]];\n"
+         "};\n"
+         "vertex OpticsScale optics_scale_vertex(uint i [[vertex_id]]) {\n"
+         "    OpticsScale o;\n"
+         "    o.position = float4(float(i & 1u) * 4.0f - 1.0f, float(i >> 1u) * 4.0f - 1.0f, 0.0f, 1.0f);\n"
+         "    return o;\n"
+         "}\n"
+         "fragment float4 optics_scale_up(OpticsScale v [[stage_in]], texture2d<float> src [[texture(0)]],\n"
+         "        constant int *p [[buffer(0)]]) {\n"
+         "    int2 g = (2 * int2(v.position.xy) + 1) / p[0] + int2(p[1], p[2]);\n"
+         "    return src.read(uint2(clamp(g, int2(0), int2(p[3], p[4]))));\n"
+         "}\n"
+         "fragment float4 optics_scale_down(OpticsScale v [[stage_in]], texture2d<float> src [[texture(0)]],\n"
+         "        constant int *p [[buffer(0)]]) {\n"
+         "    uint h = uint(p[0]);\n"
+         "    uint2 lo = uint2(v.position.xy) * h, hi = lo + h, end = uint2(uint(p[1]), uint(p[2]));\n"
+         "    uint4 sum = uint4(0u);\n"
+         "    uint area = 0u;\n"
+         "    for (uint ty = lo.y / 2u; 2u * ty < hi.y && 2u * ty + 2u <= end.y; ty++) {\n"
+         "        uint wy = min(2u * ty + 2u, hi.y) - max(2u * ty, lo.y);\n"
+         "        for (uint tx = lo.x / 2u; 2u * tx < hi.x && 2u * tx + 2u <= end.x; tx++) {\n"
+         "            uint wx = min(2u * tx + 2u, hi.x) - max(2u * tx, lo.x);\n"
+         "            area += wx * wy;\n"
+         "            sum += wx * wy * uint4(rint(saturate(src.read(uint2(tx, ty))) * 255.0f));\n"
+         "        }\n"
+         "    }\n"
+         "    return float4((sum + area / 2u) / area) / 255.0f;\n"
          "}\n";
 struct Runtime {
     std::mutex mutex;
@@ -404,10 +445,19 @@ static NSString *fragmentSource(NSString *source, const PtR2ShaderIR *us, const 
     [s appendString:@"#include <metal_stdlib>\n"
                      "using namespace metal;\n"];
     [s appendString:fixedSource()];
-    [s appendString:fixed ? @"float4 pt_sample(texture2d<float>, sampler, float4, uint, uint, constant PtFixed &, thread uint &);\n"
-                             "float4 pt_sample(texturecube<float>, sampler, float4, uint, uint, constant PtFixed &, thread uint &);\n"
-                             "float4 pt_sample(texture3d<float>, sampler, float4, uint, uint, constant PtFixed &, thread uint &);\n"
-                             "float4 pt_chroma(float4 x, uint u, constant PtFixed &fx, thread uint &k) {\n"
+    /* Only the samplers of the texture types this shader uses: each type's sample() costs Metal's compiler about 100 ms
+     * even when nothing calls it (u080: 381 -> 202 ms a fragment without the unused cube and 3D ones). */
+    bool dim[3] = {false, false, false}; /* 2D, 3D, cube (texture_dimension) */
+    for (unsigned j = 0; j < 16; j++)
+        if (us->textures & (1u << j))
+            dim[fi->texture_dimension[j] == 2 ? 2 : fi->texture_dimension[j] == 1 ? 1 : 0] = true;
+    NSString *const types[3] = {@"texture2d", @"texture3d", @"texturecube"};
+    for (unsigned d = 0; d < 3; d++)
+        if (dim[d])
+            [s appendFormat:fixed ? @"float4 pt_sample(%@<float>, sampler, float4, uint, uint, constant PtFixed &, thread uint &);\n"
+                                  : @"float4 pt_sample(%@<float>, sampler, float4, uint);\n",
+                            types[d]];
+    [s appendString:fixed ? @"float4 pt_chroma(float4 x, uint u, constant PtFixed &fx, thread uint &k) {\n"
                              "    uint m = (fx.mode[u] >> 5) & 3u;\n"
                              "    if (m && all(abs(x - fx.key[u]) < 0.5f / 255.0f)) {\n"
                              "        if (m == 1u) k = 1u;\n"
@@ -415,15 +465,13 @@ static NSString *fragmentSource(NSString *source, const PtR2ShaderIR *us, const 
                              "    }\n"
                              "    return x;\n"
                              "}\n"
-                          : @"float4 pt_sample(texture2d<float>, sampler, float4, uint);\n"
-                             "float4 pt_sample(texturecube<float>, sampler, float4, uint);\n"
-                             "float4 pt_sample(texture3d<float>, sampler, float4, uint);\n"];
+                          : @""];
     [s appendString:source];
     [s appendString:varyings(r, false)];
     if (fixed)
         /* LOD bias (TX_FILTER1) on every sample, and border modes over the sampler's zero border: the colour gets the
          * border's share of the filter footprint (exact for nearest and bilinear; with mip levels, as at level 0). */
-        [s appendString:@"float4 pt_sample(texture2d<float> t, sampler s, float4 c, uint op, uint u, constant PtFixed &fx,\n"
+        [s appendString:!dim[0] ? @"" : @"float4 pt_sample(texture2d<float> t, sampler s, float4 c, uint op, uint u, constant PtFixed &fx,\n"
                          "        thread uint &k) {\n"
                          "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
                          "    uint m = fx.mode[u];\n"
@@ -443,33 +491,25 @@ static NSString *fragmentSource(NSString *source, const PtR2ShaderIR *us, const 
                          "        x += fx.border[u] * (1.0f - cov.x * cov.y);\n"
                          "    }\n"
                          "    return pt_chroma(x, u, fx, k);\n"
-                         "}\n"
-                         "float4 pt_sample(texturecube<float> t, sampler s, float4 c, uint op, uint u, constant PtFixed &fx,\n"
-                         "        thread uint &k) {\n"
-                         "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
-                         "    return pt_chroma(t.sample(s, c.xyz, bias(fx.lod[u] + (op == 4u ? c.w : 0.0f))), u, fx, k);\n"
-                         "}\n"
-                         "float4 pt_sample(texture3d<float> t, sampler s, float4 c, uint op, uint u, constant PtFixed &fx,\n"
-                         "        thread uint &k) {\n"
-                         "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
-                         "    return pt_chroma(t.sample(s, c.xyz, bias(fx.lod[u] + (op == 4u ? c.w : 0.0f))), u, fx, k);\n"
                          "}\n"];
-    else
-        [s appendString:@"float4 pt_sample(texture2d<float> t, sampler s, float4 c, uint op) {\n"
-                         "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
-                         "    if (op == 4u) return t.sample(s, c.xy, bias(c.w));\n"
-                         "    return t.sample(s, c.xy);\n"
-                         "}\n"
-                         "float4 pt_sample(texturecube<float> t, sampler s, float4 c, uint op) {\n"
-                         "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
-                         "    if (op == 4u) return t.sample(s, c.xyz, bias(c.w));\n"
-                         "    return t.sample(s, c.xyz);\n"
-                         "}\n"
-                         "float4 pt_sample(texture3d<float> t, sampler s, float4 c, uint op) {\n"
-                         "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
-                         "    if (op == 4u) return t.sample(s, c.xyz, bias(c.w));\n"
-                         "    return t.sample(s, c.xyz);\n"
-                         "}\n"];
+    if (fixed) {
+        for (unsigned d = 1; d < 3; d++)
+            if (dim[d])
+                [s appendFormat:@"float4 pt_sample(%@<float> t, sampler s, float4 c, uint op, uint u, constant PtFixed &fx,\n"
+                                 "        thread uint &k) {\n"
+                                 "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
+                                 "    return pt_chroma(t.sample(s, c.xyz, bias(fx.lod[u] + (op == 4u ? c.w : 0.0f))), u, fx, k);\n"
+                                 "}\n",
+                                types[d]];
+    } else
+        for (unsigned d = 0; d < 3; d++)
+            if (dim[d])
+                [s appendFormat:@"float4 pt_sample(%@<float> t, sampler s, float4 c, uint op) {\n"
+                                 "    if (op == 3u) c.xyz = pt_div(c.xyz, float3(c.w));\n"
+                                 "    if (op == 4u) return t.sample(s, c.%@, bias(c.w));\n"
+                                 "    return t.sample(s, c.%@);\n"
+                                 "}\n",
+                                types[d], d ? @"xyz" : @"xy", d ? @"xyz" : @"xy"];
     [s appendString:@"struct PtOut {\n"
                      "    float4 color [[color(0)]];"];
     if (us->writes_depth)
@@ -512,13 +552,14 @@ static NSString *fragmentSource(NSString *source, const PtR2ShaderIR *us, const 
     for (unsigned j = 0; j < r.varyingCount; j++)
         [s appendFormat:@"io.input[%u] = v.v%u;\n", r.usInput[j], j];
     for (unsigned j = 0; j < r.varyingCount; j++)
-        if (r.generated >> j & 1) { /* the negated window position (pixel centre) >> shift */
+        if (r.generated >> j & 1) { /* the negated window position (pixel centre) >> shift, in guest pixels */
             NSString *c[4];
             for (unsigned q = 0; q < 4; q++) {
                 unsigned sel = r.select[j][q];
                 c[q] = sel < 2    ? [NSString stringWithFormat:@"v.position.%c * float(%.9g)", sel ? 'y' : 'x',
                                                             -ldexp(1.0, -(int)(sel ? r.generatedShift >> 4
-                                                                                      : r.generatedShift & 15))]
+                                                                                      : r.generatedShift & 15)) *
+                                                                    (r.generatedScale ? 2.0 / r.generatedScale : 1.0)]
                        : sel == 5 ? @"1.0f"
                                   : @"0.0f";
             }
@@ -619,6 +660,7 @@ struct R2Slice {
   @public
     R2Lease *lease;
     std::atomic<int> status;
+    PtR2Target *viewOf; /* view: of this target's colour (its reduced colour once the target is scaled) */
 }
 @end
 @implementation PtR2Texture
@@ -637,14 +679,16 @@ struct R2Slice {
   @public
     R2Lease *lease;
     BOOL initialized;
+    uint32_t gw, gh; /* the guest's size; the texture is at the internal resolution `scale` */
+    unsigned scale;
 }
 @end
 @implementation PtR2Depth
 - (uint32_t)width {
-    return (uint32_t)lease->texture.width;
+    return gw;
 }
 - (uint32_t)height {
-    return (uint32_t)lease->texture.height;
+    return gh;
 }
 @end
 @interface PtR2Target () {
@@ -654,14 +698,25 @@ struct R2Slice {
     id<MTLTexture> depth;
     BOOL initialized;
     PtR2Depth *bound; /* independent depth/stencil for the following passes, nil = depth */
+    /* Internal resolution: surface and depth are `scale` halves of the guest's gw x gh (PT_R2_SCALE_ONE: the same).
+     * reduced: a scaled target's colour at the guest's size, for everything that reads it outside its own passes;
+     * stale: drawn or copied into since it was reduced. */
+    uint32_t gw, gh;
+    unsigned scale;
+    id<MTLTexture> reduced;
+    R2Lease *reducedLease;
+    BOOL stale;
 }
 @end
 @implementation PtR2Target
 - (uint32_t)width {
-    return (uint32_t)surface.color.width;
+    return gw;
 }
 - (uint32_t)height {
-    return (uint32_t)surface.color.height;
+    return gh;
+}
+- (unsigned)scale {
+    return scale;
 }
 - (uint32_t)samples {
     return surface.samples.count;
@@ -687,6 +742,9 @@ struct R2Slice {
     uint32_t width, height;
     size_t stencilRow;
     BOOL depthPlanes;
+    /* depth planes: `rows` storage rows from the first one of guest row originY, at the internal resolution scale */
+    unsigned scale;
+    uint32_t originY, rows;
 }
 @end
 @implementation PtR2Readback
@@ -704,6 +762,9 @@ struct R2Slice {
     id<MTLCommandQueue> _queue;
     PtR2MetalResolver *_resolver;
     id<MTLComputePipelineState> _unpack, _unpack3d;
+    /* OPTICS_INTERNAL: the internal resolution of targets with depth, in halves (x1.5 without it). */
+    unsigned _scale;
+    id<MTLRenderPipelineState> _scaleUp, _scaleDown;
     id<MTLSamplerState> _sampler[2];
     id<MTLDepthStencilState> _depth[8][2];
     NSMutableDictionary<NSNumber *, id<MTLDepthStencilState>> *_stencilStates;
@@ -745,6 +806,7 @@ struct R2Slice {
     uint32_t _visibilityNext, _passQuery, _passSlot;
     int64_t _boundVisibility;
     std::unordered_map<uint32_t, std::vector<uint32_t>> _querySlots;
+    std::unordered_map<uint32_t, unsigned> _queryScale; /* queries drawn on a scaled target, and its scale */
     PtR2Limits _limits;
     pthread_t _owner;
     PtR2Ticket _ticket;
@@ -795,6 +857,21 @@ struct R2Slice {
         return nil;
     if (!function3d || !(_unpack3d = [device newComputePipelineStateWithFunction:function3d error:error]))
         return nil;
+    _scale = pt_r2_scale_parse(getenv("OPTICS_INTERNAL"));
+    if (_scale != PT_R2_SCALE_ONE) {
+        id<MTLLibrary> library = [device newLibraryWithSource:scaleSource options:unpackOptions error:error];
+        if (!library)
+            return nil;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [library newFunctionWithName:@"optics_scale_vertex"];
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pd.fragmentFunction = [library newFunctionWithName:@"optics_scale_up"];
+        if (!(_scaleUp = [device newRenderPipelineStateWithDescriptor:pd error:error]))
+            return nil;
+        pd.fragmentFunction = [library newFunctionWithName:@"optics_scale_down"];
+        if (!(_scaleDown = [device newRenderPipelineStateWithDescriptor:pd error:error]))
+            return nil;
+    }
     _visibility = [device newBufferWithLength:8 * 8192 options:MTLResourceStorageModeShared];
     _boundVisibility = -1;
     if (!_visibility) {
@@ -839,6 +916,7 @@ struct R2Slice {
         }
         _ownerQueue = queue;
     }
+    store_start(device);
     return self;
 }
 - (void)adoptOwner {
@@ -1006,7 +1084,8 @@ static NSString *routeError(id<MTLDevice> device, const PtR2ShaderIR *pvs, const
             return @"Unsupported or out-of-stride vertex attribute";
     }
     if (r.fogSelect > 5 || (r.fog && r.fogSelect < 4 && r.fogOutput >= vi->output_count) || r.fog > 1 ||
-        r.clipPlanes > 63 || r.rop > 16 || r.textureFixed > 1 || r.pad2[0] || r.pad2[1] || r.discard > 6 ||
+        r.clipPlanes > 63 || r.rop > 16 || r.textureFixed > 1 || r.pad2 || r.discard > 6 ||
+        (r.generatedScale && (r.generatedScale <= PT_R2_SCALE_ONE || r.generatedScale > PT_R2_SCALE_MAX)) ||
         (r.generated >> r.varyingCount))
         return @"Unsupported fixed-function route";
     return nil;
@@ -1014,8 +1093,200 @@ static NSString *routeError(id<MTLDevice> device, const PtR2ShaderIR *pvs, const
 static MTLCompileOptions *compileOptions() {
     MTLCompileOptions *o = [MTLCompileOptions new];
     o.mathMode = MTLMathModeSafe;
+    NSMutableDictionary *macros = [NSMutableDictionary new];
+    if (getenv("OPTICS_SHADERS_COLD")) /* tests of a first use: a macro per process, so Metal's shader cache misses */
+        macros[@"OPTICS_COLD"] = @(getpid());
+    if (const char *salt = getenv("OPTICS_SHADER_SALT")) /* tests: a cache of its own, as after an update of the MSL */
+        macros[@"OPTICS_SALT"] = @(atoi(salt));
+    if (macros.count)
+        o.preprocessorMacros = macros;
     return o;
 }
+/* The program store: every program Optics prepares is kept as its inputs - both stages' words (decoded again with
+ * pt_r2_shader_decode), their interfaces and the route - in ~/Library/Application Support/Ptolemy/optics-programs.bin;
+ * at the next start each one's MSL is compiled again in the background (4 at a time, utility QoS) and the libraries are
+ * dropped: what stays is Metal's shader cache, so the guest's draw finds its library compiled. After an update of
+ * Ptolemy that changes the MSL text, the games played before do not wait for their first compiles again. A seed file
+ * beside the engine (optics-programs.bin) adds programs shipped with Ptolemy. The draw path is unchanged. Off with
+ * OPTICS_PROGRAM_CACHE=0 (=PATH: another file) and with OPTICS_SHADERS_COLD (first-use tests). */
+namespace {
+struct StoreHead {
+    uint32_t magic, version, route, iface;
+};
+const StoreHead STORE_HEAD = {0x504f5450 /* PTOP */, 1, sizeof(PtR2Route), sizeof(PtR2ShaderInterface)};
+std::mutex store_lock;
+std::set<std::string> store_seen; /* records in the files or written in this session */
+FILE *store_file;
+int store_state; /* 0: the file not opened for writing yet, 1: open, -1: off */
+bool store_fresh; /* the file is missing or of another layout: written anew */
+/* Where the program store lives: OPTICS_PROGRAM_CACHE (a path; 0 turns the store off), none with
+ * OPTICS_SHADERS_COLD, else ~/Library/Application Support/Ptolemy/optics-programs.bin. */
+std::string store_path() {
+    const char *v = getenv("OPTICS_PROGRAM_CACHE");
+    if (v && *v)
+        return strcmp(v, "0") ? std::string(v) : std::string();
+    if (getenv("OPTICS_SHADERS_COLD") || !getenv("HOME"))
+        return std::string();
+    return std::string(getenv("HOME")) + "/Library/Application Support/Ptolemy/optics-programs.bin";
+}
+/* The records of one file ([head][uint32 length][record]...); a file of another layout gives none. */
+std::vector<std::string> store_read(const std::string &path) {
+    std::vector<std::string> out;
+    FILE *f = path.empty() ? NULL : fopen(path.c_str(), "rb");
+    if (!f)
+        return out;
+    StoreHead h;
+    if (fread(&h, sizeof h, 1, f) == 1 && !memcmp(&h, &STORE_HEAD, sizeof h)) {
+        uint32_t n;
+        while (fread(&n, 4, 1, f) == 1 && n && n < (1u << 20)) {
+            std::string r(n, 0);
+            if (fread(&r[0], 1, n, f) != n)
+                break;
+            out.push_back(std::move(r));
+        }
+    }
+    fclose(f);
+    return out;
+}
+std::string store_record(const PtR2ShaderIR *pvs, const PtR2ShaderInterface *vi, const PtR2ShaderIR *us,
+                         const PtR2ShaderInterface *fi, const PtR2Route &r) {
+    std::string b((const char *)&r, sizeof r);
+    b.append((const char *)vi, sizeof *vi);
+    b.append((const char *)fi, sizeof *fi);
+    for (const PtR2ShaderIR *ir : {pvs, us}) {
+        uint32_t h[3] = {ir->stage, ir->precision, ir->word_count};
+        b.append((const char *)h, sizeof h);
+        b.append((const char *)ir->words, 4 * (size_t)ir->word_count);
+    }
+    return b;
+}
+/* A record back into the renderer's inputs; false if it does not parse or decode. */
+bool store_parse(const std::string &b, PtR2Route *r, PtR2ShaderInterface *vi, PtR2ShaderInterface *fi, PtR2ShaderIR *pvs,
+                 PtR2ShaderIR *us) {
+    size_t at = sizeof *r + 2 * sizeof *vi;
+    if (b.size() < at)
+        return false;
+    memcpy(r, b.data(), sizeof *r);
+    memcpy(vi, b.data() + sizeof *r, sizeof *vi);
+    memcpy(fi, b.data() + sizeof *r + sizeof *vi, sizeof *fi);
+    for (PtR2ShaderIR *ir : {pvs, us}) {
+        uint32_t h[3];
+        if (b.size() < at + sizeof h)
+            return false;
+        memcpy(h, b.data() + at, sizeof h);
+        at += sizeof h;
+        if (!h[2] || h[2] > PT_R2_SHADER_WORDS || b.size() < at + 4 * (size_t)h[2])
+            return false;
+        PtR2ShaderError e;
+        if (pt_r2_shader_decode((PtR2ShaderStage)h[0], (PtR2ShaderPrecision)h[1], (const uint32_t *)(b.data() + at),
+                                h[2], 0, ir, &e) != PT_R2_SHADER_OK)
+            return false;
+        at += 4 * (size_t)h[2];
+    }
+    return at == b.size();
+}
+/* Appends a program's record to the store, once per process; the first record opens the file (written anew when it
+ * was of another layout). */
+void store_add(const std::string &rec) {
+    std::lock_guard<std::mutex> g(store_lock);
+    if (store_state < 0 || !store_seen.insert(rec).second)
+        return;
+    if (!store_state) {
+        std::string path = store_path();
+        if (!path.empty()) {
+            NSString *dir = [@(path.c_str()) stringByDeletingLastPathComponent];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            store_file = fopen(path.c_str(), store_fresh ? "wb" : "ab");
+            if (store_file && store_fresh && fwrite(&STORE_HEAD, sizeof STORE_HEAD, 1, store_file) != 1) {
+                fclose(store_file);
+                store_file = NULL;
+            }
+        }
+        store_state = store_file ? 1 : -1;
+        if (!store_file)
+            return;
+    }
+    uint32_t n = (uint32_t)rec.size();
+    std::string out((const char *)&n, 4);
+    out += rec;
+    if (fwrite(out.data(), 1, out.size(), store_file) == out.size()) /* one write: concurrent engines append whole records */
+        fflush(store_file);
+}
+/* Once per process: the files' records are known (so they are not written again), and their libraries compile in the
+ * background into Metal's cache. */
+void store_start(id<MTLDevice> device) {
+    static std::once_flag once;
+    std::call_once(once, [device] {
+        std::string path = store_path();
+        if (path.empty()) {
+            store_state = -1;
+            return;
+        }
+        std::vector<std::string> mine = store_read(path), recs = mine;
+        {
+            FILE *f = fopen(path.c_str(), "rb");
+            StoreHead h;
+            store_fresh = !f || fread(&h, sizeof h, 1, f) != 1 || memcmp(&h, &STORE_HEAD, sizeof h);
+            if (f)
+                fclose(f);
+        }
+        char exe[4096];
+        uint32_t size = sizeof exe;
+        if (!_NSGetExecutablePath(exe, &size)) {
+            std::string seed = std::string([[@(exe) stringByDeletingLastPathComponent] UTF8String]) + "/optics-programs.bin";
+            for (std::string &r : store_read(seed))
+                recs.push_back(std::move(r));
+        }
+        {
+            std::lock_guard<std::mutex> g(store_lock);
+            for (const std::string &r : recs)
+                store_seen.insert(r);
+        }
+        if (recs.empty())
+            return;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            @autoreleasepool {
+                uint64_t t0 = nowNS();
+                MTLCompileOptions *o = compileOptions();
+                dispatch_semaphore_t slots = dispatch_semaphore_create(4);
+                dispatch_group_t g = dispatch_group_create();
+                NSMutableSet<NSString *> *done = [NSMutableSet new];
+                std::unique_ptr<PtR2ShaderIR> pvs(new PtR2ShaderIR), us(new PtR2ShaderIR);
+                unsigned compiled = 0, skipped = 0;
+                for (const std::string &rec : recs) {
+                    PtR2Route r;
+                    PtR2ShaderInterface vi, fi;
+                    NSString *vb = nil, *fb = nil;
+                    if (!store_parse(rec, &r, &vi, &fi, pvs.get(), us.get()) || routeError(device, pvs.get(), &vi, us.get(), &fi, r) ||
+                        !(vb = body(pvs.get(), &vi, nil)) || !(fb = body(us.get(), &fi, nil))) {
+                        skipped++;
+                        continue;
+                    }
+                    for (NSString *source in @[ vertexSource(vb, &vi, r), fragmentSource(fb, us.get(), &fi, r) ]) {
+                        if ([done containsObject:source])
+                            continue;
+                        [done addObject:source];
+                        dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
+                        dispatch_group_enter(g);
+                        compiled++;
+                        [device newLibraryWithSource:source
+                                             options:o
+                                   completionHandler:^(id<MTLLibrary> l, NSError *e) {
+                                       (void)l;
+                                       (void)e;
+                                       dispatch_semaphore_signal(slots);
+                                       dispatch_group_leave(g);
+                                   }];
+                    }
+                }
+                dispatch_group_wait(g, DISPATCH_TIME_FOREVER);
+                fprintf(stderr, "optics: program store: %zu programs (%zu of this machine), %u libraries compiled in the background in %.1f s, %u skipped\n",
+                        recs.size(), mine.size(), compiled, (nowNS() - t0) / 1e9, skipped);
+            }
+        });
+    });
+}
+} // namespace
 /* A draw's MSL libraries not compiled yet start compiling on Metal's threads (once per source); YES while any of them is
  * still compiling, and wake() runs as each one completes. The caller's draw waits (the guest CPU runs meanwhile) and comes
  * back to preparePVS, which finds them. An invalid route or a failed source: NO, preparePVS reports it. */
@@ -1128,7 +1399,7 @@ static MTLCompileOptions *compileOptions() {
         word(key, r.vapSelect[j]);
     }
     for (uint32_t v : {r.fog, r.fogSelect, r.fogOutput, r.clipPlanes, r.flat, r.rop, r.textureFixed, r.generated,
-                       r.generatedShift, r.discard})
+                       r.generatedShift, r.discard, r.generatedScale})
         word(key, v);
     PtR2Program *cached = _programs[key];
     if (cached)
@@ -1218,19 +1489,34 @@ static MTLCompileOptions *compileOptions() {
         return nil;
     _compiled++;
     _programs[[key copy]] = p;
+    store_add(store_record(pvs, vi, us, fi, r));
     return p;
 }
 - (PtR2Target *)targetWidth:(uint32_t)w height:(uint32_t)h samples:(PtR2MsaaInput)input error:(NSError **)error {
+    return [self targetWidth:w height:h samples:input scale:PT_R2_SCALE_ONE error:error];
+}
+/* scale: the internal resolution of the storage; width and height stay the guest's. A multisampled target is a 3D
+ * target from the start and takes the renderer's scale; a single-sample one takes it when depth storage is first
+ * bound to it (promote:), so a desktop or a 2D surface is never scaled. */
+- (PtR2Target *)targetWidth:(uint32_t)w
+                     height:(uint32_t)h
+                    samples:(PtR2MsaaInput)input
+                      scale:(unsigned)scale
+                      error:(NSError **)error {
     if (![self owner:error])
         return nil;
+    if (!w || !h || w > 16384 || h > 16384) { /* before the sizes are scaled */
+        fail(error, @"Invalid offscreen dimensions/device");
+        return nil;
+    }
     uint64_t available;
     {
         std::lock_guard<std::mutex> lock(_runtime->mutex);
         available = _limits.residentBytes - _runtime->resident;
     }
     PtR2MetalSurface *s = [PtR2MetalSurface surfaceWithDevice:_device
-                                                        width:w
-                                                       height:h
+                                                        width:pt_r2_scale_size(w, scale)
+                                                       height:pt_r2_scale_size(h, scale)
                                                         input:input
                                                        budget:available
                                                         error:error];
@@ -1240,10 +1526,17 @@ static MTLCompileOptions *compileOptions() {
         fail(error, @"No pipeline support for this sample count");
         return nil;
     }
+    if (s.samples.count > 1 && scale != _scale) {
+        /* From x2 the larger target already smooths edges: at most PT_R2_SCALE_MSAA_CAP samples of the guest's. */
+        static_assert(PT_R2_SCALE_MSAA_CAP == 2, "aa_config bits 2:1 = 0 select 2 samples (pt_r2_msaa_plan)");
+        if (pt_r2_scale_samples(s.samples.count, _scale) < s.samples.count)
+            input.aa_config &= ~6u;
+        return [self targetWidth:w height:h samples:input scale:_scale error:error];
+    }
     MTLTextureDescriptor *d =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                                               width:w
-                                                              height:h
+                                                               width:s.color.width
+                                                              height:s.color.height
                                                            mipmapped:NO];
     d.storageMode = MTLStorageModePrivate;
     d.usage = MTLTextureUsageRenderTarget;
@@ -1268,6 +1561,9 @@ static MTLCompileOptions *compileOptions() {
     target->lease = lease;
     target->surface = s;
     target->depth = depth;
+    target->gw = w;
+    target->gh = h;
+    target->scale = scale;
     return target;
 }
 - (PtR2Texture *)textureWidth:(uint32_t)w
@@ -1561,6 +1857,7 @@ static MTLCompileOptions *compileOptions() {
     }
     _passes++;
     t->initialized = YES;
+    t->stale = YES;
     return YES;
 }
 - (PtR2Depth *)depthWidth:(uint32_t)w height:(uint32_t)h error:(NSError **)error {
@@ -1570,10 +1867,16 @@ static MTLCompileOptions *compileOptions() {
         fail(error, @"Invalid depth storage size");
         return nil;
     }
+    /* Depth storage is for 3D targets only: always at the internal resolution. */
+    uint32_t tw = pt_r2_scale_size(w, _scale), th = pt_r2_scale_size(h, _scale);
+    if (tw > 16384 || th > 16384) {
+        fail(error, @"Depth storage too large at the internal resolution");
+        return nil;
+    }
     MTLTextureDescriptor *d =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
-                                                               width:w
-                                                              height:h
+                                                               width:tw
+                                                              height:th
                                                            mipmapped:NO];
     d.storageMode = MTLStorageModePrivate;
     d.usage = MTLTextureUsageRenderTarget;
@@ -1589,6 +1892,9 @@ static MTLCompileOptions *compileOptions() {
     lease->texture = tex;
     PtR2Depth *z = [PtR2Depth new];
     z->lease = lease;
+    z->gw = w;
+    z->gh = h;
+    z->scale = _scale;
     return z;
 }
 - (BOOL)target:(PtR2Target *)t depth:(PtR2Depth *)z error:(NSError **)error {
@@ -1599,10 +1905,192 @@ static MTLCompileOptions *compileOptions() {
         return fail(error, @"Depth storage must cover a single-sample target");
     if (t->bound == z)
         return YES;
+    if (z && t->scale != z->scale && ![self promote:t error:error])
+        return NO;
     if (_activeTarget == t)
         [self endRender:2];
     t->bound = z;
     return YES;
+}
+/* The first depth storage bound to a single-sample target makes it a 3D target: from here it is drawn at the internal
+ * resolution. Its colour so far is enlarged into the new storage; the guest-size texture stays as the reduced colour,
+ * so views the caller already holds keep showing the target. */
+- (BOOL)promote:(PtR2Target *)t error:(NSError **)error {
+    if (![self admit:0 error:error])
+        return NO;
+    PtR2Target *big = [self targetWidth:t->gw height:t->gh samples:(PtR2MsaaInput) {} scale:_scale error:error];
+    if (!big)
+        return NO;
+    [self endRender:2];
+    t->reduced = t->surface.color;
+    /* ponytail: the old lease stays charged for the guest-size depth it let go; charge the colour alone if budgets
+     * get tight. */
+    t->reducedLease = t->lease;
+    t->surface = big->surface;
+    t->depth = big->depth;
+    t->lease = big->lease;
+    t->scale = _scale;
+    if (!t->initialized)
+        return YES;
+    /* The new storage's own depth and stencil start as an import leaves them: 1 and 0. */
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.depthAttachment.texture = t->depth;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.clearDepth = 1;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.stencilAttachment.texture = t->depth;
+    pass.stencilAttachment.loadAction = MTLLoadActionClear;
+    pass.stencilAttachment.clearStencil = 0;
+    pass.stencilAttachment.storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [_batch renderCommandEncoderWithDescriptor:pass];
+    if (!e)
+        return fail(error, @"Depth clear encoder failed");
+    [e endEncoding];
+    _passes++;
+    if (![self enlarge:t->reduced x:0 y:0 width:t->gw height:t->gh into:t x:0 y:0 error:error])
+        return NO;
+    t->stale = NO; /* the reduced colour is what was enlarged */
+    return YES;
+}
+/* Guest-size colour (the rectangle at sx, sy) into a scaled target's rectangle at dx, dy, all in guest pixels: each
+ * texel takes the guest pixel under its centre, so at x2 what goes in reads back unchanged (at x1.5 a texel between
+ * two pixels takes the second: see pt_r2_scale_guest). The batch exists (admit:). */
+- (BOOL)enlarge:(id<MTLTexture>)from
+              x:(uint32_t)sx
+              y:(uint32_t)sy
+          width:(uint32_t)w
+         height:(uint32_t)h
+           into:(PtR2Target *)t
+              x:(uint32_t)dx
+              y:(uint32_t)dy
+          error:(NSError **)error {
+    [self endRender:6];
+    unsigned k = t->scale;
+    id<MTLTexture> to = t->surface.color;
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = to;
+    pass.colorAttachments[0].loadAction =
+            !dx && !dy && w == t->gw && h == t->gh ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [_batch renderCommandEncoderWithDescriptor:pass];
+    if (!e)
+        return fail(error, @"Scale encoder failed");
+    /* Guest pixels [a, b) own the texels [first(a), first(b)); the target's last texel belongs to its last pixel. */
+    NSUInteger x0 = pt_r2_scale_first(dx, k), y0 = pt_r2_scale_first(dy, k),
+               x1 = dx + w == t->gw ? to.width : (NSUInteger)pt_r2_scale_first(dx + w, k),
+               y1 = dy + h == t->gh ? to.height : (NSUInteger)pt_r2_scale_first(dy + h, k);
+    MTLScissorRect box = {x0, y0, x1 - x0, y1 - y0};
+    const int32_t p[5] = {(int32_t)k, (int32_t)sx - (int32_t)dx, (int32_t)sy - (int32_t)dy, (int32_t)(sx + w - 1),
+                          (int32_t)(sy + h - 1)};
+    [e setRenderPipelineState:_scaleUp];
+    [e setScissorRect:box];
+    [e setFragmentTexture:from atIndex:0];
+    [e setFragmentBytes:p length:sizeof p atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    t->stale = YES;
+    [_leases addObject:t];
+    _passes++;
+    return YES;
+}
+/* A target's single-sample colour at the guest's size: what export, the scanout snapshot, sampling as a texture and
+ * copies out read. The target's own colour when it is not scaled; else its reduced colour (pt_r2_scale_down8 on the
+ * GPU), reduced again only after the target changed. A multisampled target is resolved by the caller first and reduced
+ * on every call (the resolve control may differ). The batch exists (admit:). */
+- (id<MTLTexture>)reduced:(PtR2Target *)t error:(NSError **)error {
+    if (t->scale == PT_R2_SCALE_ONE)
+        return t->surface.resolved;
+    if (!t->reduced) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                     width:t->gw
+                                                                                    height:t->gh
+                                                                                 mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        d.hazardTrackingMode = MTLHazardTrackingModeTracked;
+        id<MTLTexture> tex = [_device newTextureWithDescriptor:d];
+        if (!tex) {
+            fail(error, @"Reduced colour allocation failed");
+            return nil;
+        }
+        R2Lease *lease = [self charge:tex.allocatedSize error:error];
+        if (!lease)
+            return nil;
+        t->reduced = tex;
+        t->reducedLease = lease;
+        t->stale = YES;
+    }
+    if (!t->stale && t->surface.samples.count == 1)
+        return t->reduced;
+    [self endRender:6];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = t->reduced;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [_batch renderCommandEncoderWithDescriptor:pass];
+    if (!e) {
+        fail(error, @"Scale encoder failed");
+        return nil;
+    }
+    const int32_t p[5] = {(int32_t)t->scale, (int32_t)(t->gw * t->scale), (int32_t)(t->gh * t->scale), 0, 0};
+    [e setRenderPipelineState:_scaleDown];
+    [e setFragmentTexture:t->surface.resolved atIndex:0];
+    [e setFragmentBytes:p length:sizeof p atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    t->stale = NO;
+    [_leases addObject:t];
+    _passes++;
+    return t->reduced;
+}
+/* A rectangle between single-sample colours of two targets, one of them at least scaled (a multisampled source is
+ * resolved by the caller). A 3D target copied into another makes that one a 3D target too: the copy is a buffer swap,
+ * and its destination is what is shown or sampled next. Then the texels are copied as they are where the two
+ * rectangles' texels line up - always at x2, at x1.5 when the origins differ by an even number of pixels - and
+ * otherwise through the guest's size: reduced, then enlarged. The batch exists (admit:). */
+- (BOOL)copyScaled:(PtR2Target *)src
+                 x:(uint32_t)sx
+                 y:(uint32_t)sy
+             width:(uint32_t)w
+            height:(uint32_t)h
+                to:(PtR2Target *)dst
+                 x:(uint32_t)dx
+                 y:(uint32_t)dy
+             error:(NSError **)error {
+    if (dst->scale == PT_R2_SCALE_ONE && ![self promote:dst error:error])
+        return NO;
+    unsigned k = dst->scale;
+    if (src->scale == k && (k == PT_R2_SCALE_MAX || !(((sx ^ dx) | (sy ^ dy)) & 1))) {
+        [self endRender:6];
+        id<MTLBlitCommandEncoder> e = [_batch blitCommandEncoder];
+        if (!e)
+            return fail(error, @"Copy blit encoder failed");
+        uint32_t x0 = pt_r2_scale_first(sx, k), y0 = pt_r2_scale_first(sy, k);
+        [e copyFromTexture:src->surface.resolved
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake(x0, y0, 0)
+                       sourceSize:MTLSizeMake(pt_r2_scale_first(sx + w, k) - x0, pt_r2_scale_first(sy + h, k) - y0, 1)
+                        toTexture:dst->surface.color
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(pt_r2_scale_first(dx, k), pt_r2_scale_first(dy, k), 0)];
+        [e endEncoding];
+        dst->stale = YES;
+        [_leases addObject:dst];
+    } else {
+        id<MTLTexture> from = [self reduced:src error:error];
+        if (!from || ![self enlarge:from x:sx y:sy width:w height:h into:dst x:dx y:dy error:error])
+            return NO;
+    }
+    [_leases addObject:src];
+    _jobs++;
+    return YES;
+}
+/* A view (view:) of a scaled target shows its reduced colour: brought up to date here, before the texture is read. */
+- (BOOL)current:(PtR2Texture *)x error:(NSError **)error {
+    PtR2Target *of = x->viewOf;
+    return !of || of->scale == PT_R2_SCALE_ONE || !of->stale || [self reduced:of error:error] != nil;
 }
 - (BOOL)clearDepth:(PtR2Depth *)z mask:(uint8_t)mask depth:(double)v stencil:(uint8_t)s error:(NSError **)error {
     if (![self owner:error] || ![self valid:z ? z->lease : nil error:error])
@@ -1650,7 +2138,7 @@ static MTLCompileOptions *compileOptions() {
                   sourceSlice:0
                   sourceLevel:0
                  sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(src.width, src.height, 1)
+                   sourceSize:MTLSizeMake(src->lease->texture.width, src->lease->texture.height, 1)
                     toTexture:dst->lease->texture
              destinationSlice:0
              destinationLevel:0
@@ -1672,20 +2160,27 @@ static MTLCompileOptions *compileOptions() {
     unsigned bpp = optics_depth_bytes(f);
     if (!bpp || !bytes || !h || y > z.height || h > z.height - y)
         return fail(error, @"Invalid linear depth import");
-    size_t row = (z.width * 4u + 255u) & ~size_t(255), srow = (z.width + 255u) & ~size_t(255), n = (row + srow) * h;
+    /* The storage rows of guest rows [y, y + h), th of them from t0: each texel takes the guest pixel under its centre
+     * (at PT_R2_SCALE_ONE the same rows and pixels). */
+    unsigned k = z->scale;
+    uint32_t tw = (uint32_t)z->lease->texture.width, t0 = pt_r2_scale_first(y, k),
+             th = (y + h == z.height ? (uint32_t)z->lease->texture.height : pt_r2_scale_first(y + h, k)) - t0;
+    size_t row = (tw * 4u + 255u) & ~size_t(255), srow = (tw + 255u) & ~size_t(255), n = (row + srow) * th;
     if (![self admit:n error:error])
         return NO;
     R2Lease *b = [self buffer:NULL bytes:n error:error];
     if (!b)
         return NO;
     uint8_t *dst = (uint8_t *)b->buffer.contents;
-    for (unsigned j = 0; j < h; j++)
-        for (unsigned x = 0; x < z.width; x++) {
+    for (unsigned j = 0; j < th; j++)
+        for (unsigned x = 0; x < tw; x++) {
+            uint32_t gy = std::min(pt_r2_scale_guest(t0 + j, k), y + h - 1) - y,
+                     gx = std::min(pt_r2_scale_guest(x, k), z.width - 1);
             float v;
             uint8_t s;
-            optics_depth_unpack(f, (const uint8_t *)bytes + ((size_t)j * z.width + x) * bpp, &v, &s);
+            optics_depth_unpack(f, (const uint8_t *)bytes + ((size_t)gy * z.width + gx) * bpp, &v, &s);
             memcpy(dst + j * row + x * 4, &v, 4);
-            dst[row * h + j * srow + x] = s;
+            dst[row * th + j * srow + x] = s;
         }
     if (!z->initialized && ![self clearDepth:z mask:6 depth:1 stencil:0 error:error])
         return NO;
@@ -1696,22 +2191,22 @@ static MTLCompileOptions *compileOptions() {
     [e copyFromBuffer:b->buffer
                    sourceOffset:0
               sourceBytesPerRow:row
-            sourceBytesPerImage:row * h
-                     sourceSize:MTLSizeMake(z.width, h, 1)
+            sourceBytesPerImage:row * th
+                     sourceSize:MTLSizeMake(tw, th, 1)
                       toTexture:z->lease->texture
                destinationSlice:0
                destinationLevel:0
-              destinationOrigin:MTLOriginMake(0, y, 0)
+              destinationOrigin:MTLOriginMake(0, t0, 0)
                         options:MTLBlitOptionDepthFromDepthStencil];
     [e copyFromBuffer:b->buffer
-                   sourceOffset:row * h
+                   sourceOffset:row * th
               sourceBytesPerRow:srow
-            sourceBytesPerImage:srow * h
-                     sourceSize:MTLSizeMake(z.width, h, 1)
+            sourceBytesPerImage:srow * th
+                     sourceSize:MTLSizeMake(tw, th, 1)
                       toTexture:z->lease->texture
                destinationSlice:0
                destinationLevel:0
-              destinationOrigin:MTLOriginMake(0, y, 0)
+              destinationOrigin:MTLOriginMake(0, t0, 0)
                         options:MTLBlitOptionStencilFromDepthStencil];
     [e endEncoding];
     [_leases addObject:b];
@@ -1727,7 +2222,13 @@ static MTLCompileOptions *compileOptions() {
         fail(error, @"Invalid depth export");
         return nil;
     }
-    size_t row = (z.width * 4u + 255u) & ~size_t(255), srow = (z.width + 255u) & ~size_t(255), n = (row + srow) * h;
+    /* The storage rows of guest rows [y0, y0 + h), read whole; copyDepthReadback picks each guest pixel's centre texel.
+     * ponytail: at x2 four times the guest's bytes in one job; rows of centre texels only if the batch byte budget
+     * is ever hit (46 MB for 1920 x 1200). */
+    unsigned k = z->scale;
+    uint32_t tw = (uint32_t)z->lease->texture.width, t0 = pt_r2_scale_first(y0, k),
+             th = pt_r2_scale_first(y0 + h, k) - t0;
+    size_t row = (tw * 4u + 255u) & ~size_t(255), srow = (tw + 255u) & ~size_t(255), n = (row + srow) * th;
     if (![self admit:n error:error])
         return nil;
     R2Lease *b = [self buffer:NULL bytes:n error:error];
@@ -1742,22 +2243,22 @@ static MTLCompileOptions *compileOptions() {
     [e copyFromTexture:z->lease->texture
                          sourceSlice:0
                          sourceLevel:0
-                        sourceOrigin:MTLOriginMake(0, y0, 0)
-                          sourceSize:MTLSizeMake(z.width, h, 1)
+                        sourceOrigin:MTLOriginMake(0, t0, 0)
+                          sourceSize:MTLSizeMake(tw, th, 1)
                             toBuffer:b->buffer
                    destinationOffset:0
               destinationBytesPerRow:row
-            destinationBytesPerImage:row * h
+            destinationBytesPerImage:row * th
                              options:MTLBlitOptionDepthFromDepthStencil];
     [e copyFromTexture:z->lease->texture
                          sourceSlice:0
                          sourceLevel:0
-                        sourceOrigin:MTLOriginMake(0, y0, 0)
-                          sourceSize:MTLSizeMake(z.width, h, 1)
+                        sourceOrigin:MTLOriginMake(0, t0, 0)
+                          sourceSize:MTLSizeMake(tw, th, 1)
                             toBuffer:b->buffer
-                   destinationOffset:row * h
+                   destinationOffset:row * th
               destinationBytesPerRow:srow
-            destinationBytesPerImage:srow * h
+            destinationBytesPerImage:srow * th
                              options:MTLBlitOptionStencilFromDepthStencil];
     [e endEncoding];
     PtR2Readback *r = [PtR2Readback new];
@@ -1767,6 +2268,9 @@ static MTLCompileOptions *compileOptions() {
     r->depthPlanes = YES;
     r->width = z.width;
     r->height = h;
+    r->scale = k;
+    r->originY = y0;
+    r->rows = th;
     r->status.store(0);
     [_readbacks addObject:r];
     [_leases addObject:r];
@@ -1787,14 +2291,19 @@ static MTLCompileOptions *compileOptions() {
         fail(error, @"Depth readback not successfully completed", 2);
         return nil;
     }
-    NSMutableData *out = [NSMutableData dataWithLength:(size_t)r.width * r.height * bpp];
+    const unsigned w = r.width, h = r.height; /* once: a message per pixel cost seconds at 4K (u239b) */
+    NSMutableData *out = [NSMutableData dataWithLength:(size_t)w * h * bpp];
+    uint8_t *o = (uint8_t *)out.mutableBytes;
     const uint8_t *p = (const uint8_t *)r->lease->buffer.contents;
-    for (unsigned y = 0; y < r.height; y++)
-        for (unsigned x = 0; x < r.width; x++) {
+    uint32_t t0 = pt_r2_scale_first(r->originY, r->scale);
+    for (unsigned y = 0; y < h; y++)
+        for (unsigned x = 0; x < w; x++) {
+            /* not averaged: the texel under the guest pixel's centre (at PT_R2_SCALE_ONE the pixel itself) */
+            uint32_t ty = pt_r2_scale_centre(r->originY + y, r->scale) - t0, tx = pt_r2_scale_centre(x, r->scale);
             float v;
-            memcpy(&v, p + y * r->rowBytes + x * 4, 4);
-            uint8_t s = p[r->rowBytes * r.height + y * r->stencilRow + x];
-            if (!optics_depth_pack(f, v, s, (uint8_t *)out.mutableBytes + ((size_t)y * r.width + x) * bpp)) {
+            memcpy(&v, p + ty * r->rowBytes + tx * 4, 4);
+            uint8_t s = p[r->rowBytes * r->rows + ty * r->stencilRow + tx];
+            if (!optics_depth_pack(f, v, s, o + ((size_t)y * w + x) * bpp)) {
                 fail(error, @"GPU depth is outside normalized integer range");
                 return nil;
             }
@@ -1805,7 +2314,8 @@ static MTLCompileOptions *compileOptions() {
     if (![self owner:error] || ![self valid:t ? t->lease : nil error:error] ||
         ![self valid:z ? z->lease : nil error:error])
         return NO;
-    if (t->surface.samples.count < 2 || !t->initialized || z.width != t.width || z.height != t.height)
+    if (t->surface.samples.count < 2 || !t->initialized || z.width != t.width || z.height != t.height ||
+        z->scale != t->scale)
         return fail(error, @"Depth resolve needs an initialized multisampled target of the storage's size");
     if (![self admit:0 error:error])
         return NO;
@@ -1846,7 +2356,7 @@ static MTLCompileOptions *compileOptions() {
                : x == 4 ? MTLTextureSwizzleZero
                         : MTLTextureSwizzleOne;
     };
-    id<MTLTexture> v = [t->surface.color
+    id<MTLTexture> v = [(t->scale == PT_R2_SCALE_ONE ? t->surface.color : t->reduced)
             newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
                               textureType:MTLTextureType2D
                                    levels:NSMakeRange(0, 1)
@@ -1865,6 +2375,7 @@ static MTLCompileOptions *compileOptions() {
     PtR2Texture *r = [PtR2Texture new];
     r->lease = lease;
     r->status.store(0);
+    r->viewOf = t;
     return r; /* Borrowed mutable view: never a completed host frame. */
 }
 - (PtR2Texture *)copyView:(PtR2Target *)t
@@ -1881,7 +2392,9 @@ static MTLCompileOptions *compileOptions() {
     }
     if (![self admit:0 error:error])
         return nil;
-    id<MTLTexture> src = t->surface.color;
+    id<MTLTexture> src = [self reduced:t error:error];
+    if (!src)
+        return nil;
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat
                                                                                  width:w
                                                                                 height:h
@@ -1956,11 +2469,14 @@ static MTLCompileOptions *compileOptions() {
         return fail(error, @"Copy needs two initialized single-sample targets and an in-bounds rectangle");
     if (![self admit:0 error:error])
         return NO;
+    if (src->scale != PT_R2_SCALE_ONE || dst->scale != PT_R2_SCALE_ONE)
+        return [self copyScaled:src x:sx y:sy width:w height:h to:dst x:dx y:dy error:error];
+    id<MTLTexture> from = src->surface.color;
     [self endRender:6];
     id<MTLBlitCommandEncoder> e = [_batch blitCommandEncoder];
     if (!e)
         return fail(error, @"Copy blit encoder failed");
-    [e copyFromTexture:src->surface.color
+    [e copyFromTexture:from
                   sourceSlice:0
                   sourceLevel:0
                  sourceOrigin:MTLOriginMake(sx, sy, 0)
@@ -1996,10 +2512,13 @@ static MTLCompileOptions *compileOptions() {
                 @"Resolve needs an initialized multisampled source, a single-sample target and an in-bounds rectangle");
     if (![self admit:0 error:error] || ![self resolve:src control:c error:error])
         return NO;
+    if (src->scale != PT_R2_SCALE_ONE || dst->scale != PT_R2_SCALE_ONE)
+        return [self copyScaled:src x:sx y:sy width:w height:h to:dst x:dx y:dy error:error];
+    id<MTLTexture> from = src->surface.resolved;
     id<MTLBlitCommandEncoder> e = [_batch blitCommandEncoder];
     if (!e)
         return fail(error, @"Resolve blit encoder failed");
-    [e copyFromTexture:src->surface.resolved
+    [e copyFromTexture:from
                   sourceSlice:0
                   sourceLevel:0
                  sourceOrigin:MTLOriginMake(sx, sy, 0)
@@ -2020,7 +2539,9 @@ static MTLCompileOptions *compileOptions() {
         return NO;
     if (t->surface.samples.count != 1 || src->lease->texture.width != t.width || src->lease->texture.height != t.height)
         return fail(error, @"Import needs a single-sample target of the texture's size");
-    if (![self admit:0 error:error])
+    if (t->scale != PT_R2_SCALE_ONE)
+        return fail(error, @"Import into a target already at the internal resolution");
+    if (![self admit:0 error:error] || ![self current:src error:error])
         return NO;
     [self endRender:7];
     id<MTLBlitCommandEncoder> e = [_batch blitCommandEncoder];
@@ -2168,6 +2689,9 @@ static MTLCompileOptions *compileOptions() {
             (uint64_t)count * p->route.stride + (uint64_t)n * 4 + p->vertexConstantBytes + p->fragmentConstantBytes;
     if (![self admit:bytes error:error])
         return NO;
+    for (unsigned j = 0; j < 16; j++)
+        if ((p->textureMask & (1u << j)) && ![self current:textures[j] error:error])
+            return NO;
     static const float zero[256 * 4] = {0};
     R2Slice vb = [self upload:v bytes:(size_t)count * p->route.stride error:error], ib = [self upload:index
                                                                                                 bytes:n * 4
@@ -2200,13 +2724,24 @@ static MTLCompileOptions *compileOptions() {
         [_encoder setFrontFacingWinding:r.frontCCW ? MTLWindingCounterClockwise : MTLWindingClockwise];
         _boundWinding = r.frontCCW;
     }
-    if (fresh || _boundBias[0] != r.depthBias || _boundBias[1] != r.depthSlope) {
-        [_encoder setDepthBias:r.depthBias slopeScale:r.depthSlope clamp:0];
+    /* The depth slope is per texel, and a scaled target has scale / 2 texels to a guest pixel. */
+    float slope = t->scale == PT_R2_SCALE_ONE ? r.depthSlope : pt_r2_scale_length(r.depthSlope, t->scale);
+    if (fresh || _boundBias[0] != r.depthBias || _boundBias[1] != slope) {
+        [_encoder setDepthBias:r.depthBias slopeScale:slope clamp:0];
         _boundBias[0] = r.depthBias;
-        _boundBias[1] = r.depthSlope;
+        _boundBias[1] = slope;
     }
     MTLViewport vp = {r.x, r.y, r.width, r.height, r.znear, r.zfar};
     MTLScissorRect sc = {r.scissorX, r.scissorY, r.scissorWidth, r.scissorHeight};
+    if (t->scale != PT_R2_SCALE_ONE) { /* guest pixels to target texels; the scissor's edges move outward */
+        vp.originX = pt_r2_scale_length((float)r.x, t->scale);
+        vp.originY = pt_r2_scale_length((float)r.y, t->scale);
+        vp.width = pt_r2_scale_length((float)r.width, t->scale);
+        vp.height = pt_r2_scale_length((float)r.height, t->scale);
+        PtR2ScaleBox g = {r.scissorX, r.scissorY, r.scissorX + r.scissorWidth, r.scissorY + r.scissorHeight};
+        g = pt_r2_scale_scissor(g, t->scale, (uint32_t)t->surface.color.width, (uint32_t)t->surface.color.height);
+        sc = {g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0};
+    }
     if (fresh || memcmp(&_boundViewport, &vp, sizeof vp)) {
         [_encoder setViewport:vp];
         _boundViewport = vp;
@@ -2302,8 +2837,12 @@ static MTLCompileOptions *compileOptions() {
             _passSlot = _visibilityNext++ % 8192;
             ((uint64_t *)_visibility.contents)[_passSlot] = 0;
             _passQuery = r.query;
-            if (_querySlots.size() >= 4096)
+            if (_querySlots.size() >= 4096) {
                 _querySlots.clear(); /* queries never asked for */
+                _queryScale.clear();
+            }
+            if (t->scale != PT_R2_SCALE_ONE)
+                _queryScale[r.query] = t->scale;
             auto &slots = _querySlots[r.query];
             if (slots.size() < 64)
                 slots.push_back(_passSlot);
@@ -2336,6 +2875,12 @@ static MTLCompileOptions *compileOptions() {
     for (uint32_t s : it->second)
         n += v[s];
     _querySlots.erase(it);
+    auto scaled = _queryScale.find(query);
+    if (scaled != _queryScale.end()) { /* texels of a scaled target as guest pixels, rounded up: seen stays seen */
+        unsigned kk = scaled->second * scaled->second;
+        n = (n * 4 + kk - 1) / kk;
+        _queryScale.erase(scaled);
+    }
     return n;
 }
 - (BOOL)resolve:(PtR2Target *)t control:(uint32_t)c error:(NSError **)error {
@@ -2358,9 +2903,12 @@ static MTLCompileOptions *compileOptions() {
     }
     if (![self admit:0 error:error])
         return nil;
+    /* The frame that is shown is the storage itself, at the target's internal resolution (the presenter fits it to
+     * the screen): not the reduced colour. */
+    id<MTLTexture> from = t->surface.resolved;
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                 width:t.width
-                                                                                height:t.height
+                                                                                 width:from.width
+                                                                                height:from.height
                                                                              mipmapped:NO];
     d.storageMode = MTLStorageModePrivate;
     d.usage = MTLTextureUsageShaderRead;
@@ -2380,11 +2928,11 @@ static MTLCompileOptions *compileOptions() {
         fail(error, @"Snapshot blit encoder failed");
         return nil;
     }
-    [e copyFromTexture:t->surface.resolved
+    [e copyFromTexture:from
                   sourceSlice:0
                   sourceLevel:0
                  sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(t.width, t.height, 1)
+                   sourceSize:MTLSizeMake(from.width, from.height, 1)
                     toTexture:tex
              destinationSlice:0
              destinationLevel:0
@@ -2425,12 +2973,15 @@ static MTLCompileOptions *compileOptions() {
         return nil;
     if (![self resolve:t control:c error:error])
         return nil;
+    id<MTLTexture> from = [self reduced:t error:error];
+    if (!from)
+        return nil;
     id<MTLBlitCommandEncoder> e = [_batch blitCommandEncoder];
     if (!e) {
         fail(error, @"Readback blit encoder failed");
         return nil;
     }
-    [e copyFromTexture:t->surface.resolved
+    [e copyFromTexture:from
                          sourceSlice:0
                          sourceLevel:0
                         sourceOrigin:MTLOriginMake(0, 0, 0)

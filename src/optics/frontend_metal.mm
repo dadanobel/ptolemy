@@ -19,6 +19,7 @@
  *   (pool them if allocation shows up in a profile). */
 #import <Metal/Metal.h>
 #include "renderer.h"
+#include "foundation/internal_scale.h"
 #include "render_owner.h"
 #import "diagnostics_metal.h"
 extern "C" {
@@ -65,8 +66,15 @@ struct Surface {
  * C0..C3 (2 bits each: A, R, G, B), byte k of a pixel holding C_k; zero (not programmed) reads as B, G, R, A. Tiger's driver
  * programs it (Doom 3): 0x1b for the drawable, 0x39 (R, G, B, A) for some targets. Unverified: UV88 holds C0 and C1,
  * I8 holds C2. */
+/* COLOUR_FP16: ARGB16161616 drawn with OUT_FMT C4_16_FP - halves in VRAM (the unorm16 form read 1.0 as 0xffff, a half NaN:
+ * Leopard's GL_RGBA16F FBO sampled as TX format 0x1A came out black, u195 #8/#16/#24/#32). Set by colour-writing draws. */
+enum { COLOUR_FP16 = 26 };
+/* COLOUR_RGB10A2: a 32-bit target drawn with OUT_FMT C_2_10_10_10 - C0, C1, C2 in 10 bits from bit 0 and C3 in 31:30 of
+ * a little-endian word (Tiger's GL_RGB10_A2 FBO: red read back as R = 255 of 1023, u195/u202 #22). */
+enum { COLOUR_RGB10A2 = 27 };
+/* Bytes per pixel of a colour format: 8 (the 64-bit ones), 4 (ARGB8888, RGB10A2), 1 (format 9), else 2. */
 static unsigned colour_bytes(unsigned f) {
-    return f == 10 ? 8 : f == 6 ? 4 : f == 9 ? 1 : 2;
+    return f == 10 || f == COLOUR_FP16 ? 8 : f == 6 || f == COLOUR_RGB10A2 ? 4 : f == 9 ? 1 : 2;
 }
 static unsigned colour_channel(unsigned sel, unsigned k) {
     unsigned s = (sel ? sel : 0x1b) >> (2 * k) & 3;
@@ -74,7 +82,7 @@ static unsigned colour_channel(unsigned sel, unsigned k) {
 } /* RGBA index of C_k */
 static OpticsPixelLayout colour_layout(unsigned f, unsigned sel) {
     OpticsPixelLayout l = {OPTICS_PIXEL_RGBA8, {2, 1, 0, 3}};
-    if (f == 6 || f == 10)
+    if (f == 6 || f == 10 || f == COLOUR_FP16 || f == COLOUR_RGB10A2)
         for (unsigned k = 0; k < 4; k++)
             l.component[colour_channel(sel, k)] = (uint8_t)k; /* ARGB16161616: its high bytes, compacted first */
     else if (f == 3 || f == 4 || f == 15) {
@@ -106,6 +114,18 @@ static void colour_pack(unsigned f, unsigned sel, const uint8_t *p, uint8_t *o) 
         for (unsigned k = 0; k < 4; k++)
             o[2 * k] = o[2 * k + 1] = p[colour_channel(sel, k)];
         return; /* each channel *257 */
+    case COLOUR_FP16:
+        for (unsigned k = 0; k < 4; k++) {
+            __fp16 h = (__fp16)(p[colour_channel(sel, k)] / 255.0f);
+            memcpy(o + 2 * k, &h, 2); /* little-endian, as texture formats 0x18..0x1A are read */
+        }
+        return;
+    case COLOUR_RGB10A2:
+        v = q(colour_channel(sel, 0), 1023) | q(colour_channel(sel, 1), 1023) << 10 | q(colour_channel(sel, 2), 1023) << 20 |
+            q(colour_channel(sel, 3), 3) << 30;
+        for (unsigned k = 0; k < 4; k++)
+            o[k] = (uint8_t)(v >> 8 * k);
+        return;
     case 9:
         o[0] = p[colour_channel(sel, 2)];
         return;
@@ -126,6 +146,30 @@ static void colour_pack(unsigned f, unsigned sel, const uint8_t *p, uint8_t *o) 
     o[0] = (uint8_t)v;
     o[1] = (uint8_t)(v >> 8);
 }
+/* An 8-byte-per-pixel target's guest bytes -> four bytes a pixel, in place: unorm16 keeps each high byte, halves their
+ * value (clamped to [0,1], rounded). */
+static void wide_to_bytes(std::vector<uint8_t> &rows, size_t pixels, unsigned f) {
+    if (f == COLOUR_RGB10A2) /* C0..C3 bytes, as colour_layout reads them */
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t *b = &rows[4 * i];
+            uint32_t w = b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
+            for (unsigned k = 0; k < 3; k++)
+                b[k] = (uint8_t)(((w >> 10 * k & 1023) * 255 + 511) / 1023);
+            b[3] = (uint8_t)((w >> 30) * 85);
+        }
+    if (colour_bytes(f) != 8)
+        return;
+    for (size_t i = 0; i < pixels * 4; i++) {
+        if (f != COLOUR_FP16) {
+            rows[i] = rows[2 * i + 1];
+            continue;
+        }
+        __fp16 h;
+        memcpy(&h, &rows[2 * i], 2);
+        float v = (float)h;
+        rows[i] = (uint8_t)(!(v > 0.0f) ? 0 : v >= 1.0f ? 255 : lrintf(v * 255.0f));
+    }
+}
 /* Independent depth/stencil storage by guest identity: ZB_DEPTHOFFSET, ZB_DEPTHPITCH and size (normalized D32F/S8). Two
  * colour targets on one depth buffer share it; one colour target alternating depth buffers rebinds. A linear depth
  * buffer (linear_io) is imported from VRAM and, like a colour surface, owned while the GPU has written it: a CPU access
@@ -139,11 +183,13 @@ struct Depth {
     PtR2IoToken watch, own;
     uint32_t format = 0, extent = 0, layout = 0;
     bool dirty = false, linear_io = false;
+    bool stale = false; /* a page of it had a newer GPU owner at export (reused VRAM): materialize drops it */
 }; /* height: private capacity; extent: largest guest-visible row used */
 static int env(const char *name, int unset) {
     const char *v = getenv(name);
     return v ? atoi(v) : unset;
 }
+/* OPTICS_CULL (diagnostic): 1 culling as the guest asks (default), 0 none, 2 with the opposite winding. */
 static int cull_mode() {
     static const int mode = env("OPTICS_CULL", 1);
     return mode;
@@ -308,13 +354,15 @@ int failhard(const char **why, const char *s, NSError *e) { /* the executor itse
  * up to a budget - a shader Metal compiled before (its cache) comes back within a few ms - and past it is skipped while
  * Metal compiles in the background, instead of holding the ring (and every frame) for 100-200 ms on a first use. The
  * object shows from a frame or two later; ordering holds, a skipped draw writes nothing. A still picture or a one-shot
- * render (defer 1) waits as before: its result may be read back. OPTICS_ASYNC_SHADERS: the budget in ms (default 10),
- * 0 restores the wait. t988: with no budget Antiochus gpu-rosetta lost its frame marker (105 draws skipped). */
+ * render (defer 1) waits as before: its result may be read back. OPTICS_ASYNC_SHADERS: the budget in ms, 0 (default since
+ * 21.11) the wait. t988: with no budget Antiochus gpu-rosetta lost its frame marker (105 draws skipped). u051: a skip is lost
+ * for good where the guest redraws only what changed - Leopard's desktop stayed grey from the login screen until a window
+ * moved over it (11 draws skipped while 34 shaders compiled). Metal keeps compiled shaders across runs: the wait is once. */
 static uint64_t async_wait_ns() {
     static int64_t ms = -1;
     if (ms < 0) {
         const char *v = getenv("OPTICS_ASYNC_SHADERS");
-        ms = v ? atoi(v) : 10;
+        ms = v ? atoi(v) : 0;
         if (ms < 0)
             ms = 0;
     }
@@ -380,9 +428,12 @@ struct Exec {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device)
             return false;
-        /* Four batches in flight: fences and scanout snapshots commit small batches next to the draw batches. */
+        /* Four batches in flight: fences and scanout snapshots commit small batches next to the draw batches.
+         * OPTICS_MAX_BATCHES (development, 2..16): another depth, for A/B runs. */
         PtR2Limits limits = pt_r2_default_limits(device);
         limits.maxBatches = std::max(limits.maxBatches, 4u);
+        if (const char *m = getenv("OPTICS_MAX_BATCHES"))
+            limits.maxBatches = std::min(16u, std::max(2u, (unsigned)atoi(m)));
         NSError *local = nil;
         renderer = owner.on([&] {
             return [[PtR2Renderer alloc] initWithDevice:device
@@ -395,6 +446,8 @@ struct Exec {
                 *e = local;
             return false;
         }
+        if (unsigned k = pt_r2_scale_parse(getenv("OPTICS_INTERNAL")); k != PT_R2_SCALE_ONE)
+            NSLog(@"optics-frontend: internal resolution x%g for targets with depth", k * 0.5);
         adopted = pthread_self();
         completed = dispatch_semaphore_create(0);
         dispatch_semaphore_t s = completed;
@@ -410,15 +463,19 @@ struct Exec {
             *e = local;
         return ok;
     }
+    /* The device's page tracker (watches and ownership of VRAM and GART pages). */
     PtR2Io *io() {
         return optics_frontend_io(dev);
     }
+    /* Stops watching a range: a CPU write there no longer reaches this executor. */
     void unwatch(PtR2IoToken &t) {
         if (t.id) {
             pt_r2_io_release(io(), t);
             t = PtR2IoToken{};
         }
     }
+    /* Watches [start, start+n): a CPU or device write there makes the executor drop its copy. false: not watched
+     * (logged). */
     bool watch(PtR2IoToken &t, uint64_t start, uint64_t n) {
         PtR2IoResult r = optics_frontend_cpu_sync(dev, start, n) ? PT_R2_IO_COHERENCE
                                                                  : pt_r2_io_watch(io(), start, (size_t)n, &t);
@@ -445,6 +502,7 @@ struct Exec {
         }
         return true;
     }
+    /* Ends a range's watch and its GPU ownership (an export not done is given up). */
     void release(PtR2IoToken &w, PtR2IoToken &o) {
         unwatch(w);
         if (o.id) {
@@ -468,6 +526,7 @@ struct Exec {
         gart_order.clear();
         gart_bytes = 0;
     }
+    /* Drops decoded texture i from the cache. */
     void uncache(size_t i) {
         TexKey k;
         memcpy(k.k, cache[i].key, sizeof k.k);
@@ -476,6 +535,7 @@ struct Exec {
         cache_bytes -= cache[i].end - cache[i].start;
         cache.erase(cache.begin() + i);
     }
+    /* Drops every decoded texture whose bytes overlap [start, end): something wrote them. */
     void invalidate(uint64_t start, uint64_t end) {
         if (cache.empty() || end <= cache_lo || start >= cache_hi)
             return;
@@ -506,6 +566,7 @@ struct Exec {
         z.dirty = true;
         return true;
     }
+    /* A depth storage leaves `depths`: unbound from every target, its pages open. */
     void forget_depth(Depth &z) {
         unbind(z.depth);
         release(z.watch, z.own);
@@ -530,6 +591,8 @@ struct Exec {
     }
     /* Timeline: the jobs the frontend issued since the last submission are in the batches through `committed`. */
     std::vector<std::pair<uint64_t, PtR2TimelineToken>> tokens;
+    /* Hands the frontend's newest timeline job to the batch just committed; completes it at once when the GPU is
+     * idle or broken. */
     void submit_jobs() {
         PtR2TimelineToken k;
         if (!optics_frontend_timeline_submit(dev, &k))
@@ -566,6 +629,7 @@ struct Exec {
             optics_frontend_gpu_wait_end(dev, released);
         }
     }
+    /* Commits the batch being recorded to the GPU queue. false: nothing was batched, or the renderer failed. */
     bool commit(NSError **e) {
         owner.barrier();
         if (owner.error(e)) {
@@ -685,7 +749,7 @@ struct Exec {
         NSError *e = nil;
         MTLClearColor c = MTLClearColorMake((color >> 16 & 255) / 255.0, (color >> 8 & 255) / 255.0,
                                             (color & 255) / 255.0, (color >> 24) / 255.0);
-        if (s.fmt != 6 && s.fmt != 10) { /* a narrow format's clear value in its own bytes (unverified: the low ones) */
+        if (s.fmt != 6 && s.fmt != 10 && s.fmt != COLOUR_FP16) { /* a narrow format's clear value in its own bytes (unverified: the low ones) */
             const uint8_t b[4] = {(uint8_t)color, (uint8_t)(color >> 8), (uint8_t)(color >> 16),
                                   (uint8_t)(color >> 24)};
             uint8_t q[4];
@@ -719,10 +783,12 @@ struct Exec {
         s.clear = 0;
         return true;
     }
+    /* A pending fast clear of s, with the clear values the registers hold now. */
     bool apply_clear(Surface &s) {
         return apply_clear(s, optics_frontend_register(dev, 0x4e14), optics_frontend_register(dev, 0x4f28),
                            optics_frontend_register(dev, 0x4f10));
     }
+    /* Uploads rows [first, end) of a depth buffer from VRAM into its GPU storage. */
     bool load_depth(Depth &z, uint32_t first, uint32_t end) {
         if (first == end)
             return true;
@@ -765,6 +831,11 @@ struct Exec {
                  y1 = (uint32_t)std::min<uint64_t>((end - z.start + stride - 1) / stride, z.extent);
         if (y0 >= y1)
             return true;
+        /* Exported whole since the GPU last drew it: VRAM holds it. Each CPU read of a watched depth used to export again:
+         * a game's depth left under a 3840x2160 desktop was exported on every scanout and fault, and the guest stalled
+         * (u236b, u239b, u241). */
+        if (!z.dirty && !z.clear)
+            return true;
         if (z.clear) {
             OpticsDraw state = {};
             state.depth_clear_word = optics_frontend_register(dev, 0x4f28);
@@ -796,21 +867,33 @@ struct Exec {
             return true;
         }
         unwatch(z.watch);
-        if (stride == row && pt_r2_io_cpu_write(io(), a, data.bytes, data.length, 0) != PT_R2_IO_OK) {
+        PtR2IoResult wr = stride == row ? pt_r2_io_cpu_write(io(), a, data.bytes, data.length, 0) : PT_R2_IO_OK;
+        for (uint32_t y = y0; wr == PT_R2_IO_OK && stride != row && y < y1; y++)
+            wr = pt_r2_io_cpu_write(io(), z.start + (uint64_t)y * stride,
+                                    (const uint8_t *)data.bytes + (size_t)(y - y0) * row, row, 0);
+        if (wr == PT_R2_IO_BUSY) { /* a GPU-owned colour target holds a page of it: the driver reused this memory (Tiger,
+                                    * u195 T2 #326), so the colour owner is current and is exported by the same
+                                    * materialize; this depth copy is stale - not written, dropped, the device goes on */
+            static unsigned shown;
+            if (shown++ < 8)
+                NSLog(@"optics-frontend: depth %#llx rows %u-%u over a page a GPU colour target owns: stale, dropped",
+                      (unsigned long long)z.zb, y0, y1);
+            z.stale = true;
+            return true;
+        }
+        if (wr != PT_R2_IO_OK) { /* was silent: the device failed with no reason in the log (u186) */
+            NSLog(@"optics-frontend: depth export at %#llx rows %u-%u: %s", (unsigned long long)z.zb, y0, y1,
+                  pt_r2_io_result(wr));
             broken = true;
             return false;
         }
-        for (uint32_t y = y0; stride != row && y < y1; y++)
-            if (pt_r2_io_cpu_write(io(), z.start + (uint64_t)y * stride,
-                                   (const uint8_t *)data.bytes + (size_t)(y - y0) * row, row, 0) != PT_R2_IO_OK) {
-                broken = true;
-                return false;
-            }
         (void)watch(
                 z.watch, z.start,
                 z.end - z.start); /* if this fails (a page another surface owns), it stays unwatched (materialize) */
         invalidate(a, a + n);
         stats_writebacks++;
+        if (!y0 && y1 == z.extent)
+            z.dirty = false; /* until the next draw into it (depth_touch) */
         return true;
     }
     /* One lazy export per dirty version, not per CPU read or end of pass. */
@@ -850,6 +933,7 @@ struct Exec {
                                   : pt_r2_io_cpu_write(io(), z.start, out.data(), out.size(), 0);
         z.own = PtR2IoToken{};
         if (r != PT_R2_IO_OK) {
+            NSLog(@"optics-frontend: depth write-back at %#llx: %s", (unsigned long long)z.zb, pt_r2_io_result(r));
             broken = true;
             return false;
         }
@@ -936,7 +1020,14 @@ struct Exec {
                 memcpy(p + 16, p, 4);
             }
         unwatch(s.zwatch);
-        if (pt_r2_io_cpu_write(io(), a, out.data(), out.size(), 0) != PT_R2_IO_OK) {
+        PtR2IoResult wr = pt_r2_io_cpu_write(io(), a, out.data(), out.size(), 0);
+        if (wr == PT_R2_IO_BUSY) { /* as in export_depth: a newer GPU owner of a page - this copy is stale, untracked */
+            s.zstart = s.zend = 0;
+            return true;
+        }
+        if (wr != PT_R2_IO_OK) {
+            NSLog(@"optics-frontend: multisampled depth export at %#llx: %s", (unsigned long long)s.zgpu,
+                  pt_r2_io_result(wr));
             broken = true;
             return false;
         }
@@ -946,6 +1037,9 @@ struct Exec {
         stats_writebacks++;
         return true;
     }
+    /* Before a CPU, 2D or other device access to [start, end): GPU colour and depth results there go back to VRAM.
+     * A write also drops the GPU copies and decoded textures it overlaps; a read keeps them, watched. 0: VRAM is
+     * current; -1: an export failed. */
     int materialize(uint64_t start, uint64_t end, int write) {
         if (busy)
             return 0;
@@ -974,6 +1068,12 @@ struct Exec {
                 }
                 if (!depths[i].linear_io && depth_io() && !export_depth(depths[i], start, end))
                     return -1;
+                if (depths[i].stale) {
+                    forget_depth(depths[i]);
+                    depths.erase(depths.begin() + i);
+                    depth_drops++;
+                    continue;
+                }
                 /* A linear buffer exported whole that could not be watched again (a page another surface owns): VRAM is
                  * current, so it is dropped and the next draw imports it. A GPU-only buffer exported in part stays,
                  * unwatched (approximation: a later CPU write to it is not seen). */
@@ -1030,6 +1130,7 @@ struct Exec {
         static const int v = env("OPTICS_COMMIT_DRAWS", 0);
         return v > 0 ? (unsigned)v : 512;
     }
+    /* OPTICS_COMMIT_LAZY: commits the open batch while the GPU has nothing else to do. */
     void commit_if_idle() {
         if (lazy() && renderer && !broken && finished >= committed) {
             NSError *e = nil;
@@ -1110,6 +1211,8 @@ struct Exec {
             }
         }
     }
+    /* A fast clear of a colour (plane 1) or depth (plane 2) buffer: marked on the storages that hold it, else kept
+     * pending for its next import. 1: no room to keep it. */
     int clear(uint64_t gpu, int plane) {
         bool done = false;
         if (plane == 2) {
@@ -1158,10 +1261,13 @@ struct Exec {
             *code = fail(why, "colour target outside VRAM", nil);
             return nullptr;
         }
-        if (materialize(start, start + row * H, 1)) {
+        /* Other owned views go back and are dropped - every one that shares a 4 KiB page with this buffer, not only
+         * those it overlaps: VRAM is watched and owned by pages, and a neighbour's page would refuse the watch below
+         * (RSS Visualizer: small targets at 0x305400 and 0x305500). */
+        if (materialize(start & ~UINT64_C(4095), (start + row * H + 4095) & ~UINT64_C(4095), 1)) {
             *code = failhard(why, "export before a colour import", nil);
             return nullptr;
-        } /* other owned views go back and are dropped */
+        }
         std::vector<uint8_t> rows(row * H);
         busy = true;
         int ok = optics_frontend_gpu_read(dev, gpu, rows.data(), rows.size());
@@ -1170,9 +1276,7 @@ struct Exec {
             *code = fail(why, "colour target outside GPU memory", nil);
             return nullptr;
         }
-        if (bpp == 8)
-            for (size_t i = 0; i < (size_t)W * H * 4; i++)
-                rows[i] = rows[2 * i + 1]; /* 16-bit LE channels: high bytes, in place */
+        wide_to_bytes(rows, (size_t)W * H, fmt);
         PtR2Texture *current = retry(
                 [&] {
                     return owner.on([&] {
@@ -1241,8 +1345,9 @@ struct Exec {
         Surface s = {start,          start + row * H, gpu,           W,   H,   target, false, clear, nil, 0,
                      next_version++, PtR2IoToken{},   PtR2IoToken{}, nil, bpp, fmt,    sel};
         s.aa = samples;
-        if (!watch(s.watch, s.start, s.end - s.start)) {
-            *code = failhard(why, "VRAM watch of an imported surface", nil);
+        scaled(s, PT_R2_SCALE_ONE, "multisampled");
+        if (!watch(s.watch, s.start, s.end - s.start)) { /* this draw is refused; the device keeps running */
+            *code = fail(why, "VRAM watch of an imported surface", nil);
             return nullptr;
         }
         owned.push_back(s);
@@ -1300,9 +1405,7 @@ struct Exec {
             return false;
         }
         swap_target(rows.data(), rows.size(), endian);
-        if (bpp == 8)
-            for (size_t i = 0; i < (size_t)W * H * 4; i++)
-                rows[i] = rows[2 * i + 1]; /* 16-bit LE channels: high bytes, in place */
+        wide_to_bytes(rows, (size_t)W * H, fmt);
         PtR2Texture *current = retry(
                 [&] {
                     return owner.on([&] {
@@ -1328,6 +1431,8 @@ struct Exec {
                     nil, bpp, fmt, sel}; /* fast clears are VRAM's */
         return true;
     }
+    /* A colour target in guest RAM (GART) goes back there at once, in its format and byte order: guest RAM reads do
+     * not trap. */
     bool write_ram(Surface &s, unsigned endian) {
         NSError *e = nil;
         NSData *rgba = nil;
@@ -1357,6 +1462,16 @@ struct Exec {
         stats_writebacks++;
         return true;
     }
+    /* Which surfaces come to be drawn at the internal resolution, and by what (the first 16): a desktop should not be
+     * among them. */
+    void scaled(const Surface &s, unsigned before, const char *by) {
+        static unsigned shown;
+        if (s.target.scale != before && shown++ < 16)
+            NSLog(@"optics-frontend: colour target %#llx %ux%u is now drawn at x%g (%s)", (unsigned long long)s.gpu,
+                  s.width, s.height, s.target.scale * 0.5, by);
+    }
+    /* An AA resolve (RB3D_AARESOLVE_OFFSET/PITCH/CTL): the rectangle of the multisampled (or plain) target that the
+     * draw covers is resolved or copied into the resolve buffer. */
     int resolve(const OpticsDraw *d, Surface *surface, uint32_t W, const char **why) {
         NSError *e = nil;
         if (!apply_clear(*surface, d->color_clear, d->depth_clear_word, d->depth_clear_format))
@@ -1409,6 +1524,7 @@ struct Exec {
             return failhard(why, "fast clear", nil);
         uint32_t ctl = d->resolve_ctl;
         Surface *src = surface;
+        unsigned before = dst->target.scale;
         if (!retry(
                     [&] {
                         return owner.on([&] {
@@ -1435,6 +1551,7 @@ struct Exec {
                     },
                     &e))
             return failhard(why, "resolve copy", e);
+        scaled(*dst, before, "copied into from a 3D target");
         if (!touch(*dst))
             return failhard(why, "VRAM ownership", nil);
         invalidate(dst->start, dst->end);
@@ -1446,6 +1563,8 @@ struct Exec {
         return OPTICS_EXEC_DONE;
     }
     int draw(const OpticsDraw *d, const char **why);
+    /* The depth/stencil storage for a draw's ZB_DEPTHOFFSET: found (grown if the draw reaches further) or made, with
+     * its pending fast clear applied. */
     Depth *depth_for(const OpticsDraw *d, uint32_t W, uint32_t H, const char **why, int *code) {
         uint32_t pitch = optics_frontend_register(dev, 0x4f24) & 0x3ffc; /* ZB_DEPTHPITCH */
         static const int capacity = env("OPTICS_DEPTH_CAPACITY", 0) != 0;
@@ -1639,6 +1758,7 @@ struct Exec {
         }
         return true;
     }
+    /* Detaches a depth storage from every colour target that uses it. */
     void unbind(PtR2Depth *z) {
         for (auto &s : owned)
             if (s.bound == z) {
@@ -1761,6 +1881,7 @@ struct Exec {
         broken = false;
         return r;
     }
+    /* Drains the GPU work and logs the executor's totals; then the renderer goes. */
     void close() {
         owner.closeAdmission();
         owner.barrier();
@@ -1784,6 +1905,10 @@ struct Exec {
               [g[@"libraryAsyncMaxNS"] doubleValue] / 1e6, g[@"backpressure"], depths.size(),
               (unsigned long long)depth_drops, (unsigned long long)depth_reads_refused,
               (unsigned long long)clear_skips);
+        if (NSDictionary *breaks = g[@"passBreaks"]; breaks.count) /* OPTICS_PASS_REASONS=1: why render passes ended */
+            NSLog(@"optics-frontend: render passes ended by %@",
+                  [[breaks.description componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]
+                          componentsJoinedByString:@""]);
         NSLog(@"optics-frontend: full GPU VTE draws %llu", (unsigned long long)stats_vte2_draws);
         NSLog(@"optics-frontend: async shaders (budget %llu ms): %llu draws skipped while their shader compiled",
               (unsigned long long)(async_wait_ns() / 1000000u), (unsigned long long)stats_skipped);
@@ -1809,6 +1934,8 @@ struct Exec {
     }
 };
 
+/* One guest draw becomes one Metal draw: its colour target (owned or imported), depth, textures and shaders.
+ * OPTICS_EXEC_BUSY: its shader still compiles. */
 int Exec::draw(const OpticsDraw *d, const char **why) {
     @autoreleasepool {
         NSError *e = nil;
@@ -1823,6 +1950,10 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
         uint32_t W = d->width, H = d->height;
         uint64_t start;
         uint8_t cfmt = d->cb_format ? d->cb_format : 6; /* hand-built draws leave cb_format 0 */
+        if (cfmt == 10 && d->cb_fp16 && d->color_mask)
+            cfmt = COLOUR_FP16; /* a draw that writes no colour may carry another context's output format */
+        if (cfmt == 6 && d->cb_rgb10a2 && d->color_mask)
+            cfmt = COLOUR_RGB10A2;
         if (!W || !H || W > 8192 || H > 8192)
             return fail(why, "target size", nil);
         bool ram = !optics_frontend_vram_offset(dev, d->cb_offset, &start);
@@ -1837,7 +1968,9 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
             if (ram)
                 return nullptr;
             for (auto &s : owned)
-                if (s.gpu == d->cb_offset && s.width == W && s.fmt == cfmt && s.aa == aa && s.height >= H)
+                if (s.gpu == d->cb_offset && s.width == W && s.aa == aa && s.height >= H &&
+                    (s.fmt == cfmt || (cfmt == 10 && s.fmt == COLOUR_FP16 && !d->color_mask) ||
+                     (cfmt == 6 && s.fmt == COLOUR_RGB10A2 && !d->color_mask)))
                     return &s;
             return nullptr;
         };
@@ -1925,8 +2058,17 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
             if (!ram && !(surface = find()))
                 return failhard(why, "colour target lost to a depth transition", nil); /* owned may have moved */
             if (surface->bound != z->depth) {
-                if (!owner.on([&] { return [renderer target:surface->target depth:z->depth error:&e]; }))
+                /* The first binding enlarges the target (internal resolution): work in the batch, under its budget. */
+                Surface *s = surface;
+                unsigned before = s->target.scale;
+                if (!retry(
+                            [&] {
+                                return owner.on(
+                                        [&] { return [renderer target:s->target depth:z->depth error:&e]; });
+                            },
+                            &e))
                     return failhard(why, "depth binding", e);
+                scaled(*s, before, "depth bound");
                 surface->bound = z->depth;
             }
         }
@@ -2031,8 +2173,11 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
                                   t->select[2], t->select[3], (unsigned)s.gpu, s.width, s.height, d->cb_offset,
                                   d->blend, d->color_mask);
                         }
-                if (materialize(to, to + n, 0))
+                if (materialize(to, to + n, 0)) {
+                    NSLog(@"optics-frontend: texture %#x %ux%u (VRAM %#llx+%zu) over a GPU surface could not be exported; target %#x",
+                          t->offset, t->width, t->height, (unsigned long long)to, (size_t)n, d->cb_offset);
                     return failhard(why, "export of a sampled surface", nil);
+                }
                 if (!ram) {
                     surface = nullptr;
                     for (auto &s : owned)
@@ -2118,7 +2263,13 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
                         }
                     }
                 }
-                optics_texture_unswap(t, texels.data(), n);
+                /* TX_OFFSET's swap, like COLOR_ENDIAN, acts at the bus: on a texture in guest RAM only. In VRAM the GPU
+                 * reads its own native bytes - Leopard reads one FBO with swap 1 (glReadPixels, u200 #19, #24) and with
+                 * swap 0 (sampled, copied: #3, #8, #11, #32); both work only if VRAM is not swapped. [Inferred from the
+                 * drivers' register writes; Leopard uploads textures by 2D blits that swap at the bus.] */
+                uint64_t in_vram;
+                if (!optics_frontend_vram_offset(dev, t->offset, &in_vram))
+                    optics_texture_unswap(t, texels.data(), n);
                 { /* development, OPTICS_DXT_DUMP=1: raw DXT block bytes (to check a decode against the guest's data) */
                     static const int on = env("OPTICS_DXT_DUMP", 0) != 0;
                     static unsigned shown;
@@ -2442,10 +2593,14 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
          *    divide by w). Otherwise on the CPU (optics_draw_vertices) through an owned pass-through program. Both forms give
          *    Metal the same window depth (z in 0..1 of the target). */
         unsigned nv = d->varyings, ni = std::max(1u, d->pvs_inputs);
-        static const int full_vte = env("OPTICS_GPU_VTE", 0) != 0;
+        static const int full_vte = env("OPTICS_GPU_VTE", 1) != 0; /* on since 22.11 (owner: t936 pixel-equal, time within 3%) */
         /* Wide lines (GA_LINE_CNTL above one pixel): each segment becomes a quad on the CPU vertex stage, widened across
          * its minor axis by the width (GL's non-antialiased wide lines, the R300's END_TYPE 2), drawn as triangles. */
-        bool wide = d->lines && d->line_width > 1.5f;
+        /* On a target at the internal resolution every line of a guest pixel or more is such a quad: Metal's own lines
+         * are one texel wide there, thinner than the guest's. The quad is in guest pixels; the viewport scales it. */
+        unsigned scale = surface->target.scale;
+        bool wide = d->lines && (scale != PT_R2_SCALE_ONE ? pt_r2_scale_length(d->line_width, scale) >= 1.5f
+                                                           : d->line_width > 1.5f);
         std::vector<uint32_t> wide_index;
         const uint32_t *index = d->index;
         uint32_t nindex = d->indices, nvertex = d->vertices;
@@ -2505,6 +2660,8 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
                     memcpy(r.select[k], d->component[k], 4);
                 }
         r.generatedShift = (uint8_t)(d->stipple_shift[0] | d->stipple_shift[1] << 4);
+        if (r.generated && scale != PT_R2_SCALE_ONE)
+            r.generatedScale = (uint8_t)scale;
         std::vector<float> vb;
         bool rawFetch = false;
         const void *vertexData = nullptr;
@@ -2693,13 +2850,17 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
                     PtRadeon *wake = dev;
                     auto start = [&] {
                         return owner.on([&] {
+                            /* The block outlives this draw (it runs when Metal finishes compiling): it must hold the device
+                             * itself. A block captures a lambda's by-reference capture by reference - a stack slot that is
+                             * gone by then (Photo Booth's effects: SIGBUS in pt_event_signal). A local is captured by value. */
+                            PtRadeon *device = wake;
                             return [renderer startLibrariesForPVS:pvs
                                                   vertexInterface:&vi
                                                          fragment:d->us
                                                         interface:&d->fi
                                                             route:r
                                                              wake:^{
-                                                                 optics_frontend_wake(wake);
+                                                                 optics_frontend_wake(device);
                                                              }];
                         });
                     };
@@ -2833,8 +2994,11 @@ int Exec::draw(const OpticsDraw *d, const char **why) {
             return failhard(why, "draw", e);
         if (surface->bound && (d->depth_write || d->stencil_enable))
             for (auto &z : depths)
-                if (z.depth == surface->bound && z.linear_io && !depth_touch(z))
-                    return failhard(why, "depth ownership", nil);
+                if (z.depth == surface->bound) {
+                    if (z.linear_io && !depth_touch(z))
+                        return failhard(why, "depth ownership", nil);
+                    z.dirty = true; /* other layouts too: VRAM no longer holds it (export_depth) */
+                }
         if (!ram && !touch(*surface))
             return failhard(why, "VRAM ownership", nil);
         stats_draws++;
