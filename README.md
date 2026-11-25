@@ -18,9 +18,9 @@ If you miss your PowerBook G4 or the Power Mac under the desk, Ptolemy gives you
 
 - **Your own Mac OS X.** Make an image of your Tiger or Leopard install DVD, drop it onto Ptolemy's window, choose the
   disk size, and the installer runs as it did in 2005. Ptolemy does not include or download Apple software.
-- **Faster than the fastest real G4, mostly.** In Geekbench 2 one emulated G4 scores about 5000 and two of them about
-  6000; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220. Some floating-point
-  library code is only about as fast as on a real G4 (see [Known limitations](#known-limitations)).
+- **Faster than the fastest real G4, mostly.** In Geekbench 2 one emulated G4 scores up to about 5100 and two of
+  them about 6100; the fastest real G4, a Power Mac G4 with two 1.42 GHz processors, averages about 1220. vecLib's
+  FFT is only about as fast as on a real G4 (see [Known limitations](#known-limitations)).
 - **3D on the Mac's GPU.** Mac OS X's own ATI driver believes it talks to a Radeon 9700, so Quartz Extreme, Core Image
   and OpenGL games run on the Mac's GPU: Halo, Doom 3, Half-Life (Xash3D) and SimCity 4 among those we tried. Classic
   runs inside Tiger with a Mac OS 9.2.2 System Folder you bring (Age of Empires plays).
@@ -189,8 +189,8 @@ takes about 1 s of host CPU a minute more, OpenGL is about 5% lower. Two threads
 slower than on one processor: each hand-over crosses into the Mac. Tiger keeps one processor: its kernel wakes every
 processor 100 times a second, idle or not.
 
-The screenshot is the separate run behind the table's x CPU score: 1.76× with two processors. Its OpenGL score, 4684,
-is below the session's 5601; results on the Air vary from run to run.
+The screenshot is from beta 4, a separate run: 1.76× with two processors. Its OpenGL score, 4684, is below that
+session's 5601; results on the Air vary from run to run.
 
 ### Inside Mac OS X: Ptolemy Tools
 
@@ -264,7 +264,8 @@ Ptolemy takes the resulting `.cdr` file, as well as `.dmg` and `.iso` images.
 
 On a 13.6-inch MacBook Air with the M4 (10-core CPU and GPU, 24 GB), macOS 27, with Tiger 10.4.11 and Leopard 10.5 on
 the G4 7447A. Unreal Tournament 2004, Quake 3, Cro-Mag Rally, Office 2004 and the video were tried with this release;
-Leopard, Dual G4, Photo Booth, Cinebench, Geekbench and Xbench with beta 4; Classic and SimCity 4 with beta 3, Halo
+Cinebench, Geekbench and Xbench in Leopard with this release (the best of up to four runs each), in Tiger with
+beta 4; Leopard, Dual G4 and Photo Booth with beta 4; Classic and SimCity 4 with beta 3, Halo
 with beta 1, Doom 3 with a build of the same day as beta 1, the others with builds of the weeks before.
 
 | Software | Result |
@@ -277,9 +278,9 @@ with beta 1, Doom 3 with a build of the same day as beta 1, the others with buil
 | SimCity 4 | Starts from its disc image; tutorial cities render with their trees and buildings |
 | Fallout 2 | 640 × 480 in 256 colours |
 | Classic (Mac OS 9.2.2) | Starts in Tiger; Age of Empires plays |
-| Cinebench R10 | Tiger: CPU 3138, OpenGL about 5200. Leopard: CPU 3141, OpenGL 5696. Leopard on Dual G4: x CPU 5461 (1.76×) |
-| Geekbench 2.2 | Tiger 5084, Leopard 4943, Leopard on Dual G4 6067 (a real dual 1.42 GHz Power Mac G4 averages about 1220) |
-| Xbench 1.3 | Tiger: User Interface 294, OpenGL 212, vecLib FFT 66 |
+| Cinebench R10 | Tiger: CPU 3138, OpenGL about 5200. Leopard: CPU 3194, OpenGL 5520. Leopard on Dual G4: x CPU 5771 (1.80×) |
+| Geekbench 2.2 | Tiger 5084, Leopard 5111, Leopard on Dual G4 6097 (a real dual 1.42 GHz Power Mac G4 averages about 1220) |
+| Xbench 1.3 | Tiger: User Interface 294, OpenGL 212, vecLib FFT 66. Leopard: CPU 155.8, Floating Point Basic 97.5, vecLib FFT 73.4 |
 | Photo Booth (Leopard) | Sees the Mac's camera as a USB camera |
 | Unreal Tournament 2004 (Leopard) | ONS-Torlan at 1024 × 768: about 65 fps |
 | Quake 3 Arena (Classic) | Plays in Tiger; set `seta r_primitives "2"` in `q3config.cfg`, otherwise stray triangles cross the menu |
@@ -320,8 +321,8 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
   one. The first start takes about two minutes. As on real Macs, Classic has no 3D. Mac OS 9 itself does not start:
   the firmware cannot start a disk that Tiger marked for Mac OS 9.
 - **Files.** Files dropped onto the window arrive without resource forks, type and creator. One file can be up to 4 GB.
-- **Benchmarks.** Most code runs much faster than on a real G4, but some floating-point library code is only about
-  as fast: in Leopard, Xbench's vecLib FFT scores about 72, a 1.33 GHz iBook G4 about 71.
+- **Benchmarks.** Most code runs several times faster than on a real G4, vecLib's FFT only about as fast: in Leopard,
+  Xbench's vecLib FFT scores up to 73, a 1.33 GHz iBook G4 about 71.
 - **Dual G4.** Leopard only (Tiger wakes every processor 100 times a second, which costs a second processor its idle
   time). Threads that hand one lock back and forth are much slower than on one processor, and software that shares
   memory without the PowerPC's barriers can misbehave more often than on a real dual G4.
