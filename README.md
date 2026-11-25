@@ -41,9 +41,11 @@ Beta 5 is about graphics and the screen.
 - **Fewer first-use stutters.** Ptolemy keeps the shader programs it has prepared and compiles them again in the
   background at the next start; a set gathered from Tiger and Leopard comes with the app. In Unreal Tournament 2004
   the wait for shaders on ONS-Torlan fell from about 13 s to 0.3 s in the second session.
-- **More display modes, up to 4K.** A machine's settings choose the startup mode: the Mac's screen, or 4:3, 16:10
-  or 16:9 from 640 × 480 to 2560 × 1600. Displays in Mac OS X offers the modes up to that one, now with 3440 × 1440
-  and 3840 × 2160. Screens wider than 2048 pixels no longer keep stale pieces of earlier pictures.
+- **More display modes.** A machine's settings choose the startup mode: *Fit the Screen* (the Mac's screen), or 4:3,
+  16:10 or 16:9 from 640 × 480 to 2560 × 1600. Displays in Mac OS X offers the modes up to the startup one, now with
+  3440 × 1440 and 3840 × 2160 when *Fit the Screen* gives a screen that large (see
+  [Known limitations](#known-limitations)). Screens wider than 2048 pixels no longer keep stale pieces of earlier
+  pictures.
 - **H.264 on the Mac's decoder.** Ptolemy Tools add a QuickTime codec, Ptolemy Video, that hands H.264 to macOS:
   QuickTime Player plays 1080p at 30 frames a second without dropping frames.
 - **DrawSprocket games** such as Cro-Mag Rally start from the Ptolemy menu, *DrawSprocket Games*. Mac OS X's
@@ -304,6 +306,10 @@ Don’t drag Mac OS 9 files onto Ptolemy’s window: that copy loses their resou
 - **Graphics.** Every case of the OpenGL comparison test matches Apple's software renderer, but some details are
   approximate: edge flags in wireframe mode (every edge is drawn), the R300's 3- and 6-sample FSAA modes (drawn with
   4 samples) and its exact sample positions. See [docs/graphics.md](docs/graphics.md).
+- **Display modes.** 3440 × 1440 and 3840 × 2160 cannot be chosen in a machine's settings yet: Displays in Mac OS X
+  offers them only when *Fit the Screen* gives a screen at least that large, never on a MacBook's own display.
+- **Time Machine.** In Leopard it stops with "The built-in network interface could not be found": the emulated
+  Ethernet card is not marked as built-in. A fix is planned.
 - **Sleep.** Mac OS X cannot sleep in Ptolemy: Tiger stops, Leopard hangs. In Tiger, set Energy Saver to never put
   the computer to sleep; in Leopard, Ptolemy Tools keep the system from sleeping on its own.
 - **NVRAM.** Mac OS X's NVRAM is emulated as the Core99 flash it expects. The first start of a machine made with an
